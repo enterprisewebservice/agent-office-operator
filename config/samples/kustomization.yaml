@@ -1,0 +1,5 @@
+## Append samples of your project ##
+resources:
+- agentoffice_v1alpha1_memorymodule.yaml
+- agentoffice_v1alpha1_agentworkstation.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples
