@@ -1,0 +1,45 @@
+---
+# File-Based Catalog (FBC) declarative config for the Agent Office Operator.
+# This file is the manifest that opm serves to OLM via the CatalogSource CR.
+# It lists the package, its channels, and each bundle the catalog knows about.
+#
+# Slice 1 ships a single 0.0.1 bundle on the alpha channel. Future versions
+# add new `olm.bundle` entries and reference each other via `replaces` or
+# `skipRange`.
+
+schema: olm.package
+name: agent-office-operator
+defaultChannel: alpha
+description: |
+  OLM-managed operator for the Governed Agent Platform on OpenShift. Owns
+  the AgentWorkstation and MemoryModule CRDs and ships a ConsolePlugin
+  that adds Memory Module / Agent Workstation tabs to the operator CSV
+  detail page in OpenShift Console.
+
+---
+schema: olm.channel
+package: agent-office-operator
+name: alpha
+entries:
+  - name: agent-office-operator.v0.0.1
+
+---
+schema: olm.bundle
+name: agent-office-operator.v0.0.1
+package: agent-office-operator
+image: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-operator-bundle:v0.0.1
+properties:
+  - type: olm.gvk
+    value:
+      group: agentoffice.ai
+      kind: AgentWorkstation
+      version: v1alpha1
+  - type: olm.gvk
+    value:
+      group: agentoffice.ai
+      kind: MemoryModule
+      version: v1alpha1
+  - type: olm.package
+    value:
+      packageName: agent-office-operator
+      version: 0.0.1

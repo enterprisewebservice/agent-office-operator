@@ -1,0 +1,96 @@
+apiVersion: operators.coreos.com/v1alpha1
+kind: ClusterServiceVersion
+metadata:
+  annotations:
+    alm-examples: '[]'
+    capabilities: Basic Install
+    categories: AI/Machine Learning, Developer Tools
+    containerImage: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-operator:v0.0.1
+    description: OLM-managed operator for the Governed Agent Platform. Owns the AgentWorkstation
+      and MemoryModule CRDs and reconciles the per-agent runtime artifacts (Deployment,
+      Service, ConfigMap, PVC) on OpenShift.
+    repository: https://github.com/enterprisewebservice/agent-office-operator
+    support: Red Hat Solution Architecture
+  name: agent-office-operator.v0.0.0
+  namespace: placeholder
+spec:
+  apiservicedefinitions: {}
+  customresourcedefinitions:
+    owned:
+    - description: |-
+        AgentWorkstation is a single governed coding-agent instance — the cluster
+        representation of "one seat in the office". The operator owns its
+        Deployment, Service, ConfigMap, PVC, and Secret references.
+      displayName: Agent Workstation
+      kind: AgentWorkstation
+      name: agentworkstations.agentoffice.ai
+      version: v1alpha1
+    - description: |-
+        MemoryModule is shared .md content that one or more AgentWorkstations
+        pull into their per-agent rendered ConfigMap (AGENTS.md, USER.md,
+        SKILL_<name>.md, etc.). Single source of truth for cross-agent memory.
+      displayName: Memory Module
+      kind: MemoryModule
+      name: memorymodules.agentoffice.ai
+      version: v1alpha1
+  description: |
+    The Agent Office Operator manages governed coding agents on OpenShift.
+
+    It owns two CRDs in the `agentoffice.ai` API group:
+
+    - **AgentWorkstation** — one governed coding-agent instance. The
+      operator reconciles its Deployment, Service, ConfigMap, PVC, and
+      Secret references.
+    - **MemoryModule** — shared `.md` content (AGENTS.md, USER.md,
+      SKILL_*.md) referenced by one or more AgentWorkstations. The
+      operator computes a content hash and a referenced-by index so the
+      UI can show which agents share which memory.
+
+    The operator follows the AAIF (Agentic AI Foundation, Linux Foundation,
+    December 2025) cross-tool conventions for `AGENTS.md` and the Anthropic
+    Skills Open Standard for `SKILL_<name>.md` packaging.
+
+    The OpenShift Console gets a ConsolePlugin that adds Memory Module and
+    Agent Workstation tabs to the operator's CSV detail page.
+  displayName: Agent Office Operator
+  icon:
+  - base64data: ""
+    mediatype: ""
+  install:
+    spec:
+      deployments: null
+    strategy: ""
+  installModes:
+  - supported: true
+    type: OwnNamespace
+  - supported: true
+    type: SingleNamespace
+  - supported: false
+    type: MultiNamespace
+  - supported: true
+    type: AllNamespaces
+  keywords:
+  - agent
+  - ai
+  - openclaw
+  - aaif
+  - llm
+  - codex
+  - claude
+  - governed-agents
+  - sandboxd
+  links:
+  - name: GitHub
+    url: https://github.com/enterprisewebservice/agent-office-operator
+  - name: Memory Modules Library
+    url: https://github.com/enterprisewebservice/agent-office-memory-modules
+  - name: Agent Office UI
+    url: https://github.com/enterprisewebservice/agent-office
+  maintainers:
+  - email: deanpeterson@redhat.com
+    name: Dean Peterson
+  maturity: alpha
+  provider:
+    name: Red Hat Solution Architecture
+    url: https://github.com/enterprisewebservice
+  version: 0.0.0
