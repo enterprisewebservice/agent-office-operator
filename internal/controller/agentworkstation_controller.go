@@ -37,20 +37,24 @@ type AgentWorkstationReconciler struct {
 // +kubebuilder:rbac:groups=agentoffice.ai,resources=agentworkstations/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=agentoffice.ai,resources=agentworkstations/finalizers,verbs=update
 
-// Reconcile is part of the main kubernetes reconciliation loop which aims to
-// move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the AgentWorkstation object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
+// Reconcile is intentionally a no-op in slice 2.
 //
-// For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.21.0/pkg/reconcile
+// AgentWorkstation lifecycle is currently owned by agent-office-server
+// (see agent-office/backend/k8s/agents.go), which:
+//   - creates ConfigMap/Secret/PVC/Deployment/Service on UI request
+//   - watches AgentWorkstation events to maintain an in-memory cache for
+//     the office UI
+//   - patches status.phase / status.gatewayEndpoint after Deployment Ready
+//
+// Slice 3 will migrate that ownership into this controller — once the
+// operator owns the dependents, agent-office-server can drop its
+// pseudo-controller goroutine and become a pure read/proxy client of
+// the agent-office.ai API. The MemoryModule reconciler still works on
+// AgentWorkstations (read-only, via Watches) to maintain the
+// referencedBy index, so removing AgentWorkstation reconciliation from
+// here doesn't lose the slice-2 visibility.
 func (r *AgentWorkstationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	_ = logf.FromContext(ctx)
-
-	// TODO(user): your logic here
-
 	return ctrl.Result{}, nil
 }
 

@@ -312,6 +312,13 @@ bundle: manifests kustomize operator-sdk ## Generate bundle manifests and metada
 	$(KUSTOMIZE) build config/manifests | $(OPERATOR_SDK) generate bundle $(BUNDLE_GEN_FLAGS)
 	$(OPERATOR_SDK) bundle validate ./bundle
 
+.PHONY: catalog-fbc
+catalog-fbc: bundle opm ## Regenerate the FBC catalog.yaml from the bundle.
+	@echo "Rendering bundle/ -> catalog/agent-office-operator/catalog.yaml"
+	@printf -- "---\n# File-Based Catalog (FBC) declarative config for the Agent Office Operator.\n#\n# Regenerate with \`make catalog-fbc\` after \`make bundle\`. The bundle\n# block below is rendered by \`opm render bundle/\` so all CSV / CRD\n# content is inlined as olm.bundle.object properties — that's what\n# package-server needs to extract channel/displayName/etc. without\n# pulling the bundle image at list time.\n\nschema: olm.package\nname: agent-office-operator\ndefaultChannel: alpha\ndescription: |\n  OLM-managed operator for the Governed Agent Platform on OpenShift. Owns\n  the AgentWorkstation and MemoryModule CRDs and ships a ConsolePlugin\n  that adds Memory Module / Agent Workstation tabs to the operator CSV\n  detail page in OpenShift Console.\n\n---\nschema: olm.channel\npackage: agent-office-operator\nname: alpha\nentries:\n  - name: agent-office-operator.v$(VERSION)\n\n---\n" > catalog/agent-office-operator/catalog.yaml
+	@$(OPM) render bundle/ --output=yaml | sed 's|image: ""|image: $(BUNDLE_IMG)|' >> catalog/agent-office-operator/catalog.yaml
+	@$(OPM) validate catalog/
+
 .PHONY: bundle-build
 bundle-build: ## Build the bundle image.
 	$(CONTAINER_TOOL) build -f bundle.Dockerfile -t $(BUNDLE_IMG) .
