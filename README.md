@@ -1,135 +1,48 @@
-# agent-office-operator
-// TODO(user): Add simple overview of use/purpose
+# Agent Office Operator
 
-## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+OLM-managed OpenShift operator for the **Governed Agent Platform**.
 
-## Getting Started
+Owns two CRDs in the `agentoffice.ai` API group:
 
-### Prerequisites
-- go version v1.24.0+
-- docker version 17.03+.
-- kubectl version v1.11.3+.
-- Access to a Kubernetes v1.11.3+ cluster.
+- **`AgentWorkstation`** (`aw`) — one governed coding-agent instance. The
+  operator reconciles its Deployment, Service, ConfigMap, PVC, and Secret
+  references.
+- **`MemoryModule`** (`mm`) — shared `.md` content (AGENTS.md, USER.md,
+  SKILL_*.md) referenced by one or more AgentWorkstations. The operator
+  computes a content hash and a referenced-by index so the UI can show
+  which agents share which memory.
 
-### To Deploy on the cluster
-**Build and push your image to the location specified by `IMG`:**
+## Architecture
 
-```sh
-make docker-build docker-push IMG=<some-registry>/agent-office-operator:tag
-```
+The operator follows the AAIF (Agentic AI Foundation, Linux Foundation,
+December 2025) cross-tool conventions for `AGENTS.md` and the Anthropic
+Skills Open Standard for `SKILL_<name>.md` packaging.
 
-**NOTE:** This image ought to be published in the personal registry you specified.
-And it is required to have access to pull the image from the working environment.
-Make sure you have the proper permission to the registry if the above commands don’t work.
+It ships a **ConsolePlugin** that adds Memory Module and Agent Workstation
+tabs to the operator's CSV detail page in the OpenShift Console.
 
-**Install the CRDs into the cluster:**
+## Build pipeline
 
-```sh
-make install
-```
+Three Tekton PipelineRuns in `.tekton/`, all triggered by Pipelines-as-Code
+on push to `main`:
 
-**Deploy the Manager to the cluster with the image specified by `IMG`:**
+| Pipeline | Output |
+|---|---|
+| `operator-image-on-push.yaml` | `quay.../agent-office-operator:v0.0.1` |
+| `operator-bundle-on-push.yaml` | `quay.../agent-office-operator-bundle:v0.0.1` |
+| `operator-catalog-on-push.yaml` | `quay.../agent-office-operator-catalog:v0.0.1` |
 
-```sh
-make deploy IMG=<some-registry>/agent-office-operator:tag
-```
+OLM's `registryPoll` on the `CatalogSource` detects digest changes behind
+the stable tags every 5 minutes, so the tile in **Ecosystem Software
+Catalog** auto-updates without ArgoCD Image Updater wiring.
 
-> **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
-privileges or be logged in as admin.
+## Related repos
 
-**Create instances of your solution**
-You can apply the samples (examples) from the config/sample:
-
-```sh
-kubectl apply -k config/samples/
-```
-
->**NOTE**: Ensure that the samples has default values to test it out.
-
-### To Uninstall
-**Delete the instances (CRs) from the cluster:**
-
-```sh
-kubectl delete -k config/samples/
-```
-
-**Delete the APIs(CRDs) from the cluster:**
-
-```sh
-make uninstall
-```
-
-**UnDeploy the controller from the cluster:**
-
-```sh
-make undeploy
-```
-
-## Project Distribution
-
-Following the options to release and provide this solution to the users.
-
-### By providing a bundle with all YAML files
-
-1. Build the installer for the image built and published in the registry:
-
-```sh
-make build-installer IMG=<some-registry>/agent-office-operator:tag
-```
-
-**NOTE:** The makefile target mentioned above generates an 'install.yaml'
-file in the dist directory. This file contains all the resources built
-with Kustomize, which are necessary to install this project without its
-dependencies.
-
-2. Using the installer
-
-Users can just run 'kubectl apply -f <URL for YAML BUNDLE>' to install
-the project, i.e.:
-
-```sh
-kubectl apply -f https://raw.githubusercontent.com/<org>/agent-office-operator/<tag or branch>/dist/install.yaml
-```
-
-### By providing a Helm Chart
-
-1. Build the chart using the optional helm plugin
-
-```sh
-operator-sdk edit --plugins=helm/v1-alpha
-```
-
-2. See that a chart was generated under 'dist/chart', and users
-can obtain this solution from there.
-
-**NOTE:** If you change the project, you need to update the Helm Chart
-using the same command above to sync the latest changes. Furthermore,
-if you create webhooks, you need to use the above command with
-the '--force' flag and manually ensure that any custom configuration
-previously added to 'dist/chart/values.yaml' or 'dist/chart/manager/manager.yaml'
-is manually re-applied afterwards.
-
-## Contributing
-// TODO(user): Add detailed information on how you would like others to contribute to this project
-
-**NOTE:** Run `make help` for more information on all potential `make` targets
-
-More information can be found via the [Kubebuilder Documentation](https://book.kubebuilder.io/introduction.html)
+- [`agent-office`](https://github.com/enterprisewebservice/agent-office) —
+  the office UI (Map / Discord / WebRTC) and (legacy) Go backend.
+- [`agent-office-memory-modules`](https://github.com/enterprisewebservice/agent-office-memory-modules) —
+  shared `.md` content for the `MemoryModule` CRs the operator manages.
 
 ## License
 
-Copyright 2026.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-
+Apache 2.0.
