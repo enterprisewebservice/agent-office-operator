@@ -21,6 +21,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"strings"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -30,6 +31,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -178,6 +180,23 @@ func main() {
 		})
 	}
 
+	// Watch namespace scoping. OLM passes spec.targetNamespaces as a
+	// comma-separated WATCH_NAMESPACE env var (the OperatorGroup
+	// downward-API contract). Empty = AllNamespaces. We honour both
+	// modes so this binary works whether installed via OLM with
+	// SingleNamespace install mode (the platform's default) or run
+	// out-of-cluster against a dev kubeconfig.
+	defaultNamespaces := map[string]cache.Config{}
+	if watchNamespace, ok := os.LookupEnv("WATCH_NAMESPACE"); ok && watchNamespace != "" {
+		for _, ns := range strings.Split(watchNamespace, ",") {
+			ns = strings.TrimSpace(ns)
+			if ns != "" {
+				defaultNamespaces[ns] = cache.Config{}
+			}
+		}
+		setupLog.Info("scoping watch to namespaces", "namespaces", defaultNamespaces)
+	}
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
@@ -185,6 +204,9 @@ func main() {
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "80a9df54.ai",
+		Cache: cache.Options{
+			DefaultNamespaces: defaultNamespaces,
+		},
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the
 		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly

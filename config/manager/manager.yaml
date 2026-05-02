@@ -57,6 +57,11 @@ spec:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
+      # Cluster Quay is private; OLM doesn't propagate the global pull
+      # secret. The catalog-side workaround pre-creates the SA in
+      # cluster GitOps (see agent-office cluster/operator/).
+      imagePullSecrets:
+        - name: quay-pull-secret
       containers:
       - command:
         - /manager
@@ -65,6 +70,17 @@ spec:
           - --health-probe-bind-address=:8081
         image: controller:latest
         name: manager
+        # OLM downward-API: the OperatorGroup spec.targetNamespaces gets
+        # rendered into the CSV's metadata.annotations[olm.targetNamespaces]
+        # — main.go reads WATCH_NAMESPACE from this and scopes the
+        # controller cache to those namespaces, so a SingleNamespace
+        # install only watches one namespace and we don't need
+        # cluster-scoped list/watch grants.
+        env:
+          - name: WATCH_NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.annotations['olm.targetNamespaces']
         ports: []
         securityContext:
           allowPrivilegeEscalation: false
