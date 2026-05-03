@@ -104,7 +104,16 @@ const MemoryModulesPage: React.FC = () => {
                 '',
               )}.md`;
               return (
-                <Card key={m.metadata?.uid} isCompact>
+                // isFullHeight makes every card in the row equal height;
+                // CardBody is a flex column so the action row can be
+                // pushed to the bottom with marginTop:auto. Result:
+                // buttons line up across cards regardless of content.
+                <Card
+                  key={m.metadata?.uid}
+                  isCompact
+                  isFullHeight
+                  style={{ display: 'flex', flexDirection: 'column' }}
+                >
                   <CardHeader>
                     <CardTitle>
                       <Flex>
@@ -119,38 +128,42 @@ const MemoryModulesPage: React.FC = () => {
                       </Flex>
                     </CardTitle>
                   </CardHeader>
-                  <CardBody>
-                    <p style={{ marginBottom: 8 }}>
-                      <strong>kind:</strong> <code>{m.spec?.kind}</code> &nbsp;
-                      <strong>filename:</strong> <code>{m.spec?.filename}</code>
-                    </p>
-                    {m.spec?.description && (
-                      <p style={{ marginBottom: 8, color: 'var(--pf-v5-global--Color--200)' }}>
-                        {m.spec.description}
+                  <CardBody style={{ display: 'flex', flexDirection: 'column', flex: 1 }}>
+                    <div>
+                      <p style={{ marginBottom: 8 }}>
+                        <strong>kind:</strong> <code>{m.spec?.kind}</code> &nbsp;
+                        <strong>filename:</strong> <code>{m.spec?.filename}</code>
                       </p>
-                    )}
-                    <p style={{ marginBottom: 8, fontSize: 12, fontFamily: 'monospace' }}>
-                      sha256: {sha ? sha.slice(0, 16) + '…' : '—'}
-                    </p>
-                    {sharedWith.length > 0 && (
-                      <LabelGroup categoryName="Identical to">
-                        {sharedWith.map((name) => (
-                          <Label key={name} color="blue">
-                            {name}
-                          </Label>
-                        ))}
-                      </LabelGroup>
-                    )}
-                    {refs.length > 0 && (
-                      <LabelGroup categoryName="Used by agents" style={{ marginTop: 8 }}>
-                        {refs.map((name) => (
-                          <Label key={name} color="purple">
-                            {name}
-                          </Label>
-                        ))}
-                      </LabelGroup>
-                    )}
-                    <div style={{ marginTop: 12 }}>
+                      {m.spec?.description && (
+                        <p style={{ marginBottom: 8, color: 'var(--pf-v5-global--Color--200)' }}>
+                          {m.spec.description}
+                        </p>
+                      )}
+                      <p style={{ marginBottom: 8, fontSize: 12, fontFamily: 'monospace' }}>
+                        sha256: {sha ? sha.slice(0, 16) + '…' : '—'}
+                      </p>
+                      {sharedWith.length > 0 && (
+                        <LabelGroup categoryName="Identical to">
+                          {sharedWith.map((name) => (
+                            <Label key={name} color="blue">
+                              {name}
+                            </Label>
+                          ))}
+                        </LabelGroup>
+                      )}
+                      {refs.length > 0 && (
+                        <LabelGroup categoryName="Used by agents" style={{ marginTop: 8 }}>
+                          {refs.map((name) => (
+                            <Label key={name} color="purple">
+                              {name}
+                            </Label>
+                          ))}
+                        </LabelGroup>
+                      )}
+                    </div>
+                    {/* marginTop:auto pushes this row to the bottom of
+                        the flex column. */}
+                    <div style={{ marginTop: 'auto', paddingTop: 16 }}>
                       <Button
                         component="a"
                         href={devSpacesUrl(modulePath)}

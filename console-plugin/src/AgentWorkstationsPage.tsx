@@ -91,7 +91,15 @@ const AgentWorkstationsPage: React.FC = () => {
               const memoryRefs = a.spec?.memory?.modules ?? [];
               const tools = a.spec?.tools?.allow ?? [];
               return (
-                <Card key={a.metadata?.uid} isCompact>
+                // isFullHeight + flex-column body so the action row
+                // pushes to the bottom regardless of content length —
+                // every card's buttons line up at the same Y.
+                <Card
+                  key={a.metadata?.uid}
+                  isCompact
+                  isFullHeight
+                  style={{ display: 'flex', flexDirection: 'column' }}
+                >
                   <CardHeader>
                     <CardTitle>
                       <Flex>
@@ -107,34 +115,49 @@ const AgentWorkstationsPage: React.FC = () => {
                       </Flex>
                     </CardTitle>
                   </CardHeader>
-                  <CardBody>
-                    {a.spec?.description && (
-                      <p style={{ marginBottom: 8, color: 'var(--pf-v5-global--Color--200)' }}>
-                        {a.spec.description}
-                      </p>
-                    )}
-                    <p style={{ marginBottom: 4, fontSize: 13 }}>
-                      <strong>provider:</strong> {a.spec?.model?.provider} &nbsp;
-                      <strong>model:</strong> {a.spec?.model?.modelName ?? 'auto'}
-                    </p>
-                    {tools.length > 0 && (
+                  <CardBody style={{ display: 'flex', flexDirection: 'column', flex: 1 }}>
+                    <div>
+                      {a.spec?.description && (
+                        <p style={{ marginBottom: 8, color: 'var(--pf-v5-global--Color--200)' }}>
+                          {a.spec.description}
+                        </p>
+                      )}
                       <p style={{ marginBottom: 4, fontSize: 13 }}>
-                        <strong>tools:</strong> {tools.slice(0, 3).join(', ')}
-                        {tools.length > 3 ? ` +${tools.length - 3}` : ''}
+                        <strong>provider:</strong> {a.spec?.model?.provider} &nbsp;
+                        <strong>model:</strong> {a.spec?.model?.modelName ?? 'auto'}
                       </p>
-                    )}
-                    {memoryRefs.length > 0 && (
-                      <p style={{ marginBottom: 4, fontSize: 13 }}>
-                        <strong>memory:</strong>{' '}
-                        {memoryRefs.map((m) => (
-                          <Label key={m.name} color="purple" style={{ marginRight: 4 }}>
-                            {m.name}
-                          </Label>
-                        ))}
-                      </p>
-                    )}
-                    {a.status?.gatewayEndpoint && (
-                      <div style={{ marginTop: 12 }}>
+                      {tools.length > 0 && (
+                        <p style={{ marginBottom: 4, fontSize: 13 }}>
+                          <strong>tools:</strong> {tools.slice(0, 3).join(', ')}
+                          {tools.length > 3 ? ` +${tools.length - 3}` : ''}
+                        </p>
+                      )}
+                      {memoryRefs.length > 0 && (
+                        <p style={{ marginBottom: 4, fontSize: 13 }}>
+                          <strong>memory:</strong>{' '}
+                          {memoryRefs.map((m) => (
+                            <Label key={m.name} color="purple" style={{ marginRight: 4 }}>
+                              {m.name}
+                            </Label>
+                          ))}
+                        </p>
+                      )}
+                    </div>
+                    {/* Bottom action row pinned to card bottom by
+                        marginTop:auto. Buttons stack vertically (the
+                        full labels won't fit side-by-side in a
+                        ~330px card) but `gap: 8` keeps them from
+                        touching. */}
+                    <div
+                      style={{
+                        marginTop: 'auto',
+                        paddingTop: 16,
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 8,
+                      }}
+                    >
+                      {a.status?.gatewayEndpoint && (
                         <Button
                           component="a"
                           href={a.status.gatewayEndpoint}
@@ -144,18 +167,17 @@ const AgentWorkstationsPage: React.FC = () => {
                         >
                           Open agent gateway
                         </Button>
-                        <Button
-                          component="a"
-                          href={devSpacesUrl(a.metadata?.name ?? '')}
-                          target="_blank"
-                          variant="secondary"
-                          icon={<ExternalLinkAltIcon />}
-                          style={{ marginLeft: 8 }}
-                        >
-                          Edit in Dev Spaces
-                        </Button>
-                      </div>
-                    )}
+                      )}
+                      <Button
+                        component="a"
+                        href={devSpacesUrl(a.metadata?.name ?? '')}
+                        target="_blank"
+                        variant="secondary"
+                        icon={<ExternalLinkAltIcon />}
+                      >
+                        Edit in Dev Spaces
+                      </Button>
+                    </div>
                   </CardBody>
                 </Card>
               );
