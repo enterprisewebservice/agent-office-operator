@@ -279,7 +279,6 @@ func (r *AgentWorkstationReconciler) reconcileDeployment(ctx context.Context, aw
 	}
 
 	replicas := int32(1)
-	fsGroup := int64(1000)
 	dshmSize := resource.MustParse("1Gi")
 	labels := agentLabels(aw.Name)
 
@@ -296,7 +295,12 @@ func (r *AgentWorkstationReconciler) reconcileDeployment(ctx context.Context, aw
 		dep.Spec.Template = corev1.PodTemplateSpec{
 			ObjectMeta: metav1.ObjectMeta{Labels: labels},
 			Spec: corev1.PodSpec{
-				SecurityContext: &corev1.PodSecurityContext{FSGroup: &fsGroup},
+				// Don't pin fsGroup — OpenShift's restricted-v2 SCC
+				// allocates one from the namespace's allowed range.
+				// Hardcoding 1000 fails admission with
+				// "fsGroup: Invalid value: [1000]: 1000 is not an
+				// allowed group". The PVC volume gets the SA's
+				// allocated GID automatically.
 				InitContainers: []corev1.Container{{
 					Name:  "init-config",
 					Image: "registry.access.redhat.com/ubi9/ubi-minimal:latest",
