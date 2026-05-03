@@ -44,14 +44,20 @@ func deployName(awName string) string  { return "agent-" + awName }
 func serviceName(awName string) string { return "agent-" + awName }
 func routeName(awName string) string   { return "agent-" + awName }
 
-// agentLabels are stamped onto every owned resource so the existing
-// label selectors (used by agent-office-server's watcher cache and the
-// office UI) keep working.
+// agentLabels are stamped onto every owned resource. The set MUST
+// match the existing label set on the cluster (see the 5 pre-slice-4
+// agents) because Deployment.spec.selector is immutable — changing
+// even one label here breaks adoption with "field is immutable".
+//
+// managed-by stays "agent-office" (not "agent-office-operator") for
+// compatibility with the office UI's selectors and Backstage's
+// kubernetes-id linking.
 func agentLabels(name string) map[string]string {
 	return map[string]string{
-		"app.kubernetes.io/managed-by": "agent-office-operator",
+		"app.kubernetes.io/managed-by": "agent-office",
 		"app.kubernetes.io/name":       name,
 		"agentoffice.ai/agent":         name,
+		"backstage.io/kubernetes-id":   name,
 	}
 }
 

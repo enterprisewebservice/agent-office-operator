@@ -1,0 +1,64 @@
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  name: agent-office-plugin-on-push
+  namespace: default-tenant
+  annotations:
+    pipelinesascode.tekton.dev/on-cel-expression: 'event == "push" && target_branch == "main" && body.head_commit.author.email != "noreply@argoproj.io"'
+    pipelinesascode.tekton.dev/cancel-in-progress: "false"
+    pipelinesascode.tekton.dev/max-keep-runs: "5"
+    build.appstudio.openshift.io/repo: 'https://github.com/enterprisewebservice/agent-office-operator?rev={{revision}}'
+    build.appstudio.redhat.com/commit_sha: '{{revision}}'
+    build.appstudio.redhat.com/target_branch: '{{target_branch}}'
+  labels:
+    appstudio.openshift.io/application: agent-office-operator
+    appstudio.openshift.io/component: console-plugin
+    pipelines.appstudio.openshift.io/type: build
+spec:
+  params:
+    - name: git-url
+      value: '{{source_url}}'
+    - name: revision
+      value: '{{revision}}'
+    - name: output-image
+      value: 'quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-plugin:v0.0.1'
+    - name: dockerfile
+      value: console-plugin/Dockerfile
+    - name: path-context
+      value: console-plugin
+    - name: rebuild
+      value: "true"
+    - name: skip-checks
+      value: "true"
+  pipelineRef:
+    resolver: bundles
+    params:
+      - name: bundle
+        value: 'quay.io/konflux-ci/tekton-catalog/pipeline-docker-build@sha256:1b2a544f5308a50b8ebf76e76f10f8be3e12342d6ce7233d2520aca724294a82'
+      - name: name
+        value: docker-build
+      - name: kind
+        value: pipeline
+  taskRunSpecs:
+    - pipelineTaskName: build-container
+      stepSpecs:
+        - name: build
+          computeResources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+  workspaces:
+    - name: workspace
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 1Gi
+    - name: git-auth
+      secret:
+        secretName: '{{ git_auth_secret }}'

@@ -1,0 +1,76 @@
+[
+  {
+    "type": "console.navigation/section",
+    "properties": {
+      "id": "agent-office",
+      "name": "Agent Office",
+      "insertBefore": "user-management"
+    }
+  },
+  {
+    "type": "console.navigation/href",
+    "properties": {
+      "id": "agent-office-memory-modules",
+      "section": "agent-office",
+      "name": "Memory Modules",
+      "href": "/agent-office/memory-modules",
+      "perspective": "admin"
+    }
+  },
+  {
+    "type": "console.navigation/href",
+    "properties": {
+      "id": "agent-office-agent-workstations",
+      "section": "agent-office",
+      "name": "Agent Workstations",
+      "href": "/agent-office/agent-workstations",
+      "perspective": "admin"
+    }
+  },
+  {
+    "type": "console.page/route",
+    "properties": {
+      "exact": true,
+      "path": "/agent-office/memory-modules",
+      "component": { "$codeRef": "MemoryModulesPage.default" }
+    }
+  },
+  {
+    "type": "console.page/route",
+    "properties": {
+      "exact": true,
+      "path": "/agent-office/agent-workstations",
+      "component": { "$codeRef": "AgentWorkstationsPage.default" }
+    }
+  },
+  {
+    "type": "console.tab/horizontalNav",
+    "properties": {
+      "page": {
+        "name": "Memory Modules",
+        "href": "memory-modules"
+      },
+      "model": {
+        "group": "operators.coreos.com",
+        "version": "v1alpha1",
+        "kind": "ClusterServiceVersion"
+      },
+      "component": { "$codeRef": "MemoryModulesPage.default" }
+    }
+  },
+  {
+    "type": "console.tab/horizontalNav",
+    "properties": {
+      "page": {
+        "name": "Agent Workstations",
+        "href": "agent-workstations"
+      },
+      "model": {
+        "group": "operators.coreos.com",
+        "version": "v1alpha1",
+        "kind": "ClusterServiceVersion"
+      },
+      "component": { "$codeRef": "AgentWorkstationsPage.default" }
+    }
+  }
+]
