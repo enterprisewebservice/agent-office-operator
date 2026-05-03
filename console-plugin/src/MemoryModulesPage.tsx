@@ -8,7 +8,10 @@ import {
 // from `@patternfly/react-core` directly returns null (Console only
 // pre-shares the dynamic subpath versions), causing React error #306
 // "Element type is invalid".
-import { Page, PageSection } from '@patternfly/react-core/dist/dynamic/components/Page';
+// Console hosts plugin pages inside its own <Page> chrome. Wrapping
+// our content in another Page yielded a null element render → React
+// error #306. Use PageSection (and only PageSection) at the root.
+import { PageSection } from '@patternfly/react-core/dist/dynamic/components/Page';
 import { Title } from '@patternfly/react-core/dist/dynamic/components/Title';
 import { Card, CardBody, CardHeader, CardTitle } from '@patternfly/react-core/dist/dynamic/components/Card';
 import { Label, LabelGroup } from '@patternfly/react-core/dist/dynamic/components/Label';
@@ -64,7 +67,7 @@ const MemoryModulesPage: React.FC = () => {
     )}`;
 
   return (
-    <Page>
+    <>
       <PageSection variant="light">
         <Title headingLevel="h1">Memory Modules</Title>
         <p style={{ marginTop: 8, color: 'var(--pf-v5-global--Color--200)' }}>
@@ -169,7 +172,7 @@ const MemoryModulesPage: React.FC = () => {
           </Gallery>
         )}
       </PageSection>
-    </Page>
+    </>
   );
 };
 

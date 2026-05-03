@@ -4,7 +4,9 @@ import {
   useK8sWatchResource,
 } from '@openshift-console/dynamic-plugin-sdk';
 // See MemoryModulesPage.tsx for why these are subpath imports.
-import { Page, PageSection } from '@patternfly/react-core/dist/dynamic/components/Page';
+// See MemoryModulesPage.tsx — drop the <Page> wrapper, Console
+// already provides one. Wrapping inside another Page → React #306.
+import { PageSection } from '@patternfly/react-core/dist/dynamic/components/Page';
 import { Title } from '@patternfly/react-core/dist/dynamic/components/Title';
 import { Card, CardBody, CardHeader, CardTitle } from '@patternfly/react-core/dist/dynamic/components/Card';
 import { Label } from '@patternfly/react-core/dist/dynamic/components/Label';
@@ -62,7 +64,7 @@ const AgentWorkstationsPage: React.FC = () => {
     `https://devspaces.apps.salamander.aimlworkbench.com/#https://github.com/enterprisewebservice/${name}-agent`;
 
   return (
-    <Page>
+    <>
       <PageSection variant="light">
         <Title headingLevel="h1">Agent Workstations</Title>
         <p style={{ marginTop: 8, color: 'var(--pf-v5-global--Color--200)' }}>
@@ -163,7 +165,7 @@ const AgentWorkstationsPage: React.FC = () => {
           </Gallery>
         )}
       </PageSection>
-    </Page>
+    </>
   );
 };
 
