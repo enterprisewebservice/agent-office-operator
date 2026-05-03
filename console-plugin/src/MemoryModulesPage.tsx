@@ -4,13 +4,9 @@ import {
   useK8sWatchResource,
 } from '@openshift-console/dynamic-plugin-sdk';
 // PatternFly imports MUST use the /dist/dynamic/ subpaths so they
-// resolve from Console's shared module scope at runtime. Importing
-// from `@patternfly/react-core` directly returns null (Console only
-// pre-shares the dynamic subpath versions), causing React error #306
-// "Element type is invalid".
-// Console hosts plugin pages inside its own <Page> chrome. Wrapping
-// our content in another Page yielded a null element render → React
-// error #306. Use PageSection (and only PageSection) at the root.
+// resolve from Console's shared module scope at runtime. Console
+// already wraps plugin pages in its own <Page> chrome — only import
+// PageSection here.
 import { PageSection } from '@patternfly/react-core/dist/dynamic/components/Page';
 import { Title } from '@patternfly/react-core/dist/dynamic/components/Title';
 import { Card, CardBody, CardHeader, CardTitle } from '@patternfly/react-core/dist/dynamic/components/Card';

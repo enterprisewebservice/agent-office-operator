@@ -26,11 +26,12 @@ const config: Configuration = {
       },
     ],
   },
+  // ConsoleRemotePlugin wires React + react-dom + the dynamic-plugin-sdk
+  // as shared singletons via module federation. DO NOT add externals
+  // here — they override the plugin's federation config and the
+  // bundle ends up referencing a non-existent `react` global, which
+  // throws "react is not defined" → React #306 inside Console.
   plugins: [new ConsoleRemotePlugin()],
-  externals: {
-    react: 'react',
-    'react-dom': 'react-dom',
-  },
 };
 
 export default config;

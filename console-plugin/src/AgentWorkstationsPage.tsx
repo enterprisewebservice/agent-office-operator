@@ -3,9 +3,7 @@ import {
   K8sResourceCommon,
   useK8sWatchResource,
 } from '@openshift-console/dynamic-plugin-sdk';
-// See MemoryModulesPage.tsx for why these are subpath imports.
-// See MemoryModulesPage.tsx — drop the <Page> wrapper, Console
-// already provides one. Wrapping inside another Page → React #306.
+// Console wraps plugin pages in its own <Page> — only PageSection here.
 import { PageSection } from '@patternfly/react-core/dist/dynamic/components/Page';
 import { Title } from '@patternfly/react-core/dist/dynamic/components/Title';
 import { Card, CardBody, CardHeader, CardTitle } from '@patternfly/react-core/dist/dynamic/components/Card';
