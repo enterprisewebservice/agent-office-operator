@@ -3,25 +3,18 @@ import {
   K8sResourceCommon,
   useK8sWatchResource,
 } from '@openshift-console/dynamic-plugin-sdk';
-import {
-  Page,
-  PageSection,
-  Title,
-  Card,
-  CardBody,
-  CardHeader,
-  CardTitle,
-  Gallery,
-  Label,
-  Spinner,
-  EmptyState,
-  EmptyStateBody,
-  Bullseye,
-  Flex,
-  FlexItem,
-  Button,
-} from '@patternfly/react-core';
-import { ExternalLinkAltIcon } from '@patternfly/react-icons';
+// See MemoryModulesPage.tsx for why these are subpath imports.
+import { Page, PageSection } from '@patternfly/react-core/dist/dynamic/components/Page';
+import { Title } from '@patternfly/react-core/dist/dynamic/components/Title';
+import { Card, CardBody, CardHeader, CardTitle } from '@patternfly/react-core/dist/dynamic/components/Card';
+import { Label } from '@patternfly/react-core/dist/dynamic/components/Label';
+import { Spinner } from '@patternfly/react-core/dist/dynamic/components/Spinner';
+import { EmptyState, EmptyStateBody } from '@patternfly/react-core/dist/dynamic/components/EmptyState';
+import { Button } from '@patternfly/react-core/dist/dynamic/components/Button';
+import { Bullseye } from '@patternfly/react-core/dist/dynamic/layouts/Bullseye';
+import { Flex, FlexItem } from '@patternfly/react-core/dist/dynamic/layouts/Flex';
+import { Gallery } from '@patternfly/react-core/dist/dynamic/layouts/Gallery';
+import ExternalLinkAltIcon from '@patternfly/react-icons/dist/dynamic/icons/external-link-alt-icon';
 
 type AgentWorkstation = K8sResourceCommon & {
   spec?: {
