@@ -8,9 +8,16 @@ rules:
   - ""
   resources:
   - configmaps
+  - persistentvolumeclaims
+  - secrets
+  - services
   verbs:
+  - create
+  - delete
   - get
   - list
+  - patch
+  - update
   - watch
 - apiGroups:
   - agentoffice.ai
@@ -46,14 +53,22 @@ rules:
   resources:
   - deployments
   verbs:
+  - create
+  - delete
   - get
   - list
+  - patch
+  - update
   - watch
 - apiGroups:
   - route.openshift.io
   resources:
   - routes
   verbs:
+  - create
+  - delete
   - get
   - list
+  - patch
+  - update
   - watch

@@ -1,0 +1,31 @@
+{
+  "gateway": {
+    "port": 18789,
+    "host": "0.0.0.0",
+    "auth": {
+      "token": "{{.GatewayToken}}"
+    }
+  },
+  "models": {
+    "providers": {
+      "{{.ProviderName}}": {
+        "baseUrl": "{{.BaseURL}}",
+        "api": "openai-completions",
+        "apiKey": "{{.APIKeyRef}}",
+        "models": [{{range $i, $m := .Models}}{{if $i}},{{end}}{"id": "{{$m.ID}}", "name": "{{$m.Name}}"}{{end}}]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "{{.DefaultModel}}"
+      }
+    }
+  },
+  "tools": {
+    "browser": {
+      "enabled": true
+    }
+  }
+}
