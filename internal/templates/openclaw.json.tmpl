@@ -1,11 +1,15 @@
 {
+  "browser": {
+    "enabled": true,
+    "defaultProfile": "openclaw"
+  },
   "gateway": {
     "port": 18789,
     "auth": {
       "token": "{{.GatewayToken}}"
     },
     "controlUi": {
-      "allowedOrigins": ["*"]
+      "allowedOrigins": [{{range $i, $o := .AllowedOrigins}}{{if $i}},{{end}}"{{$o}}"{{end}}]
     }
   },
   "models": {
@@ -23,6 +27,16 @@
       "model": {
         "primary": "{{.DefaultModel}}"
       }
+    }
+  },
+  "tools": {
+    "allow": ["exec", "group:plugins"]
+  },
+  "plugins": {
+    "enabled": true,
+    "entries": {
+      "browser": {"enabled": true},
+      "openai": {"enabled": true}
     }
   }
 }

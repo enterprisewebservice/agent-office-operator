@@ -30,6 +30,11 @@ type OpenClawConfigData struct {
 	Models       []ModelEntry
 	DefaultModel string
 	GatewayToken string
+	// AllowedOrigins is the list of hostnames the OpenClaw Control
+	// UI accepts cross-origin requests from. Computed by the
+	// reconciler from the agent's Route hostname so the "Open agent
+	// gateway" button (loaded from a different host) works.
+	AllowedOrigins []string
 }
 
 // AgentsMdData holds data for rendering AGENTS.md.
@@ -57,15 +62,33 @@ type ToolsMdData struct {
 }
 
 // RenderOpenClawConfig renders openclaw.json from the AW spec + a
-// generated gateway token. The provider switch maps the AW
-// spec.model.provider into the openclaw.json shape.
-func RenderOpenClawConfig(aw *agentofficev1alpha1.AgentWorkstation, gatewayToken string) (string, error) {
+// generated gateway token + the cluster's apps domain (used to
+// compute the agent's Route hostname for allowedOrigins).
+func RenderOpenClawConfig(aw *agentofficev1alpha1.AgentWorkstation, gatewayToken, appsDomain string) (string, error) {
 	tmpl, err := template.ParseFS(templateFS, "openclaw.json.tmpl")
 	if err != nil {
 		return "", fmt.Errorf("parsing openclaw.json template: %w", err)
 	}
 
 	data := OpenClawConfigData{GatewayToken: gatewayToken}
+	// Compute the canonical Route hostname for this agent so the
+	// Control UI accepts cross-origin loads from there. Console
+	// sessions launch the gateway at this host; without it on the
+	// allowlist OpenClaw rejects with "origin not allowed".
+	if appsDomain != "" {
+		host := fmt.Sprintf("agent-%s-%s.%s", aw.Name, aw.Namespace, appsDomain)
+		data.AllowedOrigins = []string{
+			fmt.Sprintf("https://%s", host),
+			fmt.Sprintf("http://%s", host),
+			"http://localhost:18789",
+			"http://127.0.0.1:18789",
+		}
+	} else {
+		data.AllowedOrigins = []string{
+			"http://localhost:18789",
+			"http://127.0.0.1:18789",
+		}
+	}
 
 	switch aw.Spec.Model.Provider {
 	case agentofficev1alpha1.ModelProviderSMR:

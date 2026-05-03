@@ -15,6 +15,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"os"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -36,6 +37,14 @@ import (
 // today; `openclaw-browser:0.1.0` referenced in earlier code never
 // existed there.
 const DefaultOpenClawImage = "quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/openclaw:latest"
+
+// appsDomain returns the cluster's apps domain (e.g.
+// "apps.salamander.aimlworkbench.com") used to build the Route
+// hostname for openclaw.json's allowedOrigins. Sourced from the
+// CLUSTER_APPS_DOMAIN env var on the operator pod (set by the CSV's
+// downward-API or a literal in manager.yaml). Empty string means the
+// operator falls back to localhost-only allowedOrigins.
+func appsDomain() string { return os.Getenv("CLUSTER_APPS_DOMAIN") }
 
 // resource names — agent-office-server's existing convention so we
 // can adopt the existing 5 agents without renaming anything.
@@ -171,7 +180,7 @@ func (r *AgentWorkstationReconciler) reconcileTokenSecret(ctx context.Context, a
 
 // reconcileConfigMap renders all template files and applies the CM.
 func (r *AgentWorkstationReconciler) reconcileConfigMap(ctx context.Context, aw *agentofficev1alpha1.AgentWorkstation, gatewayToken string) error {
-	openclawJSON, err := templates.RenderOpenClawConfig(aw, gatewayToken)
+	openclawJSON, err := templates.RenderOpenClawConfig(aw, gatewayToken, appsDomain())
 	if err != nil {
 		return err
 	}
@@ -317,6 +326,12 @@ func (r *AgentWorkstationReconciler) reconcileDeployment(ctx context.Context, aw
 				InitContainers: []corev1.Container{{
 					Name:  "init-config",
 					Image: "registry.access.redhat.com/ubi9/ubi-minimal:latest",
+					// openclaw.json is operator-managed desired state —
+					// always overwrite from the rendered ConfigMap so a
+					// spec edit propagates to the agent on next pod
+					// restart. Workspace .md files (which the agent
+					// edits during runtime) are seeded once and
+					// preserved on subsequent restarts.
 					Command: []string{"/bin/sh", "-c", `
 						cp /config/openclaw.json /workspace/openclaw.json
 						mkdir -p /workspace/workspace

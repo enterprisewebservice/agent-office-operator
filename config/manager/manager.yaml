@@ -86,6 +86,12 @@ spec:
             valueFrom:
               fieldRef:
                 fieldPath: metadata.annotations['olm.targetNamespaces']
+          # Cluster apps domain — used to compute the Route hostname
+          # for each agent and embed it in openclaw.json's
+          # gateway.controlUi.allowedOrigins. Without this, gateway
+          # rejects "Open agent gateway" cross-origin loads.
+          - name: CLUSTER_APPS_DOMAIN
+            value: "apps.salamander.aimlworkbench.com"
         ports: []
         securityContext:
           allowPrivilegeEscalation: false
