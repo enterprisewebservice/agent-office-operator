@@ -69,6 +69,11 @@ spec:
           - --leader-elect
           - --health-probe-bind-address=:8081
         image: controller:latest
+        # Iteration: same-tag pushes to cluster Quay should propagate
+        # to a fresh pod on restart without bumping the version.
+        # OLM caches by image:tag; without Always the kubelet keeps
+        # the stale digest.
+        imagePullPolicy: Always
         name: manager
         # OLM downward-API: the OperatorGroup spec.targetNamespaces gets
         # rendered into the CSV's metadata.annotations[olm.targetNamespaces]

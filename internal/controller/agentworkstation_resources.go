@@ -31,9 +31,11 @@ import (
 	"github.com/enterprisewebservice/agent-office-operator/internal/templates"
 )
 
-// DefaultOpenClawImage is the browser-enabled OpenClaw image used when
-// the AW spec doesn't pin one.
-const DefaultOpenClawImage = "quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/openclaw-browser:0.1.0"
+// DefaultOpenClawImage is the OpenClaw runtime image used when the AW
+// spec doesn't pin one. The cluster Quay only has `openclaw:latest`
+// today; `openclaw-browser:0.1.0` referenced in earlier code never
+// existed there.
+const DefaultOpenClawImage = "quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/openclaw:latest"
 
 // resource names — agent-office-server's existing convention so we
 // can adopt the existing 5 agents without renaming anything.
@@ -274,8 +276,13 @@ func (r *AgentWorkstationReconciler) reconcileDeployment(ctx context.Context, aw
 	}
 	apiKeySecretName := aw.Spec.APIKeySecretRef
 	if apiKeySecretName == "" {
-		// Convention used by agent-office-server before slice 4.
-		apiKeySecretName = "agent-" + aw.Name + "-credentials"
+		// Legacy agent-office-server used `agent-<name>-secret` for
+		// the API key (alongside the gateway token, before slice 4
+		// split them). Default to that name so the 5 pre-slice-4
+		// agents keep working without a CR edit. New agents created
+		// by the slice-4+ flow set spec.apiKeySecretRef explicitly
+		// to `agent-<name>-credentials`.
+		apiKeySecretName = "agent-" + aw.Name + "-secret"
 	}
 
 	replicas := int32(1)
@@ -295,6 +302,12 @@ func (r *AgentWorkstationReconciler) reconcileDeployment(ctx context.Context, aw
 		dep.Spec.Template = corev1.PodTemplateSpec{
 			ObjectMeta: metav1.ObjectMeta{Labels: labels},
 			Spec: corev1.PodSpec{
+				// Cluster Quay (where openclaw + openclaw-browser live)
+				// is private — every agent pod needs the
+				// quay-pull-secret to fetch its container image.
+				ImagePullSecrets: []corev1.LocalObjectReference{
+					{Name: "quay-pull-secret"},
+				},
 				// Don't pin fsGroup — OpenShift's restricted-v2 SCC
 				// allocates one from the namespace's allowed range.
 				// Hardcoding 1000 fails admission with
