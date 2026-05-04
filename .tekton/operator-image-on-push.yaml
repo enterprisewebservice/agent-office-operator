@@ -49,13 +49,20 @@ spec:
     - pipelineTaskName: build-container
       stepSpecs:
         - name: build
+          # Bumped from 4→16 CPU. The Konflux pipeline forces buildah
+          # `--no-cache` for SLSA-3 reproducibility, so every push is a
+          # cold rebuild of the full k8s.io dep tree. The build node has
+          # tons of headroom (10% CPU / 29% memory utilized), so the
+          # bottleneck was purely the per-step CPU limit. Compilation
+          # parallelism scales near-linearly until ~16 cores for our
+          # graph.
           computeResources:
             requests:
-              cpu: "1"
-              memory: 2Gi
-            limits:
-              cpu: "4"
+              cpu: "2"
               memory: 4Gi
+            limits:
+              cpu: "16"
+              memory: 8Gi
   workspaces:
     - name: workspace
       volumeClaimTemplate:
