@@ -111,14 +111,21 @@ spec:
           initialDelaySeconds: 5
           periodSeconds: 10
         # TODO(user): Configure the resources accordingly based on the project requirements.
+        # Resource limits sized for AllNamespaces install mode. The
+        # controller-runtime informer cache holds one watcher per
+        # (kind, namespace) it Owns/Watches; on a 150-namespace cluster
+        # the kubebuilder default 128Mi is OOM in seconds. 512Mi gives
+        # comfortable headroom for ~250 namespaces with our current
+        # owned types (Deployment / Service / ConfigMap / Secret / PVC
+        # plus our 3 CRDs). Revisit if cluster size grows substantially.
         # More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
         resources:
           limits:
-            cpu: 500m
-            memory: 128Mi
+            cpu: "1"
+            memory: 512Mi
           requests:
-            cpu: 10m
-            memory: 64Mi
+            cpu: 50m
+            memory: 256Mi
         volumeMounts: []
       volumes: []
       serviceAccountName: controller-manager
