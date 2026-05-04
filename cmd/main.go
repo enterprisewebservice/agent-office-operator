@@ -238,6 +238,13 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentWorkstation")
 		os.Exit(1)
 	}
+	if err := (&controller.AgentGatewayReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "AgentGateway")
+		os.Exit(1)
+	}
 	// +kubebuilder:scaffold:builder
 
 	if metricsCertWatcher != nil {

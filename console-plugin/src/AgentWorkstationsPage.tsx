@@ -26,6 +26,9 @@ type AgentWorkstation = K8sResourceCommon & {
     model?: { provider?: string; modelName?: string };
     tools?: { allow?: string[] };
     memory?: { modules?: Array<{ name: string }> };
+    channels?: {
+      discord?: { url?: string };
+    };
   };
   status?: {
     phase?: string;
@@ -144,10 +147,8 @@ const AgentWorkstationsPage: React.FC = () => {
                       )}
                     </div>
                     {/* Bottom action row pinned to card bottom by
-                        marginTop:auto. Buttons stack vertically (the
-                        full labels won't fit side-by-side in a
-                        ~330px card) but `gap: 8` keeps them from
-                        touching. */}
+                        marginTop:auto. Buttons stack vertically with
+                        `gap: 8` so they don't touch. */}
                     <div
                       style={{
                         marginTop: 'auto',
@@ -157,15 +158,15 @@ const AgentWorkstationsPage: React.FC = () => {
                         gap: 8,
                       }}
                     >
-                      {a.status?.gatewayEndpoint && (
+                      {a.spec?.channels?.discord?.url && (
                         <Button
                           component="a"
-                          href={a.status.gatewayEndpoint}
+                          href={a.spec.channels.discord.url}
                           target="_blank"
                           variant="primary"
                           icon={<ExternalLinkAltIcon />}
                         >
-                          Open agent gateway
+                          Open in Discord
                         </Button>
                       )}
                       <Button

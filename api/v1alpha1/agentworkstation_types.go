@@ -97,6 +97,73 @@ type MemorySpec struct {
 	Overrides map[string]string `json:"overrides,omitempty"`
 }
 
+// DiscordChannelSpec configures the Discord channel/server the agent
+// posts to. The URL field is the link the Console card's "Open in
+// Discord" button uses — Discord channel URL
+// (`https://discord.com/channels/<guild>/<channel>`), invite link
+// (`https://discord.gg/<code>`), or guild URL all work.
+type DiscordChannelSpec struct {
+	// URL the "Open in Discord" Console button opens.
+	// +optional
+	URL string `json:"url,omitempty"`
+}
+
+// DedicatedRuntime is the default runtime mode: the operator
+// reconciles a per-AgentWorkstation Pod, ConfigMap, Secret, PVC,
+// Service, and Route (slice-4 behavior). Suitable for agents that
+// need a unique image, security context, or full isolation.
+type DedicatedRuntime struct {
+	// (no fields today; reserved for future per-AW dedicated-runtime
+	// tunables like sidecar config, network policies, etc.)
+}
+
+// SharedRuntime slots this AgentWorkstation into an existing
+// AgentGateway as a logical openclaw agent. The operator does NOT
+// create a Pod/PVC/Service/Route for this AW — instead it calls
+// `openclaw agents create <aw.name>` against the referenced gateway,
+// and registers `browserProfile` in the gateway's node-host
+// `browser.profiles[*]` allowlist so this agent gets its own
+// isolated Chromium user-data-dir on the shared browser VM.
+//
+// This is the OpenClaw-doc'd multi-agent pattern: many openclaw
+// agents inside one gateway runtime, one paired node-host, one
+// browser-profile per agent.
+type SharedRuntime struct {
+	// GatewayRef is the name of the AgentGateway in the same
+	// namespace that hosts this agent.
+	GatewayRef string `json:"gatewayRef"`
+
+	// BrowserProfile is the Chromium profile / user-data-dir name
+	// to use for this agent on the shared node-host. Defaults to the
+	// AW's own name if omitted.
+	// +optional
+	BrowserProfile string `json:"browserProfile,omitempty"`
+}
+
+// RuntimeSpec selects HOW this AgentWorkstation is materialized.
+// Exactly one of `dedicated` or `shared` should be set. If both are
+// omitted, the operator defaults to `dedicated{}` — preserving
+// slice-4 behavior for AWs that pre-date this field.
+type RuntimeSpec struct {
+	// Dedicated runtime: own Pod, own PVC, own Service, own Route.
+	// +optional
+	Dedicated *DedicatedRuntime `json:"dedicated,omitempty"`
+
+	// Shared runtime: logical openclaw agent inside the referenced
+	// AgentGateway's pod, sharing the gateway's paired node-host
+	// browser via a per-agent profile.
+	// +optional
+	Shared *SharedRuntime `json:"shared,omitempty"`
+}
+
+// ChannelsSpec carries per-agent channel configuration. Today only
+// Discord is wired into the Console UI; other channels live in
+// openclaw.json on the PVC.
+type ChannelsSpec struct {
+	// +optional
+	Discord *DiscordChannelSpec `json:"discord,omitempty"`
+}
+
 // AgentWorkstationSpec defines the desired state of an AgentWorkstation.
 type AgentWorkstationSpec struct {
 	// DisplayName is the human-readable name for this agent workstation.
@@ -137,6 +204,18 @@ type AgentWorkstationSpec struct {
 	// Office carries UI-only metadata for the office Map view.
 	// +optional
 	Office *OfficeSpec `json:"office,omitempty"`
+
+	// Channels configures the channels the agent communicates on.
+	// +optional
+	Channels *ChannelsSpec `json:"channels,omitempty"`
+
+	// Runtime selects how the operator materializes this agent. If
+	// omitted, defaults to `dedicated` (slice-4 model: own Pod and
+	// dependent K8s objects). Set `runtime.shared.gatewayRef` to
+	// slot the agent into an existing AgentGateway as a logical
+	// openclaw agent (multi-agent-in-one-pod model).
+	// +optional
+	Runtime *RuntimeSpec `json:"runtime,omitempty"`
 
 	// Resources are the container resource requests/limits.
 	// +optional

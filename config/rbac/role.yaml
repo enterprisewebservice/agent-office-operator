@@ -22,6 +22,7 @@ rules:
 - apiGroups:
   - agentoffice.ai
   resources:
+  - agentgateways
   - agentworkstations
   - memorymodules
   verbs:
@@ -35,6 +36,7 @@ rules:
 - apiGroups:
   - agentoffice.ai
   resources:
+  - agentgateways/finalizers
   - agentworkstations/finalizers
   - memorymodules/finalizers
   verbs:
@@ -42,6 +44,7 @@ rules:
 - apiGroups:
   - agentoffice.ai
   resources:
+  - agentgateways/status
   - agentworkstations/status
   - memorymodules/status
   verbs:

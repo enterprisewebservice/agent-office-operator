@@ -29,4 +29,9 @@ resources:
   kind: AgentWorkstation
   path: github.com/enterprisewebservice/agent-office-operator/api/v1alpha1
   version: v1alpha1
+- controller: true
+  domain: ai
+  group: agentoffice
+  kind: AgentGateway
+  version: v1alpha1
 version: "3"

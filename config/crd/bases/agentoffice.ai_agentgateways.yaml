@@ -1,21 +1,21 @@
+---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.18.0
-  creationTimestamp: null
-  name: agentworkstations.agentoffice.ai
+  name: agentgateways.agentoffice.ai
 spec:
   group: agentoffice.ai
   names:
     categories:
     - agent-office
-    kind: AgentWorkstation
-    listKind: AgentWorkstationList
-    plural: agentworkstations
+    kind: AgentGateway
+    listKind: AgentGatewayList
+    plural: agentgateways
     shortNames:
-    - aw
-    singular: agentworkstation
+    - ag
+    singular: agentgateway
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
@@ -25,9 +25,15 @@ spec:
     - jsonPath: .status.phase
       name: Phase
       type: string
-    - jsonPath: .spec.model.provider
-      name: Provider
+    - jsonPath: .spec.nodeHostRef.name
+      name: Node-Host
       type: string
+    - jsonPath: .status.nodeHostPaired
+      name: Paired
+      type: boolean
+    - jsonPath: .status.agentCount
+      name: Agents
+      type: integer
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -35,9 +41,11 @@ spec:
     schema:
       openAPIV3Schema:
         description: |-
-          AgentWorkstation is a single governed coding-agent instance — the cluster
-          representation of "one seat in the office". The operator owns its
-          Deployment, Service, ConfigMap, PVC, and Secret references.
+          AgentGateway is a single OpenClaw gateway runtime that hosts one or
+          more AgentWorkstations as logical openclaw agents. Multiple AWs
+          with `spec.runtime.shared.gatewayRef: <this>` share this gateway's
+          pod, paired node-host, and browser profiles. Per OpenClaw's
+          doc'd multi-agent model.
         properties:
           apiVersion:
             description: |-
@@ -57,117 +65,47 @@ spec:
           metadata:
             type: object
           spec:
-            description: AgentWorkstationSpec defines the desired state of an AgentWorkstation.
+            description: |-
+              AgentGatewaySpec defines the desired state of an AgentGateway —
+              the heavy "runtime" Pod that hosts the OpenClaw gateway process.
+              Multiple AgentWorkstations with `spec.runtime.shared.gatewayRef:
+              <this-name>` slot in as logical openclaw agents inside this
+              gateway's runtime, sharing the paired node-host's browser.
             properties:
-              apiKeySecretRef:
-                description: |-
-                  APIKeySecretRef is the name of a Secret containing the API key
-                  (key "api-key").
-                type: string
-              channels:
-                description: Channels configures the channels the agent communicates
-                  on.
-                properties:
-                  discord:
-                    description: |-
-                      DiscordChannelSpec configures the Discord channel/server the agent
-                      posts to. The URL field is the link the Console card's "Open in
-                      Discord" button uses — Discord channel URL
-                      (`https://discord.com/channels/<guild>/<channel>`), invite link
-                      (`https://discord.gg/<code>`), or guild URL all work.
-                    properties:
-                      url:
-                        description: URL the "Open in Discord" Console button opens.
-                        type: string
-                    type: object
-                type: object
               description:
-                description: Description is a brief description of the agent's purpose.
+                description: |-
+                  Description of what this gateway hosts (e.g. "Karpathy
+                  auto-research crew").
                 type: string
               displayName:
-                description: DisplayName is the human-readable name for this agent
-                  workstation.
-                type: string
-              emoji:
-                description: Emoji icon for the agent in the office view.
+                description: DisplayName is the human-readable name (Console / RHDH).
                 type: string
               image:
-                default: quay.io/aicatalyst/openclaw:latest
-                description: Image is the container image for the agent runtime.
+                default: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/openclaw:latest
+                description: Image is the container image for the gateway runtime.
                 type: string
-              memory:
-                description: Memory lists shared MemoryModule references and per-agent
-                  overrides.
+              nodeHostRef:
+                description: |-
+                  NodeHostRef points at the paired node-host (KubeVirt VM today).
+                  The node-host hosts the real browser; the gateway routes
+                  browser tool calls through to it.
                 properties:
-                  modules:
-                    description: |-
-                      Modules referenced by this agent. The operator renders the union of
-                      the modules' content into the agent's per-agent ConfigMap, ordered
-                      by kind (AAIF cascade: agents -> user -> tools -> skill).
-                    items:
-                      description: |-
-                        MemoryModuleRef is a reference to a MemoryModule CR consumed by this
-                        agent. Resolved by the operator at render time.
-                      properties:
-                        name:
-                          description: |-
-                            Name of the MemoryModule (cluster-namespaced; same namespace as the
-                            AgentWorkstation).
-                          type: string
-                      required:
-                      - name
-                      type: object
-                    type: array
-                  overrides:
-                    additionalProperties:
-                      type: string
-                    description: |-
-                      Overrides is inline .md content that takes precedence over any
-                      referenced module's content for the same kind/filename. Useful for
-                      agent-specific tweaks without forking a shared module.
-                    type: object
-                type: object
-              model:
-                description: Model selects the LLM backend.
-                properties:
-                  modelName:
-                    default: auto
-                    description: ModelName is the specific model name, or "auto" for
-                      router-selected.
+                  name:
+                    description: 'Name of the node-host resource (today: KubeVirt
+                      VirtualMachine).'
                     type: string
-                  modelRouterRef:
+                  namespace:
                     description: |-
-                      ModelRouterRef references a SmallModelRouter CR (used when provider
-                      is smr).
-                    type: string
-                  provider:
-                    description: Provider type.
-                    enum:
-                    - smr
-                    - anthropic
-                    - openai
-                    - custom
+                      Namespace where the node-host lives. Defaults to the
+                      AgentGateway's own namespace if omitted.
                     type: string
                 required:
-                - provider
-                type: object
-              office:
-                description: Office carries UI-only metadata for the office Map view.
-                properties:
-                  position:
-                    description: OfficePosition is the (x,y) seat layout in the office
-                      Map view.
-                    properties:
-                      x:
-                        format: int32
-                        type: integer
-                      "y":
-                        format: int32
-                        type: integer
-                    type: object
+                - name
                 type: object
               resources:
-                description: Resources are the container resource requests/limits.
+                description: |-
+                  Resources are the gateway pod's container resource
+                  requests/limits.
                 properties:
                   claims:
                     description: |-
@@ -225,31 +163,27 @@ spec:
                       More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
                     type: object
                 type: object
-              systemPrompt:
-                description: SystemPrompt defines the agent's behavior.
+              sharedTokenSecretRef:
+                description: |-
+                  SharedTokenSecretRef is the name of a Secret in the same
+                  namespace that holds OPENCLAW_GATEWAY_TOKEN. Both the gateway
+                  pod and the node-host process consume this — the operator
+                  creates it on first reconcile if missing, then references it
+                  from both ends so the pairing token never has to be
+                  hand-synced again.
                 type: string
-              tools:
-                description: Tools is the tool allowlist.
-                properties:
-                  allow:
-                    description: Allow is the list of tool names the agent is allowed
-                      to use.
-                    items:
-                      type: string
-                    type: array
-                type: object
-            required:
-            - displayName
-            - model
-            - systemPrompt
             type: object
           status:
-            description: AgentWorkstationStatus reflects observed state.
+            description: AgentGatewayStatus reflects observed state.
             properties:
-              conditions:
+              agentCount:
                 description: |-
-                  Conditions reflect the latest available observations of the agent's
-                  state. Standard types: Ready, Available, Progressing.
+                  AgentCount is the number of AgentWorkstations currently
+                  referencing this gateway via spec.runtime.shared.gatewayRef.
+                format: int32
+                type: integer
+              conditions:
+                description: Conditions reflect the latest available observations.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -306,24 +240,24 @@ spec:
                   type: object
                 type: array
               gatewayEndpoint:
-                description: GatewayEndpoint is the public URL the agent listens on.
-                type: string
-              lastActivity:
-                description: LastActivity records the last time the agent processed
-                  a request.
-                format: date-time
+                description: |-
+                  GatewayEndpoint is the public URL the gateway listens on
+                  (Route URL).
                 type: string
               message:
-                description: Message is a human-readable detail accompanying Phase.
+                description: Message is a human-readable detail for the current Phase.
                 type: string
+              nodeHostPaired:
+                description: |-
+                  NodeHostPaired reports whether the configured node-host has
+                  successfully paired with the gateway.
+                type: boolean
               phase:
-                description: AgentWorkstationPhase is the high-level lifecycle phase
-                  the agent is in.
+                description: AgentGatewayPhase is the high-level lifecycle state.
                 enum:
                 - Pending
-                - Creating
-                - Running
-                - Stopped
+                - Provisioning
+                - Ready
                 - Error
                 type: string
             type: object
@@ -332,9 +266,3 @@ spec:
     storage: true
     subresources:
       status: {}
-status:
-  acceptedNames:
-    kind: ""
-    plural: ""
-  conditions: null
-  storedVersions: null

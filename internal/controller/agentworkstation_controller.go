@@ -68,7 +68,16 @@ func (r *AgentWorkstationReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, err
 	}
 
-	// 1. Materialize the per-agent runtime.
+	// Dispatch on spec.runtime. Default (nil or runtime.dedicated)
+	// preserves the slice-4 path: own Pod / PVC / Service / Route /
+	// CM / Secret. The runtime.shared path defers to step-3 logic
+	// which slots the AW as a logical agent inside a shared
+	// AgentGateway runtime.
+	if aw.Spec.Runtime != nil && aw.Spec.Runtime.Shared != nil {
+		return r.reconcileShared(ctx, &aw)
+	}
+
+	// 1. Materialize the per-agent dedicated runtime.
 	if err := r.reconcileChildren(ctx, &aw); err != nil {
 		log.Error(err, "reconcileChildren")
 		return ctrl.Result{}, err
@@ -79,6 +88,27 @@ func (r *AgentWorkstationReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, err
 	}
 
+	return ctrl.Result{}, nil
+}
+
+// reconcileShared is a stub for the runtime.shared path. Step 3
+// implements: openclaw agents create against the referenced
+// AgentGateway, register browser profile, propagate Discord channel
+// + system prompt into the gateway's per-agent workspace. For now
+// it just records status so dashboards reflect the chosen mode.
+func (r *AgentWorkstationReconciler) reconcileShared(ctx context.Context, aw *agentofficev1alpha1.AgentWorkstation) (ctrl.Result, error) {
+	gwRef := aw.Spec.Runtime.Shared.GatewayRef
+	msg := fmt.Sprintf("runtime=shared (gatewayRef=%s) — agent provisioning is implemented in step 3", gwRef)
+
+	if aw.Status.Phase == agentofficev1alpha1.AgentWorkstationPhasePending && aw.Status.Message == msg {
+		return ctrl.Result{}, nil
+	}
+	aw.Status.Phase = agentofficev1alpha1.AgentWorkstationPhasePending
+	aw.Status.Message = msg
+	aw.Status.GatewayEndpoint = ""
+	if err := r.Status().Update(ctx, aw); err != nil {
+		return ctrl.Result{}, err
+	}
 	return ctrl.Result{}, nil
 }
 

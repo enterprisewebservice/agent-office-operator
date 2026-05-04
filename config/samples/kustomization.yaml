@@ -2,4 +2,5 @@
 resources:
 - agentoffice_v1alpha1_memorymodule.yaml
 - agentoffice_v1alpha1_agentworkstation.yaml
+- agentoffice_v1alpha1_agentgateway.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

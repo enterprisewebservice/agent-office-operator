@@ -1,16 +1,17 @@
 {
-  "browser": {
-    "enabled": true,
-    "defaultProfile": "openclaw"
-  },
   "gateway": {
     "port": 18789,
     "auth": {
+      "mode": "token",
+      "token": "{{.GatewayToken}}"
+    },
+    "remote": {
       "token": "{{.GatewayToken}}"
     },
     "controlUi": {
       "allowedOrigins": [{{range $i, $o := .AllowedOrigins}}{{if $i}},{{end}}"{{$o}}"{{end}}]
-    }
+    },
+    "trustedProxies": ["10.128.0.0/14", "10.131.0.0/16", "127.0.0.1", "::1"]
   },
   "models": {
     "providers": {
@@ -27,16 +28,6 @@
       "model": {
         "primary": "{{.DefaultModel}}"
       }
-    }
-  },
-  "tools": {
-    "allow": ["exec", "group:plugins"]
-  },
-  "plugins": {
-    "enabled": true,
-    "entries": {
-      "browser": {"enabled": true},
-      "openai": {"enabled": true}
     }
   }
 }

@@ -46,6 +46,18 @@ const DefaultOpenClawImage = "quay-quay-quay-test.apps.salamander.aimlworkbench.
 // operator falls back to localhost-only allowedOrigins.
 func appsDomain() string { return os.Getenv("CLUSTER_APPS_DOMAIN") }
 
+// configResetFlag returns "true" if the AW carries the reset
+// annotation, otherwise "". The init container reads this as
+// $OPENCLAW_CONFIG_RESET to decide whether to re-seed openclaw.json.
+const ConfigResetAnnotation = "agentoffice.ai/openclaw-config-reset"
+
+func configResetFlag(aw *agentofficev1alpha1.AgentWorkstation) string {
+	if aw.Annotations[ConfigResetAnnotation] == "true" {
+		return "true"
+	}
+	return ""
+}
+
 // resource names — agent-office-server's existing convention so we
 // can adopt the existing 5 agents without renaming anything.
 func cmName(awName string) string      { return "agent-" + awName + "-config" }
@@ -120,6 +132,19 @@ func (r *AgentWorkstationReconciler) reconcileChildren(ctx context.Context, aw *
 	//    unstructured so the operator stays portable to vanilla k8s.
 	if err := r.reconcileRoute(ctx, aw); err != nil {
 		return fmt.Errorf("route: %w", err)
+	}
+
+	// 7. One-shot reset annotation: if the user set it, the
+	//    Deployment template above stamped OPENCLAW_CONFIG_RESET=true
+	//    onto the init container. Clear the annotation now so the
+	//    next reconcile doesn't loop the reset and so subsequent pod
+	//    restarts preserve openclaw.json again.
+	if aw.Annotations[ConfigResetAnnotation] == "true" {
+		patched := aw.DeepCopy()
+		delete(patched.Annotations, ConfigResetAnnotation)
+		if err := r.Patch(ctx, patched, client.MergeFrom(aw)); err != nil {
+			return fmt.Errorf("clearing reset annotation: %w", err)
+		}
 	}
 
 	return nil
@@ -326,14 +351,35 @@ func (r *AgentWorkstationReconciler) reconcileDeployment(ctx context.Context, aw
 				InitContainers: []corev1.Container{{
 					Name:  "init-config",
 					Image: "registry.access.redhat.com/ubi9/ubi-minimal:latest",
-					// openclaw.json is operator-managed desired state —
-					// always overwrite from the rendered ConfigMap so a
-					// spec edit propagates to the agent on next pod
-					// restart. Workspace .md files (which the agent
-					// edits during runtime) are seeded once and
-					// preserved on subsequent restarts.
+					// Seed-only init: openclaw.json + workspace .md files
+					// are written once on first pod start. Subsequent
+					// pod restarts preserve whatever the agent (or the
+					// human operator) has tuned in those files —
+					// OpenClaw rewrites the config in place on its own
+					// (channels, plugins, meta), and we don't want to
+					// stomp that on every reconcile.
+					//
+					// Two reasons preserve is the right default:
+					//   1. We'd lose user-tuned fields the AW spec
+					//      doesn't model (browser.defaultProfile,
+					//      gateway.bind, channels.discord, etc.).
+					//   2. OpenClaw materializes ${ENV_VAR} apiKey
+					//      references into plaintext when it touches
+					//      the file. Each forced overwrite => another
+					//      round of secrets-to-disk leak.
+					//
+					// Force a refresh by setting the annotation
+					// `agentoffice.ai/openclaw-config-reset: "true"`
+					// on the AW — the reconciler removes the file via
+					// the SENTINEL env var below; the next pod start
+					// re-seeds. Operator clears the annotation after.
 					Command: []string{"/bin/sh", "-c", `
-						cp /config/openclaw.json /workspace/openclaw.json
+						if [ "${OPENCLAW_CONFIG_RESET:-}" = "true" ]; then
+							rm -f /workspace/openclaw.json
+						fi
+						if [ ! -f /workspace/openclaw.json ]; then
+							cp /config/openclaw.json /workspace/openclaw.json
+						fi
 						mkdir -p /workspace/workspace
 						for f in AGENTS.md IDENTITY.md SOUL.md USER.md TOOLS.md; do
 							if [ ! -f "/workspace/workspace/$f" ]; then
@@ -341,6 +387,9 @@ func (r *AgentWorkstationReconciler) reconcileDeployment(ctx context.Context, aw
 							fi
 						done
 					`},
+					Env: []corev1.EnvVar{
+						{Name: "OPENCLAW_CONFIG_RESET", Value: configResetFlag(aw)},
+					},
 					VolumeMounts: []corev1.VolumeMount{
 						{Name: "config", MountPath: "/config", ReadOnly: true},
 						{Name: "workspace", MountPath: "/workspace"},
