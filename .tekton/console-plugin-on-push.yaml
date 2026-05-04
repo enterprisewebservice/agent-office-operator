@@ -45,11 +45,11 @@ spec:
         - name: build
           computeResources:
             requests:
-              cpu: "1"
-              memory: 2Gi
-            limits:
               cpu: "2"
               memory: 4Gi
+            limits:
+              cpu: "8"
+              memory: 8Gi
   workspaces:
     - name: workspace
       volumeClaimTemplate:

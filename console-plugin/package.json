@@ -36,10 +36,11 @@
     "name": "agent-office-plugin",
     "version": "0.0.1",
     "displayName": "Agent Office Plugin",
-    "description": "Custom UI for Memory Modules and Agent Workstations.",
+    "description": "Custom UI for Memory Modules, Agent Workstations, and Agent Gateways.",
     "exposedModules": {
       "MemoryModulesPage": "./src/MemoryModulesPage",
-      "AgentWorkstationsPage": "./src/AgentWorkstationsPage"
+      "AgentWorkstationsPage": "./src/AgentWorkstationsPage",
+      "AgentGatewaysPage": "./src/AgentGatewaysPage"
     },
     "dependencies": {
       "@console/pluginAPI": ">=4.15.0"

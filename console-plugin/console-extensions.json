@@ -28,6 +28,16 @@
     }
   },
   {
+    "type": "console.navigation/href",
+    "properties": {
+      "id": "agent-office-agent-gateways",
+      "section": "agent-office",
+      "name": "Agent Gateways",
+      "href": "/agent-office/agent-gateways",
+      "perspective": "admin"
+    }
+  },
+  {
     "type": "console.page/route",
     "properties": {
       "exact": true,
@@ -41,6 +51,14 @@
       "exact": true,
       "path": "/agent-office/agent-workstations",
       "component": { "$codeRef": "AgentWorkstationsPage.default" }
+    }
+  },
+  {
+    "type": "console.page/route",
+    "properties": {
+      "exact": true,
+      "path": "/agent-office/agent-gateways",
+      "component": { "$codeRef": "AgentGatewaysPage.default" }
     }
   },
   {
@@ -71,6 +89,21 @@
         "kind": "ClusterServiceVersion"
       },
       "component": { "$codeRef": "AgentWorkstationsPage.default" }
+    }
+  },
+  {
+    "type": "console.tab/horizontalNav",
+    "properties": {
+      "page": {
+        "name": "Agent Gateways",
+        "href": "agent-gateways"
+      },
+      "model": {
+        "group": "operators.coreos.com",
+        "version": "v1alpha1",
+        "kind": "ClusterServiceVersion"
+      },
+      "component": { "$codeRef": "AgentGatewaysPage.default" }
     }
   }
 ]
