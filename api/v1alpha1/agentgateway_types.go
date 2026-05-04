@@ -65,6 +65,23 @@ type AgentGatewaySpec struct {
 	// +optional
 	SharedTokenSecretRef string `json:"sharedTokenSecretRef,omitempty"`
 
+	// AutoApproveNodeHost makes the operator approve the configured
+	// nodeHostRef's pairing request without human intervention.
+	// OpenClaw v2026.4.x has no auto-approve config that works in a
+	// k8s setting — the operator does the approval by writing
+	// directly to the gateway PVC's ~/.openclaw/devices/paired.json
+	// (the same shape `openclaw nodes approve` would produce) then
+	// bouncing the gateway pod once so it reloads.
+	//
+	// Trade-off: any node-host that connects with a matching
+	// displayName gets paired automatically. Safe in this cluster
+	// because the gateway only listens on the in-cluster Service —
+	// reachable by the trusted node-host VM, not the public
+	// internet.
+	// +kubebuilder:default=true
+	// +optional
+	AutoApproveNodeHost *bool `json:"autoApproveNodeHost,omitempty"`
+
 	// Resources are the gateway pod's container resource
 	// requests/limits.
 	// +optional

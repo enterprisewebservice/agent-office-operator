@@ -11,8 +11,10 @@ You may obtain a copy of the License at
 package controller
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -21,6 +23,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/remotecommand"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -35,6 +41,11 @@ import (
 type AgentGatewayReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// RestConfig powers the auto-approve action's exec into the
+	// gateway pod (we hand-edit ~/.openclaw/devices/paired.json
+	// because OpenClaw's CLI approval flow is itself blocked by
+	// pairing — chicken-and-egg).
+	RestConfig *rest.Config
 }
 
 // +kubebuilder:rbac:groups=agentoffice.ai,resources=agentgateways,verbs=get;list;watch;create;update;patch;delete
@@ -58,9 +69,134 @@ func (r *AgentGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
-	// 2. Compute status from observed Deployment + Route + AW count.
+	// 2. Auto-approve the configured node-host's pending pairing
+	//    request (if any). One-shot per pairing — once approved, the
+	//    paired entry persists in the gateway PVC.
+	autoApprove := gw.Spec.AutoApproveNodeHost == nil || *gw.Spec.AutoApproveNodeHost
+	if autoApprove && gw.Spec.NodeHostRef != nil && gw.Spec.NodeHostRef.Name != "" {
+		if err := r.maybeAutoApprovePending(ctx, &gw); err != nil {
+			log.Info("auto-approve skipped", "err", err)
+			// non-fatal — the gateway pod may not be Ready yet, will retry
+		}
+	}
+
+	// 3. Compute status from observed Deployment + Route + AW count.
 	return r.reconcileGatewayStatus(ctx, &gw)
 }
+
+// maybeAutoApprovePending checks the gateway pod's pairing store and
+// approves any pending request whose displayName matches the
+// configured nodeHostRef. Idempotent: if the matching node is
+// already paired, this is a no-op. After approval the gateway pod
+// is bounced once so OpenClaw reloads the pairing store on next
+// boot.
+func (r *AgentGatewayReconciler) maybeAutoApprovePending(ctx context.Context, gw *agentofficev1alpha1.AgentGateway) error {
+	if r.RestConfig == nil {
+		return fmt.Errorf("RestConfig not set; cannot exec")
+	}
+	pod, err := r.findReadyGatewayPod(ctx, gw)
+	if err != nil {
+		return err
+	}
+
+	// Inline node script — same logic as the CLI recipe but checks
+	// for already-approved displayName before doing anything.
+	script := fmt.Sprintf(`
+const fs = require("fs"); const crypto = require("crypto");
+const dir = "/home/node/.openclaw/devices";
+const want = %q; // nodeHostRef.name (matches displayName "<name>-nodehost")
+let pending; let paired;
+try { pending = JSON.parse(fs.readFileSync(dir+"/pending.json","utf8")); } catch (e) { pending = {}; }
+try { paired = JSON.parse(fs.readFileSync(dir+"/paired.json","utf8")); } catch (e) { paired = {}; }
+
+// Already paired? No-op.
+const alreadyPaired = Object.values(paired).some(d =>
+  (d.displayName || "").includes(want) && d.role === "node"
+);
+if (alreadyPaired) { console.log("ALREADY_PAIRED"); process.exit(0); }
+
+// Find a matching pending request.
+const target = Object.entries(pending).find(([_, p]) =>
+  (p.displayName || "").includes(want) && p.role === "node"
+);
+if (!target) { console.log("NO_PENDING"); process.exit(0); }
+const [reqId, p] = target;
+const now = Date.now();
+const newToken = () => crypto.randomBytes(32).toString("base64url");
+const tokens = {};
+if (p.role) tokens[p.role] = { token: newToken(), role: p.role, scopes: p.scopes||[], createdAtMs: now };
+paired[p.deviceId] = {
+  deviceId: p.deviceId, publicKey: p.publicKey, displayName: p.displayName,
+  platform: p.platform, deviceFamily: p.deviceFamily, clientId: p.clientId,
+  clientMode: p.clientMode, role: p.role, roles: p.roles||[p.role],
+  scopes: p.scopes||[], approvedScopes: p.scopes||[], remoteIp: p.remoteIp,
+  tokens, createdAtMs: now, approvedAtMs: now,
+};
+delete pending[reqId];
+fs.writeFileSync(dir+"/pending.json", JSON.stringify(pending));
+fs.writeFileSync(dir+"/paired.json", JSON.stringify(paired));
+console.log("APPROVED " + p.deviceId + " " + p.displayName);
+`, gw.Spec.NodeHostRef.Name)
+
+	out, err := r.execInGatewayPod(ctx, pod, []string{"node", "-e", script})
+	if err != nil {
+		return fmt.Errorf("exec auto-approve: %w (out=%s)", err, out)
+	}
+	logf.FromContext(ctx).Info("auto-approve result", "result", out)
+
+	// If we approved something, bounce the pod once so the gateway
+	// reloads paired.json. ALREADY_PAIRED / NO_PENDING → no bounce.
+	if !strings.Contains(out, "APPROVED") {
+		return nil
+	}
+	if err := r.Delete(ctx, pod); err != nil {
+		return fmt.Errorf("bounce gateway pod after approval: %w", err)
+	}
+	return nil
+}
+
+func (r *AgentGatewayReconciler) findReadyGatewayPod(ctx context.Context, gw *agentofficev1alpha1.AgentGateway) (*corev1.Pod, error) {
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods,
+		client.InNamespace(gw.Namespace),
+		client.MatchingLabels{"agentoffice.ai/gateway": gw.Name},
+	); err != nil {
+		return nil, err
+	}
+	for _, p := range pods.Items {
+		if p.Status.Phase != corev1.PodRunning {
+			continue
+		}
+		for _, c := range p.Status.ContainerStatuses {
+			if c.Name == "openclaw" && c.Ready {
+				return &p, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("no Ready openclaw container in any %s gateway pod", gw.Name)
+}
+
+func (r *AgentGatewayReconciler) execInGatewayPod(ctx context.Context, pod *corev1.Pod, cmd []string) (string, error) {
+	cs, err := kubernetes.NewForConfig(r.RestConfig)
+	if err != nil {
+		return "", err
+	}
+	req := cs.CoreV1().RESTClient().Post().Resource("pods").Namespace(pod.Namespace).Name(pod.Name).
+		SubResource("exec").VersionedParams(&corev1.PodExecOptions{
+		Container: "openclaw", Command: cmd, Stdout: true, Stderr: true,
+	}, scheme.ParameterCodec)
+	exec, err := remotecommand.NewSPDYExecutor(r.RestConfig, "POST", req.URL())
+	if err != nil {
+		return "", err
+	}
+	var out bytes.Buffer
+	err = exec.StreamWithContext(ctx, remotecommand.StreamOptions{Stdout: &out, Stderr: &out})
+	if err != nil {
+		return out.String(), err
+	}
+	return out.String(), nil
+}
+
 
 // reconcileGatewayStatus reads the owned Deployment + Route and
 // counts how many AgentWorkstations reference this gateway. Updates
