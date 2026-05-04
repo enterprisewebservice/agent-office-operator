@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -45,6 +46,10 @@ import (
 type AgentWorkstationReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// RestConfig is needed for exec into gateway pods (runtime.shared
+	// path uses `openclaw config set` against a running gateway).
+	// Set from main.go via mgr.GetConfig().
+	RestConfig *rest.Config
 }
 
 // +kubebuilder:rbac:groups=agentoffice.ai,resources=agentworkstations,verbs=get;list;watch;create;update;patch;delete
@@ -91,25 +96,11 @@ func (r *AgentWorkstationReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	return ctrl.Result{}, nil
 }
 
-// reconcileShared is a stub for the runtime.shared path. Step 3
-// implements: openclaw agents create against the referenced
-// AgentGateway, register browser profile, propagate Discord channel
-// + system prompt into the gateway's per-agent workspace. For now
-// it just records status so dashboards reflect the chosen mode.
+// reconcileShared dispatches to the full implementation in
+// agentworkstation_shared.go. Kept as a small wrapper to keep the
+// dispatcher in this file readable.
 func (r *AgentWorkstationReconciler) reconcileShared(ctx context.Context, aw *agentofficev1alpha1.AgentWorkstation) (ctrl.Result, error) {
-	gwRef := aw.Spec.Runtime.Shared.GatewayRef
-	msg := fmt.Sprintf("runtime=shared (gatewayRef=%s) — agent provisioning is implemented in step 3", gwRef)
-
-	if aw.Status.Phase == agentofficev1alpha1.AgentWorkstationPhasePending && aw.Status.Message == msg {
-		return ctrl.Result{}, nil
-	}
-	aw.Status.Phase = agentofficev1alpha1.AgentWorkstationPhasePending
-	aw.Status.Message = msg
-	aw.Status.GatewayEndpoint = ""
-	if err := r.Status().Update(ctx, aw); err != nil {
-		return ctrl.Result{}, err
-	}
-	return ctrl.Result{}, nil
+	return r.reconcileSharedFull(ctx, aw)
 }
 
 // reconcileStatus reads the owned Deployment + Route and patches

@@ -18,6 +18,16 @@ spec:
   customresourcedefinitions:
     owned:
     - description: |-
+        AgentGateway is a single OpenClaw gateway runtime that hosts one or
+        more AgentWorkstations as logical openclaw agents. Multiple AWs
+        with `spec.runtime.shared.gatewayRef: <this>` share this gateway's
+        pod, paired node-host, and browser profiles. Per OpenClaw's
+        doc'd multi-agent model.
+      displayName: Agent Gateway
+      kind: AgentGateway
+      name: agentgateways.agentoffice.ai
+      version: v1alpha1
+    - description: |-
         AgentWorkstation is a single governed coding-agent instance — the cluster
         representation of "one seat in the office". The operator owns its
         Deployment, Service, ConfigMap, PVC, and Secret references.

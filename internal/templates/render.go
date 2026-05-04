@@ -13,7 +13,7 @@ import (
 	agentofficev1alpha1 "github.com/enterprisewebservice/agent-office-operator/api/v1alpha1"
 )
 
-//go:embed openclaw.json.tmpl agents.md.tmpl identity.md.tmpl soul.md.tmpl user.md.tmpl tools.md.tmpl
+//go:embed openclaw.json.tmpl agentgateway-openclaw.json.tmpl agents.md.tmpl identity.md.tmpl soul.md.tmpl user.md.tmpl tools.md.tmpl
 var templateFS embed.FS
 
 // ModelEntry is a model row in openclaw.json.
@@ -170,6 +170,37 @@ func RenderToolsMd(aw *agentofficev1alpha1.AgentWorkstation) (string, error) {
 		tools = aw.Spec.Tools.Allow
 	}
 	return renderTemplate("tools.md.tmpl", ToolsMdData{Tools: tools})
+}
+
+// RenderAgentGatewayConfig renders the base openclaw.json for an
+// AgentGateway runtime. agents.list and bindings start empty —
+// per-AgentWorkstation reconcile (runtime.shared path) appends to
+// them via `openclaw config set`.
+func RenderAgentGatewayConfig(gw *agentofficev1alpha1.AgentGateway, gatewayToken, appsDomain string) (string, error) {
+	tmpl, err := template.ParseFS(templateFS, "agentgateway-openclaw.json.tmpl")
+	if err != nil {
+		return "", fmt.Errorf("parsing agentgateway-openclaw.json template: %w", err)
+	}
+	data := OpenClawConfigData{GatewayToken: gatewayToken}
+	if appsDomain != "" {
+		host := fmt.Sprintf("%s-%s.%s", gw.Name, gw.Namespace, appsDomain)
+		data.AllowedOrigins = []string{
+			fmt.Sprintf("https://%s", host),
+			fmt.Sprintf("http://%s", host),
+			"http://localhost:18789",
+			"http://127.0.0.1:18789",
+		}
+	} else {
+		data.AllowedOrigins = []string{
+			"http://localhost:18789",
+			"http://127.0.0.1:18789",
+		}
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return "", fmt.Errorf("executing agentgateway-openclaw.json template: %w", err)
+	}
+	return buf.String(), nil
 }
 
 func renderTemplate(name string, data interface{}) (string, error) {

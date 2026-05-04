@@ -1,0 +1,17 @@
+apiVersion: agentoffice.ai/v1alpha1
+kind: AgentGateway
+metadata:
+  name: research-gateway
+  namespace: agent-office
+spec:
+  displayName: "Research Gateway"
+  description: |
+    Shared OpenClaw gateway runtime for the Karpathy auto-research crew.
+    Multiple AgentWorkstations with `runtime.shared.gatewayRef:
+    research-gateway` slot in as logical openclaw agents inside this
+    pod, sharing the paired browser node-host VM via a per-agent
+    Chromium profile.
+  image: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/openclaw:latest
+  nodeHostRef:
+    name: fedora-black-zebra-36
+    namespace: default

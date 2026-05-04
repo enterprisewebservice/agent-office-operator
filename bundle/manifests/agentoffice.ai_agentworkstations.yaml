@@ -225,6 +225,39 @@ spec:
                       More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
                     type: object
                 type: object
+              runtime:
+                description: |-
+                  Runtime selects how the operator materializes this agent. If
+                  omitted, defaults to `dedicated` (slice-4 model: own Pod and
+                  dependent K8s objects). Set `runtime.shared.gatewayRef` to
+                  slot the agent into an existing AgentGateway as a logical
+                  openclaw agent (multi-agent-in-one-pod model).
+                properties:
+                  dedicated:
+                    description: 'Dedicated runtime: own Pod, own PVC, own Service,
+                      own Route.'
+                    type: object
+                  shared:
+                    description: |-
+                      Shared runtime: logical openclaw agent inside the referenced
+                      AgentGateway's pod, sharing the gateway's paired node-host
+                      browser via a per-agent profile.
+                    properties:
+                      browserProfile:
+                        description: |-
+                          BrowserProfile is the Chromium profile / user-data-dir name
+                          to use for this agent on the shared node-host. Defaults to the
+                          AW's own name if omitted.
+                        type: string
+                      gatewayRef:
+                        description: |-
+                          GatewayRef is the name of the AgentGateway in the same
+                          namespace that hosts this agent.
+                        type: string
+                    required:
+                    - gatewayRef
+                    type: object
+                type: object
               systemPrompt:
                 description: SystemPrompt defines the agent's behavior.
                 type: string
