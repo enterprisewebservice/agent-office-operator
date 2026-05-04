@@ -6,6 +6,23 @@ metadata:
       [
         {
           "apiVersion": "agentoffice.ai/v1alpha1",
+          "kind": "AgentGateway",
+          "metadata": {
+            "name": "research-gateway",
+            "namespace": "agent-office"
+          },
+          "spec": {
+            "description": "Shared OpenClaw gateway runtime for the Karpathy auto-research crew.\nMultiple AgentWorkstations with `runtime.shared.gatewayRef:\nresearch-gateway` slot in as logical openclaw agents inside this\npod, sharing the paired browser node-host VM via a per-agent\nChromium profile.\n",
+            "displayName": "Research Gateway",
+            "image": "quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/openclaw:latest",
+            "nodeHostRef": {
+              "name": "fedora-black-zebra-36",
+              "namespace": "default"
+            }
+          }
+        },
+        {
+          "apiVersion": "agentoffice.ai/v1alpha1",
           "kind": "AgentWorkstation",
           "metadata": {
             "labels": {
@@ -32,7 +49,7 @@ metadata:
     capabilities: Basic Install
     categories: AI/Machine Learning, Developer Tools
     containerImage: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-operator:v0.0.1
-    createdAt: "2026-05-04T17:39:17Z"
+    createdAt: "2026-05-04T19:41:12Z"
     description: OLM-managed operator for the Governed Agent Platform. Owns the AgentWorkstation
       and MemoryModule CRDs and reconciles the per-agent runtime artifacts (Deployment,
       Service, ConfigMap, PVC) on OpenShift.
@@ -40,12 +57,22 @@ metadata:
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
     repository: https://github.com/enterprisewebservice/agent-office-operator
     support: Red Hat Solution Architecture
-  name: agent-office-operator.v0.0.11
+  name: agent-office-operator.v0.0.12
   namespace: placeholder
 spec:
   apiservicedefinitions: {}
   customresourcedefinitions:
     owned:
+    - description: |-
+        AgentGateway is a single OpenClaw gateway runtime that hosts one or
+        more AgentWorkstations as logical openclaw agents. Multiple AWs
+        with `spec.runtime.shared.gatewayRef: <this>` share this gateway's
+        pod, paired node-host, and browser profiles. Per OpenClaw's
+        doc'd multi-agent model.
+      displayName: Agent Gateway
+      kind: AgentGateway
+      name: agentgateways.agentoffice.ai
+      version: v1alpha1
     - description: |-
         AgentWorkstation is a single governed coding-agent instance — the cluster
         representation of "one seat in the office". The operator owns its
@@ -222,7 +249,7 @@ spec:
                       fieldPath: metadata.annotations['olm.targetNamespaces']
                 - name: CLUSTER_APPS_DOMAIN
                   value: apps.salamander.aimlworkbench.com
-                image: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-operator:v0.0.11
+                image: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-operator:v0.0.12
                 imagePullPolicy: Always
                 livenessProbe:
                   httpGet:
@@ -325,4 +352,4 @@ spec:
   provider:
     name: Red Hat Solution Architecture
     url: https://github.com/enterprisewebservice
-  version: 0.0.11
+  version: 0.0.12

@@ -80,8 +80,65 @@ func (r *AgentGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}
 
-	// 3. Compute status from observed Deployment + Route + AW count.
+	// 3. Ensure the gateway's openclaw.json has models.providers
+	//    declared. The init container is seed-only, so existing PVCs
+	//    that pre-date the providers field need an in-place merge.
+	//    Idempotent: if the provider already exists, this is a no-op.
+	if err := r.maybeMergeModelsProviders(ctx, &gw); err != nil {
+		log.Info("models.providers merge skipped", "err", err)
+	}
+
+	// 4. Compute status from observed Deployment + Route + AW count.
 	return r.reconcileGatewayStatus(ctx, &gw)
+}
+
+// maybeMergeModelsProviders ensures models.providers.openai exists in
+// the gateway's openclaw.json. Existing PVCs created before the
+// providers feature don't have it; without it, agents fail with
+// "No API key found for provider openai" even when OPENAI_API_KEY is
+// in the pod env. Idempotent — only writes when the field is absent
+// or shape-incomplete.
+func (r *AgentGatewayReconciler) maybeMergeModelsProviders(ctx context.Context, gw *agentofficev1alpha1.AgentGateway) error {
+	if r.RestConfig == nil {
+		return fmt.Errorf("RestConfig not set; cannot exec")
+	}
+	pod, err := r.findReadyGatewayPod(ctx, gw)
+	if err != nil {
+		return err
+	}
+	script := `
+const fs = require("fs");
+const p = "/home/node/.openclaw/openclaw.json";
+const cfg = JSON.parse(fs.readFileSync(p, "utf8"));
+let changed = false;
+cfg.models = cfg.models || {};
+cfg.models.providers = cfg.models.providers || {};
+if (!cfg.models.providers.openai || !cfg.models.providers.openai.apiKey) {
+  cfg.models.providers.openai = {
+    baseUrl: "https://api.openai.com/v1",
+    api: "openai-completions",
+    apiKey: "${OPENAI_API_KEY}",
+    models: [
+      { id: "gpt-5.4", name: "gpt-5.4" },
+      { id: "gpt-4o-mini", name: "gpt-4o-mini" },
+      { id: "gpt-4o", name: "gpt-4o" }
+    ]
+  };
+  changed = true;
+}
+if (changed) {
+  fs.writeFileSync(p, JSON.stringify(cfg, null, 2));
+  console.log("MERGED_MODELS_PROVIDERS");
+} else {
+  console.log("NO_CHANGE");
+}
+`
+	out, err := r.execInGatewayPod(ctx, pod, []string{"node", "-e", script})
+	if err != nil {
+		return fmt.Errorf("merge models.providers: %w (out=%s)", err, out)
+	}
+	logf.FromContext(ctx).V(1).Info("models.providers merge", "result", strings.TrimSpace(out))
+	return nil
 }
 
 // maybeAutoApprovePending checks the gateway pod's pairing store and

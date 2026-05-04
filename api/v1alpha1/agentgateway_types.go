@@ -86,6 +86,15 @@ type AgentGatewaySpec struct {
 	// requests/limits.
 	// +optional
 	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// EnvFromSecretRef is the name of a Secret in the same namespace
+	// whose keys are exposed as env vars on the gateway pod
+	// (envFrom). The gateway's openclaw.json references those vars
+	// (e.g. ${OPENAI_API_KEY}) so model-provider auth flows through
+	// without per-agent auth-profiles.json. Typically points at a
+	// Secret with OPENAI_API_KEY / ANTHROPIC_API_KEY entries.
+	// +optional
+	EnvFromSecretRef string `json:"envFromSecretRef,omitempty"`
 }
 
 // AgentGatewayPhase is the high-level lifecycle state.

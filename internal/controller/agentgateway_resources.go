@@ -39,6 +39,30 @@ func gwDeployName(gwName string)  string { return gwName }
 func gwServiceName(gwName string) string { return gwName }
 func gwRouteName(gwName string)   string { return gwName }
 
+// gatewayEnvFrom builds the gateway container's envFrom list. Always
+// includes the gateway's own token Secret; optionally adds an
+// operator-supplied secret carrying model-provider API keys
+// (OPENAI_API_KEY / ANTHROPIC_API_KEY / etc.) when
+// spec.envFromSecretRef is set.
+func gatewayEnvFrom(gw *agentofficev1alpha1.AgentGateway, tokenSecretName string) []corev1.EnvFromSource {
+	out := []corev1.EnvFromSource{
+		{SecretRef: &corev1.SecretEnvSource{
+			LocalObjectReference: corev1.LocalObjectReference{Name: tokenSecretName},
+		}},
+	}
+	if gw.Spec.EnvFromSecretRef != "" {
+		out = append(out, corev1.EnvFromSource{
+			SecretRef: &corev1.SecretEnvSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: gw.Spec.EnvFromSecretRef},
+				Optional:             ptrBool(true),
+			},
+		})
+	}
+	return out
+}
+
+func ptrBool(b bool) *bool { return &b }
+
 // gatewayLabels stamps a uniform set on every owned resource.
 func gatewayLabels(name string) map[string]string {
 	return map[string]string{
@@ -256,11 +280,7 @@ func (r *AgentGatewayReconciler) reconcileGatewayDeployment(ctx context.Context,
 					Ports: []corev1.ContainerPort{{
 						Name: "gateway", ContainerPort: 18789, Protocol: corev1.ProtocolTCP,
 					}},
-					EnvFrom: []corev1.EnvFromSource{
-						{SecretRef: &corev1.SecretEnvSource{
-							LocalObjectReference: corev1.LocalObjectReference{Name: tokenSecretName},
-						}},
-					},
+					EnvFrom: gatewayEnvFrom(gw, tokenSecretName),
 					VolumeMounts: []corev1.VolumeMount{
 						{Name: "workspace", MountPath: "/home/node/.openclaw"},
 						{Name: "dshm", MountPath: "/dev/shm"},
