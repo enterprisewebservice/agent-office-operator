@@ -95,6 +95,42 @@ type AgentGatewaySpec struct {
 	// Secret with OPENAI_API_KEY / ANTHROPIC_API_KEY entries.
 	// +optional
 	EnvFromSecretRef string `json:"envFromSecretRef,omitempty"`
+
+	// AllowedUsers pre-approves channel senders so they skip the
+	// "OpenClaw: access not configured" pairing prompt on first
+	// contact. The operator merges these into the gateway's
+	// `<channel>-<accountId>-allowFrom.json` (e.g.
+	// `discord-default-allowFrom.json`). Idempotent — re-running a
+	// reconcile with the same list is a no-op.
+	//
+	// Example: allow a Discord user to DM the bot directly:
+	//
+	//   allowedUsers:
+	//     - channel: discord
+	//       id: "745444500335231169"
+	// +optional
+	AllowedUsers []AllowedUser `json:"allowedUsers,omitempty"`
+}
+
+// AllowedUser is one entry in AgentGatewaySpec.AllowedUsers — a
+// channel sender ID that's pre-approved to talk to the gateway.
+type AllowedUser struct {
+	// Channel is the OpenClaw channel plugin id (e.g. "discord",
+	// "slack"). Defaults to "discord".
+	// +kubebuilder:default=discord
+	// +optional
+	Channel string `json:"channel,omitempty"`
+
+	// AccountID is the channel account scope. For Discord this is
+	// the bot account; OpenClaw uses "default" when there's only
+	// one. Defaults to "default".
+	// +kubebuilder:default=default
+	// +optional
+	AccountID string `json:"accountId,omitempty"`
+
+	// ID is the channel sender ID (e.g. a Discord user ID
+	// snowflake). Required.
+	ID string `json:"id"`
 }
 
 // AgentGatewayPhase is the high-level lifecycle state.

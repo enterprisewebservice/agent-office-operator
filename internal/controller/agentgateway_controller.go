@@ -13,6 +13,7 @@ package controller
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -88,8 +89,96 @@ func (r *AgentGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		log.Info("models.providers merge skipped", "err", err)
 	}
 
-	// 4. Compute status from observed Deployment + Route + AW count.
+	// 4. Pre-approve channel senders listed in spec.allowedUsers by
+	//    merging them into <channel>-<accountId>-allowFrom.json.
+	//    Skips the "OpenClaw: access not configured" prompt for those
+	//    users on first contact. Idempotent.
+	if err := r.maybeMergeAllowedUsers(ctx, &gw); err != nil {
+		log.Info("allowedUsers merge skipped", "err", err)
+	}
+
+	// 5. Compute status from observed Deployment + Route + AW count.
 	return r.reconcileGatewayStatus(ctx, &gw)
+}
+
+// maybeMergeAllowedUsers writes the configured spec.allowedUsers IDs
+// into the matching <channel>-<accountId>-allowFrom.json on the
+// gateway PVC. OpenClaw consults that file before prompting a sender
+// to pair, so listed users skip the pairing handshake entirely.
+// Idempotent — only writes when there are new entries to add.
+func (r *AgentGatewayReconciler) maybeMergeAllowedUsers(ctx context.Context, gw *agentofficev1alpha1.AgentGateway) error {
+	if len(gw.Spec.AllowedUsers) == 0 {
+		return nil
+	}
+	if r.RestConfig == nil {
+		return fmt.Errorf("RestConfig not set; cannot exec")
+	}
+	pod, err := r.findReadyGatewayPod(ctx, gw)
+	if err != nil {
+		return err
+	}
+
+	// Group IDs by (channel, accountId) so we write at most one file
+	// per group and avoid races against ourselves.
+	groups := map[[2]string][]string{}
+	for _, u := range gw.Spec.AllowedUsers {
+		ch := u.Channel
+		if ch == "" {
+			ch = "discord"
+		}
+		acct := u.AccountID
+		if acct == "" {
+			acct = "default"
+		}
+		id := strings.TrimSpace(u.ID)
+		if id == "" {
+			continue
+		}
+		key := [2]string{ch, acct}
+		groups[key] = append(groups[key], id)
+	}
+
+	for key, ids := range groups {
+		ch, acct := key[0], key[1]
+		idsJSON, _ := json.Marshal(ids)
+		// Path layout matches /app/dist/pairing-store-*.js:
+		//   resolveAllowFromPath(channel, env, accountId) →
+		//     <oauthDir>/<channel>-<accountId>-allowFrom.json
+		// (or <channel>-allowFrom.json when accountId is empty —
+		// we always pass one so we hit the namespaced path).
+		fileName := fmt.Sprintf("%s-%s-allowFrom.json", ch, acct)
+		script := fmt.Sprintf(`
+const fs = require("fs"); const path = require("path");
+const dir = "/home/node/.openclaw/credentials";
+const file = path.join(dir, %q);
+const want = %s;
+let store = { version: 1, allowFrom: [] };
+try { store = JSON.parse(fs.readFileSync(file, "utf8")); } catch (e) {}
+const list = Array.isArray(store.allowFrom) ? store.allowFrom : [];
+const set = new Set(list.map(String));
+let added = 0;
+for (const id of want) {
+  const s = String(id).trim();
+  if (!s || set.has(s)) continue;
+  list.push(s); set.add(s); added++;
+}
+if (added > 0) {
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ version: 1, allowFrom: list }, null, 2));
+  console.log("ALLOWED_USERS_MERGED file=" + file + " added=" + added);
+} else {
+  console.log("NO_CHANGE file=" + file);
+}
+`, fileName, string(idsJSON))
+
+		out, err := r.execInGatewayPod(ctx, pod, []string{"node", "-e", script})
+		if err != nil {
+			return fmt.Errorf("merge allowedUsers (%s/%s): %w (out=%s)", ch, acct, err, out)
+		}
+		logf.FromContext(ctx).V(1).Info("allowedUsers merge",
+			"channel", ch, "accountId", acct, "result", strings.TrimSpace(out))
+	}
+	return nil
 }
 
 // maybeMergeModelsProviders ensures models.providers.openai exists in
