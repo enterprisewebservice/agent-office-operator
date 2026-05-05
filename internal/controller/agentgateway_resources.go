@@ -63,6 +63,63 @@ func gatewayEnvFrom(gw *agentofficev1alpha1.AgentGateway, tokenSecretName string
 
 func ptrBool(b bool) *bool { return &b }
 
+// gatewayVolumeMounts returns the openclaw container's volume mounts.
+// Always includes the workspace PVC + /dev/shm. When
+// spec.codexCredentialsSecretRef is set, also mounts the secret's
+// `auth.json` key as the file at /home/node/.codex/auth.json — the
+// path OpenClaw natively reads on agent startup
+// (pi-ai readCodexCliCredentials, see profiles-*.js in /app/dist).
+func gatewayVolumeMounts(gw *agentofficev1alpha1.AgentGateway) []corev1.VolumeMount {
+	mounts := []corev1.VolumeMount{
+		{Name: "workspace", MountPath: "/home/node/.openclaw"},
+		{Name: "dshm", MountPath: "/dev/shm"},
+	}
+	if gw.Spec.CodexCredentialsSecretRef != "" {
+		mounts = append(mounts, corev1.VolumeMount{
+			Name:      "codex-auth",
+			MountPath: "/home/node/.codex/auth.json",
+			SubPath:   "auth.json",
+			ReadOnly:  true,
+		})
+	}
+	return mounts
+}
+
+// gatewayVolumes returns the pod's volumes. Always: openclaw config
+// CM, workspace PVC, in-memory /dev/shm. When codex creds are
+// configured, also project the secret's auth.json key.
+func gatewayVolumes(gw *agentofficev1alpha1.AgentGateway, dshmSize resource.Quantity) []corev1.Volume {
+	vols := []corev1.Volume{
+		{Name: "config", VolumeSource: corev1.VolumeSource{
+			ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: gwCMName(gw.Name)},
+			}}},
+		{Name: "workspace", VolumeSource: corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+				ClaimName: gwPVCName(gw.Name),
+			}}},
+		{Name: "dshm", VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{
+				Medium: corev1.StorageMediumMemory, SizeLimit: &dshmSize,
+			}}},
+	}
+	if gw.Spec.CodexCredentialsSecretRef != "" {
+		vols = append(vols, corev1.Volume{
+			Name: "codex-auth",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: gw.Spec.CodexCredentialsSecretRef,
+					Items: []corev1.KeyToPath{
+						{Key: "auth.json", Path: "auth.json"},
+					},
+					Optional: ptrBool(true),
+				},
+			},
+		})
+	}
+	return vols
+}
+
 // gatewayLabels stamps a uniform set on every owned resource.
 func gatewayLabels(name string) map[string]string {
 	return map[string]string{
@@ -280,26 +337,10 @@ func (r *AgentGatewayReconciler) reconcileGatewayDeployment(ctx context.Context,
 					Ports: []corev1.ContainerPort{{
 						Name: "gateway", ContainerPort: 18789, Protocol: corev1.ProtocolTCP,
 					}},
-					EnvFrom: gatewayEnvFrom(gw, tokenSecretName),
-					VolumeMounts: []corev1.VolumeMount{
-						{Name: "workspace", MountPath: "/home/node/.openclaw"},
-						{Name: "dshm", MountPath: "/dev/shm"},
-					},
+					EnvFrom:      gatewayEnvFrom(gw, tokenSecretName),
+					VolumeMounts: gatewayVolumeMounts(gw),
 				}},
-				Volumes: []corev1.Volume{
-					{Name: "config", VolumeSource: corev1.VolumeSource{
-						ConfigMap: &corev1.ConfigMapVolumeSource{
-							LocalObjectReference: corev1.LocalObjectReference{Name: gwCMName(gw.Name)},
-						}}},
-					{Name: "workspace", VolumeSource: corev1.VolumeSource{
-						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-							ClaimName: gwPVCName(gw.Name),
-						}}},
-					{Name: "dshm", VolumeSource: corev1.VolumeSource{
-						EmptyDir: &corev1.EmptyDirVolumeSource{
-							Medium: corev1.StorageMediumMemory, SizeLimit: &dshmSize,
-						}}},
-				},
+				Volumes: gatewayVolumes(gw, dshmSize),
 			},
 		}
 		if gw.Spec.Resources != nil {

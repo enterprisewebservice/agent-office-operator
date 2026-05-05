@@ -146,6 +146,7 @@ spec:
                     - smr
                     - anthropic
                     - openai
+                    - openai-codex
                     - custom
                     type: string
                 required:

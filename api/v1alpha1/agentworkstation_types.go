@@ -23,7 +23,7 @@ import (
 
 // ModelProvider identifies which LLM backend an AgentWorkstation uses.
 //
-// +kubebuilder:validation:Enum=smr;anthropic;openai;custom
+// +kubebuilder:validation:Enum=smr;anthropic;openai;openai-codex;custom
 type ModelProvider string
 
 const (
@@ -31,8 +31,19 @@ const (
 	ModelProviderSMR ModelProvider = "smr"
 	// ModelProviderAnthropic talks directly to Anthropic's API.
 	ModelProviderAnthropic ModelProvider = "anthropic"
-	// ModelProviderOpenAI talks to OpenAI / Codex.
+	// ModelProviderOpenAI talks to OpenAI's pay-per-request API
+	// using an OPENAI_API_KEY (rate-limited).
 	ModelProviderOpenAI ModelProvider = "openai"
+	// ModelProviderOpenAICodex routes through a ChatGPT/Codex
+	// subscription via OAuth — uses your existing Pro/Team plan
+	// quota instead of the API tier. Requires the gateway pod to
+	// have ~/.codex/auth.json populated; set
+	// AgentGateway.spec.codexCredentialsSecretRef so the operator
+	// mounts your codex-subscription-credentials secret there.
+	// OpenClaw natively syncs the file into its own auth-profiles
+	// store on agent startup (see pi-ai
+	// readCodexCliCredentials / syncExternalCliCredentialsForProvider).
+	ModelProviderOpenAICodex ModelProvider = "openai-codex"
 	// ModelProviderCustom is for any other endpoint.
 	ModelProviderCustom ModelProvider = "custom"
 )

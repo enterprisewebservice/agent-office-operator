@@ -96,6 +96,22 @@ type AgentGatewaySpec struct {
 	// +optional
 	EnvFromSecretRef string `json:"envFromSecretRef,omitempty"`
 
+	// CodexCredentialsSecretRef is the name of a Secret in the same
+	// namespace whose `auth.json` key holds the ChatGPT/Codex
+	// subscription OAuth tokens (the contents of ~/.codex/auth.json
+	// on a developer's laptop after `codex login`). When set, the
+	// operator mounts that file at /home/node/.codex/auth.json
+	// inside the gateway pod. OpenClaw natively reads this file at
+	// agent startup (pi-ai readCodexCliCredentials) and syncs it
+	// into its auth-profiles store as the "openai-codex" provider —
+	// no extra config needed. Use this instead of EnvFromSecretRef
+	// when you want agents to consume your ChatGPT Pro/Team plan
+	// quota via OAuth instead of the rate-limited pay-per-request
+	// API tier (set the agent's spec.model.provider to
+	// "openai-codex").
+	// +optional
+	CodexCredentialsSecretRef string `json:"codexCredentialsSecretRef,omitempty"`
+
 	// AllowedUsers pre-approves channel senders so they skip the
 	// "OpenClaw: access not configured" pairing prompt on first
 	// contact. The operator merges these into the gateway's
