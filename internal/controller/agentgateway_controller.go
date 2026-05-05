@@ -200,8 +200,23 @@ const fs = require("fs");
 const p = "/home/node/.openclaw/openclaw.json";
 const cfg = JSON.parse(fs.readFileSync(p, "utf8"));
 let changed = false;
+cfg.gateway = cfg.gateway || {};
+cfg.gateway.auth = cfg.gateway.auth || {};
+cfg.gateway.remote = cfg.gateway.remote || {};
 cfg.models = cfg.models || {};
 cfg.models.providers = cfg.models.providers || {};
+
+// Convert any literal gateway tokens to env-var refs so secret
+// rotation doesn't strand the openclaw.json file. Init container
+// is seed-only; this merge is the in-place migration path.
+if (cfg.gateway.auth.token !== "${OPENCLAW_GATEWAY_TOKEN}") {
+  cfg.gateway.auth.token = "${OPENCLAW_GATEWAY_TOKEN}";
+  changed = true;
+}
+if (cfg.gateway.remote.token !== "${OPENCLAW_GATEWAY_TOKEN}") {
+  cfg.gateway.remote.token = "${OPENCLAW_GATEWAY_TOKEN}";
+  changed = true;
+}
 
 // Pay-per-request OpenAI provider (uses OPENAI_API_KEY env).
 if (!cfg.models.providers.openai || !cfg.models.providers.openai.apiKey) {

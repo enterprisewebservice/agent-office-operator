@@ -23,7 +23,7 @@ spec:
     - name: output-image
       # Stable tag. OLM's registryPoll picks up digest changes within 5
       # minutes; no Image Updater needed.
-      value: 'quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-operator-catalog:v0.0.17'
+      value: 'quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-operator-catalog:v0.0.18'
     # File-Based Catalog index image. The catalog/ dir contains the
     # declarative-config YAML that opm serves to OLM.
     - name: dockerfile

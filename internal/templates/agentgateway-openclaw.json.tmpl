@@ -5,10 +5,10 @@
     "bind": "lan",
     "auth": {
       "mode": "token",
-      "token": "{{.GatewayToken}}"
+      "token": "${OPENCLAW_GATEWAY_TOKEN}"
     },
     "remote": {
-      "token": "{{.GatewayToken}}"
+      "token": "${OPENCLAW_GATEWAY_TOKEN}"
     },
     "controlUi": {
       "allowedOrigins": [{{range $i, $o := .AllowedOrigins}}{{if $i}},{{end}}"{{$o}}"{{end}}]
