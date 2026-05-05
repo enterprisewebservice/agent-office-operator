@@ -3,10 +3,10 @@
     "port": 18789,
     "auth": {
       "mode": "token",
-      "token": "${OPENCLAW_GATEWAY_TOKEN}"
+      "token": "{{.GatewayToken}}"
     },
     "remote": {
-      "token": "${OPENCLAW_GATEWAY_TOKEN}"
+      "token": "{{.GatewayToken}}"
     },
     "controlUi": {
       "allowedOrigins": [{{range $i, $o := .AllowedOrigins}}{{if $i}},{{end}}"{{$o}}"{{end}}]

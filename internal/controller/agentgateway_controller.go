@@ -206,15 +206,21 @@ cfg.gateway.remote = cfg.gateway.remote || {};
 cfg.models = cfg.models || {};
 cfg.models.providers = cfg.models.providers || {};
 
-// Convert any literal gateway tokens to env-var refs so secret
-// rotation doesn't strand the openclaw.json file. Init container
-// is seed-only; this merge is the in-place migration path.
-if (cfg.gateway.auth.token !== "${OPENCLAW_GATEWAY_TOKEN}") {
-  cfg.gateway.auth.token = "${OPENCLAW_GATEWAY_TOKEN}";
+// Sync gateway.auth.token / remote.token to the CURRENT env value
+// of OPENCLAW_GATEWAY_TOKEN. The init container is seed-only and
+// the gateway compares incoming WS auth against the literal in
+// openclaw.json (env-var refs aren't expanded for this path), so
+// when the Secret rotates the openclaw.json gets stranded with
+// the old token and every connection fails with token_mismatch.
+// Re-running this on every reconcile keeps openclaw.json in sync
+// with the live env. Idempotent — only writes when out of sync.
+const envTok = process.env.OPENCLAW_GATEWAY_TOKEN || "";
+if (envTok && cfg.gateway.auth.token !== envTok) {
+  cfg.gateway.auth.token = envTok;
   changed = true;
 }
-if (cfg.gateway.remote.token !== "${OPENCLAW_GATEWAY_TOKEN}") {
-  cfg.gateway.remote.token = "${OPENCLAW_GATEWAY_TOKEN}";
+if (envTok && cfg.gateway.remote.token !== envTok) {
+  cfg.gateway.remote.token = envTok;
   changed = true;
 }
 
