@@ -202,12 +202,15 @@ const cfg = JSON.parse(fs.readFileSync(p, "utf8"));
 let changed = false;
 cfg.models = cfg.models || {};
 cfg.models.providers = cfg.models.providers || {};
+
+// Pay-per-request OpenAI provider (uses OPENAI_API_KEY env).
 if (!cfg.models.providers.openai || !cfg.models.providers.openai.apiKey) {
   cfg.models.providers.openai = {
     baseUrl: "https://api.openai.com/v1",
     api: "openai-completions",
     apiKey: "${OPENAI_API_KEY}",
     models: [
+      { id: "gpt-5.5", name: "GPT-5.5" },
       { id: "gpt-5.4", name: "gpt-5.4" },
       { id: "gpt-4o-mini", name: "gpt-4o-mini" },
       { id: "gpt-4o", name: "gpt-4o" }
@@ -215,6 +218,28 @@ if (!cfg.models.providers.openai || !cfg.models.providers.openai.apiKey) {
   };
   changed = true;
 }
+
+// ChatGPT Pro / Codex provider (OAuth via ~/.codex/auth.json).
+// pi-ai's stock model catalog is outdated and only goes up to
+// gpt-5.3-codex; declare current models here so users can ask for
+// gpt-5.4/5.5 without OpenClaw silently falling back to the
+// rate-limited openai/gpt-X path.
+const codexNeedsSeed = !cfg.models.providers["openai-codex"]
+  || !Array.isArray(cfg.models.providers["openai-codex"].models)
+  || cfg.models.providers["openai-codex"].models.length === 0;
+if (codexNeedsSeed) {
+  cfg.models.providers["openai-codex"] = {
+    baseUrl: "https://chatgpt.com/backend-api",
+    api: "openai-codex-responses",
+    models: [
+      { id: "gpt-5.5", name: "GPT-5.5", api: "openai-codex-responses" },
+      { id: "gpt-5.4", name: "GPT-5.4", api: "openai-codex-responses" },
+      { id: "gpt-5.3-codex", name: "GPT-5.3 Codex", api: "openai-codex-responses" }
+    ]
+  };
+  changed = true;
+}
+
 if (changed) {
   fs.writeFileSync(p, JSON.stringify(cfg, null, 2));
   console.log("MERGED_MODELS_PROVIDERS");
