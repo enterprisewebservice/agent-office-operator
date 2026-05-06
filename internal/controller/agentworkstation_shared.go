@@ -139,50 +139,87 @@ func (r *AgentWorkstationReconciler) reconcileSharedFull(ctx context.Context, aw
 		return ctrl.Result{}, fmt.Errorf("marshal agent entry: %w", err)
 	}
 
-	// 4. Seed per-agent workspace files (idempotent).
+	// 4. Seed per-agent workspace files. Always overwrite on every
+	//    reconcile so AW spec edits (system-prompt tweaks, emoji
+	//    changes, displayName updates) propagate to the gateway. The
+	//    previous `[ -f ... ] || cat` skip-if-exists pattern stranded
+	//    SOUL.md with stale content the moment the AW spec changed —
+	//    in particular, the wbr agent ended up with an early
+	//    truncated systemPrompt that omitted the "use browser with
+	//    target: node" guidance, so the agent silently fell back to
+	//    web_fetch / training data instead of driving the VM browser.
+	//    Use Go templating (no shell HEREDOCs) to dodge quoting
+	//    pitfalls when the prompt contains backticks / `$`.
 	identity := defaultIfEmpty(aw.Spec.DisplayName, agentID)
 	emoji := aw.Spec.Emoji
 	identityMd := fmt.Sprintf("# %s\n\n%s %s\n", identity, emoji, identity)
 	soulMd := fmt.Sprintf("# %s\n\n%s\n", identity, aw.Spec.SystemPrompt)
 
-	seedScript := fmt.Sprintf(`set -e
-mkdir -p ~/.openclaw/workspaces/%[1]s
-[ -f ~/.openclaw/workspaces/%[1]s/IDENTITY.md ] || cat > ~/.openclaw/workspaces/%[1]s/IDENTITY.md <<'EOF'
-%[2]s
-EOF
-[ -f ~/.openclaw/workspaces/%[1]s/SOUL.md ] || cat > ~/.openclaw/workspaces/%[1]s/SOUL.md <<'EOF'
-%[3]s
-EOF
-echo seeded`, agentID, identityMd, soulMd)
+	seedScript := fmt.Sprintf(`
+const fs = require("fs"); const path = require("path");
+const dir = "/home/node/.openclaw/workspaces/" + %[1]q;
+fs.mkdirSync(dir, { recursive: true });
+const writes = {
+  "IDENTITY.md": %[2]q,
+  "SOUL.md":     %[3]q,
+};
+let touched = 0;
+for (const [f, content] of Object.entries(writes)) {
+  const p = path.join(dir, f);
+  let cur = "";
+  try { cur = fs.readFileSync(p, "utf8"); } catch (e) {}
+  if (cur !== content) { fs.writeFileSync(p, content); touched++; }
+}
+console.log("SEEDED dir=" + dir + " touched=" + touched);
+`, agentID, identityMd, soulMd)
 
-	if _, err := r.execInPod(ctx, gwPod, []string{"sh", "-c", seedScript}); err != nil {
+	if _, err := r.execInPod(ctx, gwPod, []string{"node", "-e", seedScript}); err != nil {
 		return ctrl.Result{}, fmt.Errorf("seed agent workspace: %w", err)
 	}
 
-	// 5. Merge agent entry, browser-profile allowlist, and (optional)
-	// Discord binding into ~/.openclaw/openclaw.json directly.
+	// 5. Merge agent entry, browser-profile allowlist, and Discord
+	// binding into ~/.openclaw/openclaw.json.
 	//
-	// We do NOT use `openclaw config set` for this — its CLI flags
-	// (--json-value, --append, --append-json) don't exist in the
-	// 2026.3.x release, and the supported value-mode setter would
-	// clobber the entire array. Instead we read the JSON, merge
-	// (idempotent by id / by string equality), and write back. Same
-	// pattern as the gateway controller's auto-approve action.
+	// Loop-safety contract (this is the file the gateway daemon
+	// watches; every write triggers a hot-reload, and unconditional
+	// writes were how we ended up in a reconcile/reload thrash on a
+	// previous slice): the merge is read → mutate-in-memory →
+	// compare → write-only-if-changed. When the AW spec hasn't
+	// drifted, this is a pure no-op and the gateway never sees a
+	// file event.
 	//
-	// After write, `openclaw config validate` confirms the merged
-	// shape is schema-valid; if it isn't, we restore the .bak.
+	// Binding model — one channel per agent persona, no catch-alls:
+	//   * If the AW has spec.channels.discord.url with a real
+	//     channel ID, write { agentId, match: { channel: <id>,
+	//     accountId: "default" } }. accountId is the bot account
+	//     name in openclaw.json (default = the gateway's lone bot),
+	//     NOT the transport. Earlier slices had `"discord"` here
+	//     (transport name), which never matches.
+	//   * If the URL is empty / @me / not parseable, leave bindings
+	//     alone for this agent and surface a friendly status hint.
+	//   * Strip ANY existing binding whose match.channel is a
+	//     transport name (discord/slack/telegram/etc) — those are
+	//     catch-alls that shadow channel-specific routes. Strip
+	//     stale bindings for THIS agent that point at a different
+	//     channel than the AW spec (so renaming the channel updates
+	//     routing without leaving an old rule behind).
+	//
+	// `openclaw config validate` is run advisory after; failures are
+	// logged but not fatal because the merge above only ever
+	// produces schema-valid JSON we constructed in Go.
 	mergeScript := fmt.Sprintf(`
 const fs = require("fs");
 const path = "/home/node/.openclaw/openclaw.json";
-const backup = path + ".bak.merge";
 const agentEntry = %[1]s;
 const profile = %[2]q;
 const channelId = %[3]q;
 const agentId = %[4]q;
 
+const TRANSPORTS = new Set(["discord","slack","telegram","whatsapp","matrix","mastodon"]);
+
 const raw = fs.readFileSync(path, "utf8");
-fs.writeFileSync(backup, raw);
 const cfg = JSON.parse(raw);
+const before = JSON.stringify(cfg);
 
 // agents.list — merge by id
 cfg.agents = cfg.agents || {};
@@ -200,18 +237,38 @@ const allow = Array.isArray(cfg.nodeHost.browserProxy.allowProfiles) ? cfg.nodeH
 if (!allow.includes(profile)) allow.push(profile);
 cfg.nodeHost.browserProxy.allowProfiles = allow;
 
-// bindings — only if we have a real Discord channel id (not @me)
-if (channelId) {
-  const bindings = Array.isArray(cfg.bindings) ? cfg.bindings : [];
-  const idx = bindings.findIndex(b => b && b.agentId === agentId && b.match && b.match.channel === channelId);
-  const binding = { agentId, match: { channel: channelId, accountId: "discord" } };
-  if (idx >= 0) bindings[idx] = binding;
-  else bindings.push(binding);
-  cfg.bindings = bindings;
+// bindings — strip catch-alls + stale-for-this-agent + this-agent's
+// existing entry, then re-add a single channel-specific entry if we
+// have a real channel id. Result: at most one binding per (agentId,
+// channelId) pair, no transport catch-alls anywhere.
+let bindings = Array.isArray(cfg.bindings) ? cfg.bindings : [];
+bindings = bindings.filter(b => {
+  if (!b || !b.match) return false;
+  const ch = b.match.channel;
+  if (!ch || TRANSPORTS.has(String(ch))) return false;     // catch-alls / empty
+  if (b.agentId === agentId) return false;                  // this agent's old rule(s)
+  return true;
+});
+// Normalize accountId on survivors (legacy rules wrote "discord" here).
+for (const b of bindings) {
+  if (!b.match.accountId || TRANSPORTS.has(String(b.match.accountId))) {
+    b.match.accountId = "default";
+  }
 }
+if (channelId) {
+  bindings.push({ agentId, match: { channel: channelId, accountId: "default" } });
+}
+// Stable sort by channel id for deterministic file content.
+bindings.sort((a,b) => String(a.match.channel).localeCompare(String(b.match.channel)));
+cfg.bindings = bindings;
 
-fs.writeFileSync(path, JSON.stringify(cfg, null, 2));
-console.log("MERGED agent=" + agentId + " profile=" + profile + " channel=" + (channelId || "(none)"));
+const after = JSON.stringify(cfg);
+if (after === before) {
+  console.log("NO_CHANGE agent=" + agentId + " profile=" + profile + " channel=" + (channelId || "(none)"));
+} else {
+  fs.writeFileSync(path, JSON.stringify(cfg, null, 2));
+  console.log("MERGED agent=" + agentId + " profile=" + profile + " channel=" + (channelId || "(none)") + " bindings=" + bindings.length);
+}
 `, string(agentEntryJSON), profile, parseDiscordChannelID(awDiscordURL(aw)), agentID)
 
 	mergeOut, err := r.execInPod(ctx, gwPod, []string{"node", "-e", mergeScript})
@@ -224,20 +281,26 @@ console.log("MERGED agent=" + agentId + " profile=" + profile + " channel=" + (c
 	}
 	log.Info("merged agent into gateway config", "out", strings.TrimSpace(mergeOut))
 
-	// 5b. Best-effort post-merge validate. Skip the result entirely:
-	// when openclaw.json changes on disk the gateway process bounces
-	// (its file-watcher restarts the container), which races our
-	// exec channel and surfaces as exit 137. Since the merge above
-	// only writes schema-valid JSON we constructed in Go, treat the
-	// validate as advisory.
+	// 5b. Best-effort post-merge validate (advisory). The merge above
+	// only writes schema-valid JSON we constructed in Go, and the
+	// gateway hot-reloads bindings without bouncing the pod, but we
+	// still call validate so genuine drift surfaces in operator
+	// logs. Failures are logged at V(1) and never fatal.
 	if validateOut, vErr := r.execInPod(ctx, gwPod, []string{"openclaw", "config", "validate"}); vErr != nil {
 		log.V(1).Info("openclaw config validate after merge (advisory only)",
 			"err", vErr, "stdout", strings.TrimSpace(validateOut))
 	}
 
-	// 7. Status: Running with the gateway's endpoint.
+	// 7. Status — Running with a hint about Discord routing so
+	// users can see at a glance whether their @-mentions will
+	// reach this agent.
+	channelID := parseDiscordChannelID(awDiscordURL(aw))
+	channelHint := "no Discord binding (set spec.channels.discord.url to a channel link)"
+	if channelID != "" {
+		channelHint = fmt.Sprintf("Discord channel %s", channelID)
+	}
 	aw.Status.Phase = agentofficev1alpha1.AgentWorkstationPhaseRunning
-	aw.Status.Message = fmt.Sprintf("logical agent inside %s (profile=%s)", gwRef, profile)
+	aw.Status.Message = fmt.Sprintf("logical agent inside %s (profile=%s, %s)", gwRef, profile, channelHint)
 	aw.Status.GatewayEndpoint = gw.Status.GatewayEndpoint
 	if err := r.Status().Update(ctx, aw); err != nil {
 		return ctrl.Result{}, err

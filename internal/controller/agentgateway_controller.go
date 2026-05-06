@@ -43,9 +43,10 @@ type AgentGatewayReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 	// RestConfig powers the auto-approve action's exec into the
-	// gateway pod (we hand-edit ~/.openclaw/devices/paired.json
-	// because OpenClaw's CLI approval flow is itself blocked by
-	// pairing — chicken-and-egg).
+	// gateway pod — we drive `openclaw nodes approve` so the
+	// running daemon's in-memory pairing store gets updated
+	// alongside the on-disk paired.json (file-only edits leave the
+	// daemon rejecting the node until pod restart).
 	RestConfig *rest.Config
 }
 
@@ -276,12 +277,23 @@ if (changed) {
 	return nil
 }
 
-// maybeAutoApprovePending checks the gateway pod's pairing store and
-// approves any pending request whose displayName matches the
-// configured nodeHostRef. Idempotent: if the matching node is
-// already paired, this is a no-op. After approval the gateway pod
-// is bounced once so OpenClaw reloads the pairing store on next
-// boot.
+// maybeAutoApprovePending approves any pending node-host pairing
+// request whose displayName matches the configured nodeHostRef.
+//
+// Implementation note: this used to hand-edit
+// ~/.openclaw/devices/paired.json — wrong on two counts. Node-host
+// pairings live under ~/.openclaw/nodes/{pending,paired}.json (the
+// devices/ tree stores operator-CLI pairings), and even when the
+// path was right, file edits don't propagate to the gateway's
+// in-memory pairing store, so the running daemon kept rejecting the
+// node with "pairing required" until the pod restarted. Both
+// failure modes meant `spec.autoApproveNodeHost: true` silently did
+// nothing and every gateway-pod restart left the VM disconnected.
+//
+// We now drive the in-cluster `openclaw nodes` CLI, which both
+// updates the in-memory store and persists nodes/paired.json — no
+// pod bounce needed, and the next reconcile sees ALREADY_PAIRED.
+// Idempotent.
 func (r *AgentGatewayReconciler) maybeAutoApprovePending(ctx context.Context, gw *agentofficev1alpha1.AgentGateway) error {
 	if r.RestConfig == nil {
 		return fmt.Errorf("RestConfig not set; cannot exec")
@@ -291,60 +303,90 @@ func (r *AgentGatewayReconciler) maybeAutoApprovePending(ctx context.Context, gw
 		return err
 	}
 
-	// Inline node script — same logic as the CLI recipe but checks
-	// for already-approved displayName before doing anything.
-	script := fmt.Sprintf(`
-const fs = require("fs"); const crypto = require("crypto");
-const dir = "/home/node/.openclaw/devices";
-const want = %q; // nodeHostRef.name (matches displayName "<name>-nodehost")
-let pending; let paired;
-try { pending = JSON.parse(fs.readFileSync(dir+"/pending.json","utf8")); } catch (e) { pending = {}; }
-try { paired = JSON.parse(fs.readFileSync(dir+"/paired.json","utf8")); } catch (e) { paired = {}; }
-
-// Already paired? No-op.
-const alreadyPaired = Object.values(paired).some(d =>
-  (d.displayName || "").includes(want) && d.role === "node"
-);
-if (alreadyPaired) { console.log("ALREADY_PAIRED"); process.exit(0); }
-
-// Find a matching pending request.
-const target = Object.entries(pending).find(([_, p]) =>
-  (p.displayName || "").includes(want) && p.role === "node"
-);
-if (!target) { console.log("NO_PENDING"); process.exit(0); }
-const [reqId, p] = target;
-const now = Date.now();
-const newToken = () => crypto.randomBytes(32).toString("base64url");
-const tokens = {};
-if (p.role) tokens[p.role] = { token: newToken(), role: p.role, scopes: p.scopes||[], createdAtMs: now };
-paired[p.deviceId] = {
-  deviceId: p.deviceId, publicKey: p.publicKey, displayName: p.displayName,
-  platform: p.platform, deviceFamily: p.deviceFamily, clientId: p.clientId,
-  clientMode: p.clientMode, role: p.role, roles: p.roles||[p.role],
-  scopes: p.scopes||[], approvedScopes: p.scopes||[], remoteIp: p.remoteIp,
-  tokens, createdAtMs: now, approvedAtMs: now,
-};
-delete pending[reqId];
-fs.writeFileSync(dir+"/pending.json", JSON.stringify(pending));
-fs.writeFileSync(dir+"/paired.json", JSON.stringify(paired));
-console.log("APPROVED " + p.deviceId + " " + p.displayName);
-`, gw.Spec.NodeHostRef.Name)
-
-	out, err := r.execInGatewayPod(ctx, pod, []string{"node", "-e", script})
-	if err != nil {
-		return fmt.Errorf("exec auto-approve: %w (out=%s)", err, out)
+	// 1. If a node-host whose displayName matches our nodeHostRef is
+	//    already paired+connected, we're done.
+	statusOut, err := r.execInGatewayPod(ctx, pod, []string{"openclaw", "nodes", "status", "--json"})
+	if err == nil {
+		// `openclaw nodes status --json` shape:
+		//   [{ "displayName": "...", "status": "paired" | "pending" | ..., ...}]
+		// We accept either "paired" or any string starting with "paired"
+		// (e.g. "paired · connected") just in case the CLI tweaks it.
+		var nodes []struct {
+			DisplayName string `json:"displayName"`
+			Status      string `json:"status"`
+		}
+		if jerr := json.Unmarshal([]byte(extractJSON(statusOut)), &nodes); jerr == nil {
+			for _, n := range nodes {
+				if strings.Contains(n.DisplayName, gw.Spec.NodeHostRef.Name) &&
+					strings.HasPrefix(n.Status, "paired") {
+					return nil // already paired — nothing to do
+				}
+			}
+		}
 	}
-	logf.FromContext(ctx).Info("auto-approve result", "result", out)
 
-	// If we approved something, bounce the pod once so the gateway
-	// reloads paired.json. ALREADY_PAIRED / NO_PENDING → no bounce.
-	if !strings.Contains(out, "APPROVED") {
+	// 2. List pending requests; find one whose displayName contains
+	//    the configured nodeHostRef.Name. Pending entries we care
+	//    about advertise node-host capabilities (browser/system).
+	pendingOut, err := r.execInGatewayPod(ctx, pod, []string{"openclaw", "nodes", "pending", "--json"})
+	if err != nil {
+		return fmt.Errorf("list pending: %w (out=%s)", err, pendingOut)
+	}
+	var pending []struct {
+		RequestID   string   `json:"requestId"`
+		DisplayName string   `json:"displayName"`
+		Caps        []string `json:"caps"`
+	}
+	if jerr := json.Unmarshal([]byte(extractJSON(pendingOut)), &pending); jerr != nil {
+		// Empty / "No pending pairing requests." text — nothing to do.
 		return nil
 	}
-	if err := r.Delete(ctx, pod); err != nil {
-		return fmt.Errorf("bounce gateway pod after approval: %w", err)
+	var reqID string
+	for _, p := range pending {
+		if !strings.Contains(p.DisplayName, gw.Spec.NodeHostRef.Name) {
+			continue
+		}
+		hasNodeCap := false
+		for _, c := range p.Caps {
+			if c == "browser" || c == "system" {
+				hasNodeCap = true
+				break
+			}
+		}
+		if !hasNodeCap {
+			continue
+		}
+		reqID = p.RequestID
+		break
 	}
+	if reqID == "" {
+		return nil // no matching pending request
+	}
+
+	// 3. Approve via CLI — updates in-memory store + nodes/paired.json
+	//    in one shot. No pod bounce needed.
+	approveOut, err := r.execInGatewayPod(ctx, pod, []string{"openclaw", "nodes", "approve", reqID})
+	if err != nil {
+		return fmt.Errorf("approve %s: %w (out=%s)", reqID, err, approveOut)
+	}
+	logf.FromContext(ctx).Info("auto-approved node-host pairing",
+		"nodeHost", gw.Spec.NodeHostRef.Name, "requestId", reqID,
+		"result", strings.TrimSpace(approveOut))
 	return nil
+}
+
+// extractJSON pulls the first JSON document out of a CLI response —
+// `openclaw nodes ... --json` sometimes prefixes its output with
+// human-readable preamble. Returns "[]" if no JSON found so callers
+// can safely json.Unmarshal the result.
+func extractJSON(s string) string {
+	// Find the first '[' or '{' and return from there.
+	for i, c := range s {
+		if c == '[' || c == '{' {
+			return s[i:]
+		}
+	}
+	return "[]"
 }
 
 func (r *AgentGatewayReconciler) findReadyGatewayPod(ctx context.Context, gw *agentofficev1alpha1.AgentGateway) (*corev1.Pod, error) {
