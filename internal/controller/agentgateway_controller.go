@@ -30,7 +30,9 @@ import (
 	"k8s.io/client-go/tools/remotecommand"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentofficev1alpha1 "github.com/enterprisewebservice/agent-office-operator/api/v1alpha1"
 )
@@ -492,6 +494,20 @@ func (r *AgentGatewayReconciler) reconcileGatewayStatus(ctx context.Context, gw 
 }
 
 func (r *AgentGatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// When a KnowledgeBase is created/updated/deleted with a
+	// gatewayRef pointing at us, re-reconcile so the gateway
+	// Deployment picks up the matching volume + mount on its
+	// next pass.
+	mapKB := func(ctx context.Context, obj client.Object) []reconcile.Request {
+		kb, ok := obj.(*agentofficev1alpha1.KnowledgeBase)
+		if !ok || kb.Spec.GatewayRef.Name == "" {
+			return nil
+		}
+		return []reconcile.Request{{NamespacedName: types.NamespacedName{
+			Namespace: kb.Namespace, Name: kb.Spec.GatewayRef.Name,
+		}}}
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&agentofficev1alpha1.AgentGateway{}).
 		Owns(&appsv1.Deployment{}).
@@ -499,6 +515,7 @@ func (r *AgentGatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.ConfigMap{}).
 		Owns(&corev1.Secret{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
+		Watches(&agentofficev1alpha1.KnowledgeBase{}, handler.EnqueueRequestsFromMapFunc(mapKB)).
 		Named("agentgateway").
 		Complete(r)
 }

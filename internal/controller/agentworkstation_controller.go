@@ -241,6 +241,31 @@ func (r *AgentWorkstationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return out
 	}
 
+	// KnowledgeBase fan-out: when a KB attached to a gateway
+	// changes, every shared-runtime AW in that gateway needs a
+	// fresh WIKI.md render. Find AWs by their
+	// runtime.shared.gatewayRef matching this KB's gatewayRef.
+	mapKB := func(ctx context.Context, obj client.Object) []reconcile.Request {
+		kb, ok := obj.(*agentofficev1alpha1.KnowledgeBase)
+		if !ok || kb.Spec.GatewayRef.Name == "" {
+			return nil
+		}
+		var aws agentofficev1alpha1.AgentWorkstationList
+		if err := r.List(ctx, &aws, client.InNamespace(kb.Namespace)); err != nil {
+			return nil
+		}
+		out := make([]reconcile.Request, 0)
+		for _, aw := range aws.Items {
+			if aw.Spec.Runtime != nil && aw.Spec.Runtime.Shared != nil &&
+				aw.Spec.Runtime.Shared.GatewayRef == kb.Spec.GatewayRef.Name {
+				out = append(out, reconcile.Request{NamespacedName: client.ObjectKey{
+					Namespace: aw.Namespace, Name: aw.Name,
+				}})
+			}
+		}
+		return out
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&agentofficev1alpha1.AgentWorkstation{}).
 		Owns(&appsv1.Deployment{}).
@@ -251,6 +276,7 @@ func (r *AgentWorkstationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(route).
 		Watches(&agentofficev1alpha1.SkillBinding{}, handler.EnqueueRequestsFromMapFunc(mapSkillBinding)).
 		Watches(&agentofficev1alpha1.Skill{}, handler.EnqueueRequestsFromMapFunc(mapSkill)).
+		Watches(&agentofficev1alpha1.KnowledgeBase{}, handler.EnqueueRequestsFromMapFunc(mapKB)).
 		Named("agentworkstation").
 		Complete(r)
 }

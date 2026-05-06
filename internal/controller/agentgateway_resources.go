@@ -13,6 +13,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -63,13 +64,17 @@ func gatewayEnvFrom(gw *agentofficev1alpha1.AgentGateway, tokenSecretName string
 
 func ptrBool(b bool) *bool { return &b }
 
-// gatewayVolumeMounts returns the openclaw container's volume mounts.
-// Always includes the workspace PVC + /dev/shm. When
-// spec.codexCredentialsSecretRef is set, also mounts the secret's
-// `auth.json` key as the file at /home/node/.codex/auth.json — the
-// path OpenClaw natively reads on agent startup
-// (pi-ai readCodexCliCredentials, see profiles-*.js in /app/dist).
-func gatewayVolumeMounts(gw *agentofficev1alpha1.AgentGateway) []corev1.VolumeMount {
+// gatewayVolumeMounts returns the openclaw container's volume
+// mounts. Always includes the workspace PVC + /dev/shm. When
+// spec.codexCredentialsSecretRef is set, also mounts the
+// secret's `auth.json` key as the file at
+// /home/node/.codex/auth.json — the path OpenClaw natively reads
+// on agent startup (pi-ai readCodexCliCredentials, see
+// profiles-*.js in /app/dist). When `attachedKBs` is non-empty,
+// each KnowledgeBase is mounted at
+// /home/node/.openclaw/wiki/<kb-name>/ so all logical agents in
+// the gateway pod see the same wiki content.
+func gatewayVolumeMounts(gw *agentofficev1alpha1.AgentGateway, attachedKBs []agentofficev1alpha1.KnowledgeBase) []corev1.VolumeMount {
 	mounts := []corev1.VolumeMount{
 		{Name: "workspace", MountPath: "/home/node/.openclaw"},
 		{Name: "dshm", MountPath: "/dev/shm"},
@@ -82,13 +87,21 @@ func gatewayVolumeMounts(gw *agentofficev1alpha1.AgentGateway) []corev1.VolumeMo
 			ReadOnly:  true,
 		})
 	}
+	for _, kb := range attachedKBs {
+		mounts = append(mounts, corev1.VolumeMount{
+			Name:      kbVolumeName(kb.Name),
+			MountPath: kbMountPath(kb.Name),
+		})
+	}
 	return mounts
 }
 
-// gatewayVolumes returns the pod's volumes. Always: openclaw config
-// CM, workspace PVC, in-memory /dev/shm. When codex creds are
-// configured, also project the secret's auth.json key.
-func gatewayVolumes(gw *agentofficev1alpha1.AgentGateway, dshmSize resource.Quantity) []corev1.Volume {
+// gatewayVolumes returns the pod's volumes. Always: openclaw
+// config CM, workspace PVC, in-memory /dev/shm. When codex creds
+// are configured, also project the secret's auth.json key. When
+// `attachedKBs` is non-empty, each KB's PVC is added as a volume
+// (paired with the matching mount in gatewayVolumeMounts).
+func gatewayVolumes(gw *agentofficev1alpha1.AgentGateway, dshmSize resource.Quantity, attachedKBs []agentofficev1alpha1.KnowledgeBase) []corev1.Volume {
 	vols := []corev1.Volume{
 		{Name: "config", VolumeSource: corev1.VolumeSource{
 			ConfigMap: &corev1.ConfigMapVolumeSource{
@@ -113,6 +126,16 @@ func gatewayVolumes(gw *agentofficev1alpha1.AgentGateway, dshmSize resource.Quan
 						{Key: "auth.json", Path: "auth.json"},
 					},
 					Optional: ptrBool(true),
+				},
+			},
+		})
+	}
+	for _, kb := range attachedKBs {
+		vols = append(vols, corev1.Volume{
+			Name: kbVolumeName(kb.Name),
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: kbPVCName(kb.Name),
 				},
 			},
 		})
@@ -295,6 +318,25 @@ func (r *AgentGatewayReconciler) reconcileGatewayDeployment(ctx context.Context,
 	dshmSize := resource.MustParse("1Gi")
 	labels := gatewayLabels(gw.Name)
 
+	// Discover KnowledgeBases attached to this gateway. Sorted
+	// by name so the resulting volume/mount slices are
+	// deterministic — keeps the Deployment's pod template
+	// equality check stable and avoids spurious rollouts when
+	// reconciles see the same set in a different list order.
+	var kbList agentofficev1alpha1.KnowledgeBaseList
+	if err := r.List(ctx, &kbList, client.InNamespace(gw.Namespace)); err != nil {
+		return fmt.Errorf("listing KnowledgeBases: %w", err)
+	}
+	attachedKBs := make([]agentofficev1alpha1.KnowledgeBase, 0, len(kbList.Items))
+	for _, kb := range kbList.Items {
+		if kb.Spec.GatewayRef.Name == gw.Name {
+			attachedKBs = append(attachedKBs, kb)
+		}
+	}
+	sort.Slice(attachedKBs, func(i, j int) bool {
+		return attachedKBs[i].Name < attachedKBs[j].Name
+	})
+
 	dep := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      gwDeployName(gw.Name),
@@ -338,9 +380,9 @@ func (r *AgentGatewayReconciler) reconcileGatewayDeployment(ctx context.Context,
 						Name: "gateway", ContainerPort: 18789, Protocol: corev1.ProtocolTCP,
 					}},
 					EnvFrom:      gatewayEnvFrom(gw, tokenSecretName),
-					VolumeMounts: gatewayVolumeMounts(gw),
+					VolumeMounts: gatewayVolumeMounts(gw, attachedKBs),
 				}},
-				Volumes: gatewayVolumes(gw, dshmSize),
+				Volumes: gatewayVolumes(gw, dshmSize, attachedKBs),
 			},
 		}
 		if gw.Spec.Resources != nil {

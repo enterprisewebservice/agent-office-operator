@@ -167,10 +167,23 @@ func (r *AgentWorkstationReconciler) reconcileSharedFull(ctx context.Context, aw
 			"err", skillResolveErr, "aw", aw.Name)
 	}
 
-	// Build the file map. Order: SOUL/IDENTITY first, then skills.
+	// Resolve KnowledgeBases attached to the gateway this AW
+	// shares. Each KB shows up at /home/node/.openclaw/wiki/<kb>/
+	// inside the gateway pod, visible to every logical agent.
+	// We render a `WIKI.md` workspace file listing the available
+	// wikis so the agent reads about them at session start (per
+	// the openclaw AGENTS.md convention) and knows where to look
+	// for `wiki-search` / `wiki-write` skill operations.
+	wikiMd, _ := r.renderWikiMd(ctx, aw, gwRef)
+
+	// Build the file map. Order: SOUL/IDENTITY first, WIKI next,
+	// then skills.
 	writes := map[string]string{
 		"IDENTITY.md": identityMd,
 		"SOUL.md":     soulMd,
+	}
+	if wikiMd != "" {
+		writes["WIKI.md"] = wikiMd
 	}
 	keepSkillFiles := map[string]struct{}{}
 	for _, rs := range resolvedSkills {

@@ -1,0 +1,261 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  name: knowledgebases.agentoffice.ai
+spec:
+  group: agentoffice.ai
+  names:
+    categories:
+    - agent-office
+    kind: KnowledgeBase
+    listKind: KnowledgeBaseList
+    plural: knowledgebases
+    shortNames:
+    - kb
+    singular: knowledgebase
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.displayName
+      name: DisplayName
+      type: string
+    - jsonPath: .spec.gatewayRef.name
+      name: Gateway
+      type: string
+    - jsonPath: .status.agentCount
+      name: Agents
+      type: integer
+    - jsonPath: .status.mountPath
+      name: MountPath
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          KnowledgeBase is a wiki — a persistent, structured collection
+          of `.md` files and supporting media — backed by a PVC and
+          mounted into a single AgentGateway pod. All logical agents in
+          the bound gateway see the wiki at
+          `/home/node/.openclaw/wiki/<kb-name>/` and can read, search,
+          and extend it via skills (e.g. `wiki-clip`, `wiki-search`,
+          `wiki-write`).
+
+          Pattern follows Andrej Karpathy's "LLM Knowledge Base"
+          workflow (Sep 2025): raw data ingested, an LLM compiles a
+          structured wiki, queries land back as new wiki entries, and
+          the wiki gets smarter over time as agents file their findings
+          into it. KnowledgeBase is the Kubernetes-native handle for
+          that wiki.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              KnowledgeBaseSpec describes a wiki — a structured collection
+              of `.md` files and supporting media (the Karpathy KB pattern)
+              that one or more shared-runtime agents read at session start
+              and incrementally extend through skills.
+            properties:
+              description:
+                description: |-
+                  Short description shown in the Console plugin and surfaced
+                  to agents in their `WIKI.md` workspace file.
+                type: string
+              displayName:
+                description: |-
+                  Human-friendly name for the wiki. Defaults to
+                  metadata.name when unset.
+                type: string
+              gatewayRef:
+                description: |-
+                  GatewayRef binds this KB to a single AgentGateway. The
+                  gateway reconciler mounts the KB's PVC into the gateway
+                  pod at `/home/node/.openclaw/wiki/<kb-name>/`, making the
+                  wiki visible to every logical agent in that gateway.
+                properties:
+                  name:
+                    description: Name of the AgentGateway in the same namespace.
+                    type: string
+                required:
+                - name
+                type: object
+              gitMirror:
+                description: |-
+                  GitMirror optionally syncs the PVC to a git repository on
+                  a cron schedule. Use this to open the wiki in Obsidian /
+                  VS Code locally, or for audit trails.
+                properties:
+                  branch:
+                    description: Branch to track. Defaults to "main" when unset.
+                    type: string
+                  cadence:
+                    description: |-
+                      Cadence in cron syntax (e.g. "*/30 * * * *"). Defaults to
+                      every 30 minutes when unset.
+                    type: string
+                  credentialsSecretRef:
+                    description: |-
+                      Reference to a Secret in the same namespace holding git
+                      credentials. The Secret must contain a `token` key
+                      (Personal Access Token / fine-grained token with repo
+                      scope) or an `ssh-privatekey` key.
+                    type: string
+                  pushEnabled:
+                    description: |-
+                      PushEnabled controls whether the mirror writes local
+                      changes back to the remote. Set false for read-only
+                      mirrors (the wiki ingests from the remote but doesn't
+                      push). Defaults true when the credentialsSecretRef is set.
+                    type: boolean
+                  url:
+                    description: HTTPS URL of the git repository to mirror.
+                    type: string
+                required:
+                - url
+                type: object
+              initFromGit:
+                description: |-
+                  InitFromGit, when set, clones the named git repository
+                  into the PVC the first time it's provisioned. After the
+                  initial clone, GitMirror takes over (if configured); if
+                  GitMirror isn't set, the repo is one-shot copied and not
+                  kept in sync.
+                properties:
+                  branch:
+                    description: Branch to track. Defaults to "main" when unset.
+                    type: string
+                  cadence:
+                    description: |-
+                      Cadence in cron syntax (e.g. "*/30 * * * *"). Defaults to
+                      every 30 minutes when unset.
+                    type: string
+                  credentialsSecretRef:
+                    description: |-
+                      Reference to a Secret in the same namespace holding git
+                      credentials. The Secret must contain a `token` key
+                      (Personal Access Token / fine-grained token with repo
+                      scope) or an `ssh-privatekey` key.
+                    type: string
+                  pushEnabled:
+                    description: |-
+                      PushEnabled controls whether the mirror writes local
+                      changes back to the remote. Set false for read-only
+                      mirrors (the wiki ingests from the remote but doesn't
+                      push). Defaults true when the credentialsSecretRef is set.
+                    type: boolean
+                  url:
+                    description: HTTPS URL of the git repository to mirror.
+                    type: string
+                required:
+                - url
+                type: object
+              storage:
+                description: Storage configures the PVC backing the wiki content.
+                properties:
+                  accessModes:
+                    description: |-
+                      AccessModes for the PVC. Defaults to [ReadWriteOnce] when
+                      unset. ReadWriteMany is appropriate when one KB attaches
+                      to multiple gateways concurrently.
+                    items:
+                      type: string
+                    type: array
+                  size:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: Size of the PVC. Defaults to 5Gi when unset.
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  storageClassName:
+                    description: |-
+                      StorageClassName for the PVC. When unset, the cluster
+                      default storage class is used.
+                    type: string
+                type: object
+            required:
+            - gatewayRef
+            type: object
+          status:
+            description: KnowledgeBaseStatus reflects observed state.
+            properties:
+              agentCount:
+                description: |-
+                  AgentCount is the number of logical agents in the bound
+                  gateway that can see this wiki.
+                format: int32
+                type: integer
+              boundGateway:
+                description: |-
+                  BoundGateway names the AgentGateway this KB is currently
+                  mounted into. Set after the gateway reconciler confirms
+                  the volume + mount landed on the gateway Deployment.
+                type: string
+              conditions:
+                description: |-
+                  Conditions reflect the latest observations. Standard
+                  types: Ready, PVCReady, GatewayMounted, GitSyncReady.
+                items:
+                  description: KnowledgeBaseCondition is a standard Kubernetes condition.
+                  properties:
+                    lastTransitionTime:
+                      format: date-time
+                      type: string
+                    message:
+                      type: string
+                    reason:
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+              lastSyncTime:
+                description: |-
+                  LastSyncTime, when GitMirror is configured, is the last
+                  successful pull/push against the remote. Empty if the
+                  mirror has never run or isn't configured.
+                format: date-time
+                type: string
+              mountPath:
+                description: |-
+                  MountPath inside the gateway pod where the wiki is
+                  available. Always
+                  `/home/node/.openclaw/wiki/<kb-name>/`.
+                type: string
+              pvcName:
+                description: |-
+                  PVCName is the name of the PersistentVolumeClaim the
+                  controller provisioned. Always equals "<kb-name>-wiki".
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

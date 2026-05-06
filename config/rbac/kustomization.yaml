@@ -34,4 +34,7 @@ resources:
 - skillbinding_admin_role.yaml
 - skillbinding_editor_role.yaml
 - skillbinding_viewer_role.yaml
+- knowledgebase_admin_role.yaml
+- knowledgebase_editor_role.yaml
+- knowledgebase_viewer_role.yaml
 

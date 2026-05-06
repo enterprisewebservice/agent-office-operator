@@ -263,3 +263,69 @@ func overridesParams(o *agentofficev1alpha1.SkillOverrides) map[string]string {
 	}
 	return o.InvocationParams
 }
+
+// renderWikiMd returns the body of the agent's `WIKI.md`
+// workspace file listing every KnowledgeBase attached to the
+// AW's gateway. Empty string when the AW has no gateway (i.e.
+// dedicated runtime) or no KBs are attached — caller skips the
+// write in that case.
+//
+// Format is intentionally Markdown that LLMs read like a manual:
+// the agent learns the wiki name, mount path, and what skills
+// to use against it. This file is the bridge between the
+// declarative KnowledgeBase + Skill CRDs and the
+// inference-time prompt the agent consumes.
+func (r *AgentWorkstationReconciler) renderWikiMd(ctx context.Context, aw *agentofficev1alpha1.AgentWorkstation, gwName string) (string, error) {
+	if gwName == "" {
+		return "", nil
+	}
+	var kbList agentofficev1alpha1.KnowledgeBaseList
+	if err := r.List(ctx, &kbList, client.InNamespace(aw.Namespace)); err != nil {
+		return "", err
+	}
+	type entry struct {
+		Name        string
+		DisplayName string
+		Description string
+		MountPath   string
+	}
+	var entries []entry
+	for _, kb := range kbList.Items {
+		if kb.Spec.GatewayRef.Name != gwName {
+			continue
+		}
+		dn := kb.Spec.DisplayName
+		if dn == "" {
+			dn = kb.Name
+		}
+		entries = append(entries, entry{
+			Name:        kb.Name,
+			DisplayName: dn,
+			Description: kb.Spec.Description,
+			MountPath:   "/home/node/.openclaw/wiki/" + kb.Name,
+		})
+	}
+	if len(entries) == 0 {
+		return "", nil
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
+
+	var b strings.Builder
+	b.WriteString("# Available Knowledge Bases\n\n")
+	b.WriteString("These wikis are mounted into the gateway pod and shared across every logical agent. Read existing articles before answering questions; file new findings back into the wiki so future sessions benefit.\n\n")
+	for _, e := range entries {
+		fmt.Fprintf(&b, "## %s\n\n", e.DisplayName)
+		if e.Description != "" {
+			fmt.Fprintf(&b, "%s\n\n", e.Description)
+		}
+		fmt.Fprintf(&b, "- **Mount path**: `%s`\n", e.MountPath)
+		fmt.Fprintf(&b, "- **KB name**: `%s` (use this when calling `wiki-*` skills)\n", e.Name)
+		b.WriteString("- **Conventions**: `raw/clips/` for unsorted captures, `topics/` for curated articles, `concepts/` for canonical concept pages, `queries/` for query-result snapshots, `_lint/` for nightly lint reports, `_index.md` for the manifest.\n\n")
+	}
+	b.WriteString("## Reading + writing\n\n")
+	b.WriteString("- **Search**: prefer the `wiki-search` skill (or fall back to `exec` running `rg <query> /home/node/.openclaw/wiki/<kb>/`).\n")
+	b.WriteString("- **Clip a URL**: use the `wiki-clip` skill — it captures the page through the VM browser and files clean Markdown into `raw/clips/`.\n")
+	b.WriteString("- **File an article**: use the `wiki-write` skill so the article includes correct frontmatter, backlinks, and entries in `_index.md`.\n")
+	b.WriteString("- **Cite**: when answering from the wiki, cite the source article path so the user can navigate to it directly.\n")
+	return b.String(), nil
+}

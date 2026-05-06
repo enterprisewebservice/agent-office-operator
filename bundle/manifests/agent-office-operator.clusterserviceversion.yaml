@@ -57,7 +57,7 @@ metadata:
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
     repository: https://github.com/enterprisewebservice/agent-office-operator
     support: Red Hat Solution Architecture
-  name: agent-office-operator.v0.0.22
+  name: agent-office-operator.v0.0.23
   namespace: placeholder
 spec:
   apiservicedefinitions: {}
@@ -107,6 +107,18 @@ spec:
       displayName: Skill Binding
       kind: SkillBinding
       name: skillbindings.agentoffice.ai
+      version: v1alpha1
+    - description: |-
+        KnowledgeBase is a wiki — a persistent, structured collection of
+        Markdown files and supporting media — backed by a PVC and mounted
+        into a single AgentGateway pod. All logical agents in the bound
+        gateway see the wiki at /home/node/.openclaw/wiki/<kb-name>/ and
+        can read, search, and extend it via skills (e.g. wiki-clip,
+        wiki-search, wiki-write). Models the Karpathy "LLM Knowledge Base"
+        workflow as a Kubernetes-native primitive.
+      displayName: Knowledge Base
+      kind: KnowledgeBase
+      name: knowledgebases.agentoffice.ai
       version: v1alpha1
   description: |
     The Agent Office Operator manages governed coding agents on OpenShift.
@@ -268,7 +280,7 @@ spec:
                       fieldPath: metadata.annotations['olm.targetNamespaces']
                 - name: CLUSTER_APPS_DOMAIN
                   value: apps.salamander.aimlworkbench.com
-                image: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-operator:v0.0.22
+                image: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-operator:v0.0.23
                 imagePullPolicy: Always
                 livenessProbe:
                   httpGet:
@@ -371,5 +383,5 @@ spec:
   provider:
     name: Red Hat Solution Architecture
     url: https://github.com/enterprisewebservice
-  replaces: agent-office-operator.v0.0.21
-  version: 0.0.22
+  replaces: agent-office-operator.v0.0.22
+  version: 0.0.23
