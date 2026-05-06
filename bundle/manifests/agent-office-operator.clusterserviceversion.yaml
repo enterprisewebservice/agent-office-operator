@@ -57,7 +57,7 @@ metadata:
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
     repository: https://github.com/enterprisewebservice/agent-office-operator
     support: Red Hat Solution Architecture
-  name: agent-office-operator.v0.0.20
+  name: agent-office-operator.v0.0.21
   namespace: placeholder
 spec:
   apiservicedefinitions: {}
@@ -88,6 +88,25 @@ spec:
       displayName: Memory Module
       kind: MemoryModule
       name: memorymodules.agentoffice.ai
+      version: v1alpha1
+    - description: |-
+        Skill is a reusable, declarative agent capability. AgentWorkstations
+        gain access to a Skill via a SkillBinding (RBAC-style). The Skill's
+        `SKILL.md` content is rendered into each bound agent's workspace per
+        the Anthropic Skills Open Standard, and its `requires` capabilities
+        are validated against the bound AgentGateway.
+      displayName: Skill
+      kind: Skill
+      name: skills.agentoffice.ai
+      version: v1alpha1
+    - description: |-
+        SkillBinding grants a Skill to one or more AgentWorkstations
+        RBAC-style. Subjects can be listed directly or matched via label
+        selector. Decouples skill authorship from skill grants — useful when
+        a platform/security team curates skills separately from agent authors.
+      displayName: Skill Binding
+      kind: SkillBinding
+      name: skillbindings.agentoffice.ai
       version: v1alpha1
   description: |
     The Agent Office Operator manages governed coding agents on OpenShift.
@@ -249,7 +268,7 @@ spec:
                       fieldPath: metadata.annotations['olm.targetNamespaces']
                 - name: CLUSTER_APPS_DOMAIN
                   value: apps.salamander.aimlworkbench.com
-                image: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-operator:v0.0.20
+                image: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-operator:v0.0.21
                 imagePullPolicy: Always
                 livenessProbe:
                   httpGet:
@@ -352,5 +371,5 @@ spec:
   provider:
     name: Red Hat Solution Architecture
     url: https://github.com/enterprisewebservice
-  replaces: agent-office-operator.v0.0.19
-  version: 0.0.20
+  replaces: agent-office-operator.v0.0.20
+  version: 0.0.21

@@ -155,14 +155,39 @@ func (r *AgentWorkstationReconciler) reconcileSharedFull(ctx context.Context, aw
 	identityMd := fmt.Sprintf("# %s\n\n%s %s\n", identity, emoji, identity)
 	soulMd := fmt.Sprintf("# %s\n\n%s\n", identity, aw.Spec.SystemPrompt)
 
+	// Resolve skills granted to this AW via SkillBindings. We
+	// always render IDENTITY.md / SOUL.md; we render at most one
+	// SKILL_<name>.md per granted skill (Anthropic Skills Open
+	// Standard filename pattern). Skill files NOT in the granted
+	// set are deleted on each reconcile so revoking a binding
+	// removes the skill from the agent's workspace cleanly.
+	resolvedSkills, skillResolveErr := r.listAppliedSkills(ctx, aw)
+	if skillResolveErr != nil {
+		log.Info("skill resolution failed; proceeding without skills",
+			"err", skillResolveErr, "aw", aw.Name)
+	}
+
+	// Build the file map. Order: SOUL/IDENTITY first, then skills.
+	writes := map[string]string{
+		"IDENTITY.md": identityMd,
+		"SOUL.md":     soulMd,
+	}
+	keepSkillFiles := map[string]struct{}{}
+	for _, rs := range resolvedSkills {
+		fname := fmt.Sprintf("SKILL_%s.md", rs.Skill.Name)
+		writes[fname] = rs.Rendered
+		keepSkillFiles[fname] = struct{}{}
+	}
+
+	writesJSON, _ := json.Marshal(writes)
+	keepJSON, _ := json.Marshal(keepSkillFiles)
+
 	seedScript := fmt.Sprintf(`
 const fs = require("fs"); const path = require("path");
 const dir = "/home/node/.openclaw/workspaces/" + %[1]q;
 fs.mkdirSync(dir, { recursive: true });
-const writes = {
-  "IDENTITY.md": %[2]q,
-  "SOUL.md":     %[3]q,
-};
+const writes = %[2]s;
+const keepSkillFiles = %[3]s;
 let touched = 0;
 for (const [f, content] of Object.entries(writes)) {
   const p = path.join(dir, f);
@@ -170,8 +195,18 @@ for (const [f, content] of Object.entries(writes)) {
   try { cur = fs.readFileSync(p, "utf8"); } catch (e) {}
   if (cur !== content) { fs.writeFileSync(p, content); touched++; }
 }
-console.log("SEEDED dir=" + dir + " touched=" + touched);
-`, agentID, identityMd, soulMd)
+// Garbage-collect SKILL_*.md files that no current binding grants.
+let gcd = 0;
+try {
+  for (const f of fs.readdirSync(dir)) {
+    if (!f.startsWith("SKILL_") || !f.endsWith(".md")) continue;
+    if (Object.prototype.hasOwnProperty.call(keepSkillFiles, f)) continue;
+    fs.unlinkSync(path.join(dir, f));
+    gcd++;
+  }
+} catch (e) {}
+console.log("SEEDED dir=" + dir + " touched=" + touched + " gcd=" + gcd);
+`, agentID, string(writesJSON), string(keepJSON))
 
 	if _, err := r.execInPod(ctx, gwPod, []string{"node", "-e", seedScript}); err != nil {
 		return ctrl.Result{}, fmt.Errorf("seed agent workspace: %w", err)

@@ -39,6 +39,8 @@ rules:
   - agentgateways
   - agentworkstations
   - memorymodules
+  - skillbindings
+  - skills
   verbs:
   - create
   - delete
@@ -53,6 +55,8 @@ rules:
   - agentgateways/finalizers
   - agentworkstations/finalizers
   - memorymodules/finalizers
+  - skillbindings/finalizers
+  - skills/finalizers
   verbs:
   - update
 - apiGroups:
@@ -61,6 +65,8 @@ rules:
   - agentgateways/status
   - agentworkstations/status
   - memorymodules/status
+  - skillbindings/status
+  - skills/status
   verbs:
   - get
   - patch

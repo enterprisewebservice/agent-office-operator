@@ -247,6 +247,20 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentGateway")
 		os.Exit(1)
 	}
+	if err := (&controller.SkillReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "Skill")
+		os.Exit(1)
+	}
+	if err := (&controller.SkillBindingReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "SkillBinding")
+		os.Exit(1)
+	}
 	// +kubebuilder:scaffold:builder
 
 	if metricsCertWatcher != nil {

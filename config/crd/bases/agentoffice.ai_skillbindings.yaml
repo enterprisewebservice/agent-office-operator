@@ -1,0 +1,265 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  name: skillbindings.agentoffice.ai
+spec:
+  group: agentoffice.ai
+  names:
+    categories:
+    - agent-office
+    kind: SkillBinding
+    listKind: SkillBindingList
+    plural: skillbindings
+    shortNames:
+    - skb
+    singular: skillbinding
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.skillRef.name
+      name: Skill
+      type: string
+    - jsonPath: .status.resolvedSkillVersion
+      name: Version
+      type: string
+    - description: Number of AgentWorkstations this binding applies to
+      jsonPath: .status.appliedTo
+      name: AppliedTo
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          SkillBinding grants a Skill to one or more AgentWorkstations,
+          RBAC-style. The AW does not list its skills inline — instead,
+          the AgentWorkstation reconciler queries the SkillBindings in
+          its namespace at reconcile time to discover what skills apply.
+
+          This decouples skill *authorship* (who writes the Skill CR)
+          from skill *grants* (who decides which agents get it). Useful
+          for platform setups where a security/platform team curates
+          skills and a separate team authors agents.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              SkillBindingSpec declares which AgentWorkstations receive the
+              referenced Skill. Subjects can be listed directly or matched via
+              label selector; both lists are unioned. An empty subjects list
+              silently grant a skill cluster-wide).
+            properties:
+              overrides:
+                description: |-
+                  Overrides applied on top of the Skill's base content/params
+                  for every AW this binding resolves to.
+                properties:
+                  invocationParams:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      Free-form key/value parameters surfaced to the skill's
+                      invocation template as `{{.BindingOverrides.<key>}}`. Use
+                      for per-binding tuning like timeouts or default search
+                      limits. Values are strings to keep the schema simple — cast
+                      in the template if you need numbers.
+                    type: object
+                  promptAdditions:
+                    description: |-
+                      Markdown text appended to the bound agent's `SKILL.md`
+                      after the base content. Useful for narrowing scope per
+                      binding (e.g. "for Red Hat content, prefer redhat.com
+                      domains").
+                    type: string
+                type: object
+              skillRef:
+                description: SkillRef points to the Skill being granted. Required.
+                properties:
+                  name:
+                    description: Name of the Skill CR in the same namespace.
+                    type: string
+                  version:
+                    description: |-
+                      Optional version pin. When set, the binding only resolves
+                      successfully if the referenced Skill's `spec.version`
+                      matches this value (semver string equality).
+                    type: string
+                required:
+                - name
+                type: object
+              subjectSelector:
+                description: |-
+                  Label selector against AgentWorkstation `metadata.labels`.
+                  Unioned with `subjects`. Useful for bulk grants like
+                  "every research-role agent gets the web-research skill".
+                properties:
+                  matchExpressions:
+                    description: matchExpressions is a list of label selector requirements.
+                      The requirements are ANDed.
+                    items:
+                      description: |-
+                        A label selector requirement is a selector that contains values, a key, and an operator that
+                        relates the key and values.
+                      properties:
+                        key:
+                          description: key is the label key that the selector applies
+                            to.
+                          type: string
+                        operator:
+                          description: |-
+                            operator represents a key's relationship to a set of values.
+                            Valid operators are In, NotIn, Exists and DoesNotExist.
+                          type: string
+                        values:
+                          description: |-
+                            values is an array of string values. If the operator is In or NotIn,
+                            the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                            the values array must be empty. This array is replaced during a strategic
+                            merge patch.
+                          items:
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: atomic
+                      required:
+                      - key
+                      - operator
+                      type: object
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  matchLabels:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                      map is equivalent to an element of matchExpressions, whose key field is "key", the
+                      operator is "In", and the values array contains only "value". The requirements are ANDed.
+                    type: object
+                type: object
+                x-kubernetes-map-type: atomic
+              subjects:
+                description: |-
+                  Direct subject list. Each entry must reference an
+                  AgentWorkstation in the same namespace as this binding.
+                items:
+                  description: |-
+                    SkillBindingSubject names a single AgentWorkstation that should
+                    receive the bound skill. `Kind` exists so we can extend to
+                    AgentGateway-scoped grants later (every logical agent in the
+                    gateway pod inherits the skill) without breaking the API.
+                  properties:
+                    kind:
+                      description: Kind of the subject. Currently only "AgentWorkstation".
+                      enum:
+                      - AgentWorkstation
+                      type: string
+                    name:
+                      description: Name of the subject in the same namespace as the
+                        binding.
+                      type: string
+                  required:
+                  - kind
+                  - name
+                  type: object
+                type: array
+            required:
+            - skillRef
+            type: object
+          status:
+            description: SkillBindingStatus reflects observed state.
+            properties:
+              appliedTo:
+                description: |-
+                  AgentWorkstation names this binding currently applies to,
+                  after subject + selector resolution. Maintained by the
+                  SkillBinding controller as AWs are created, deleted, or
+                  re-labeled.
+                items:
+                  type: string
+                type: array
+              conditions:
+                description: |-
+                  Conditions reflect the latest observations. Standard types:
+                  Ready, SkillResolved, SubjectsResolved.
+                items:
+                  description: SkillBindingCondition is a standard Kubernetes condition
+                    entry.
+                  properties:
+                    lastTransitionTime:
+                      format: date-time
+                      type: string
+                    message:
+                      type: string
+                    reason:
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+              conflicts:
+                description: |-
+                  Conflicts with other bindings overlapping on the same
+                  (AgentWorkstation, Skill) pair.
+                items:
+                  description: |-
+                    SkillBindingConflict records that another SkillBinding in the
+                    same namespace also grants the same Skill to one of this
+                    binding's subjects. Conflicts don't block reconciliation — the
+                    AgentWorkstation reconciler picks a deterministic winner
+                    (lex-sorted by binding name, last-wins) — but we surface them so
+                    users can see overlap and clean it up.
+                  properties:
+                    agentWorkstation:
+                      description: |-
+                        Name of the AgentWorkstation that has multiple bindings
+                        granting the same skill.
+                      type: string
+                    overlapsWith:
+                      description: |-
+                        Names of the other bindings overlapping on this AW for the
+                        same skill.
+                      items:
+                        type: string
+                      type: array
+                  required:
+                  - agentWorkstation
+                  - overlapsWith
+                  type: object
+                type: array
+              resolvedSkillVersion:
+                description: |-
+                  Resolved Skill version this binding points at. Either the
+                  pinned `spec.skillRef.version`, or "floating: <skill-version>"
+                  when the binding doesn't pin.
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

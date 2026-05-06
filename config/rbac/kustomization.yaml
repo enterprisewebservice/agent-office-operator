@@ -28,4 +28,10 @@ resources:
 - memorymodule_admin_role.yaml
 - memorymodule_editor_role.yaml
 - memorymodule_viewer_role.yaml
+- skill_admin_role.yaml
+- skill_editor_role.yaml
+- skill_viewer_role.yaml
+- skillbinding_admin_role.yaml
+- skillbinding_editor_role.yaml
+- skillbinding_viewer_role.yaml
 

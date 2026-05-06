@@ -1,0 +1,209 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  name: skills.agentoffice.ai
+spec:
+  group: agentoffice.ai
+  names:
+    categories:
+    - agent-office
+    kind: Skill
+    listKind: SkillList
+    plural: skills
+    shortNames:
+    - sk
+    singular: skill
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.displayName
+      name: DisplayName
+      type: string
+    - jsonPath: .spec.invocation.tool
+      name: Tool
+      type: string
+    - jsonPath: .spec.version
+      name: Version
+      type: string
+    - description: Number of agents currently bound to this skill
+      jsonPath: .status.referencedBy
+      name: ReferencedBy
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          Skill is a reusable, declarative agent capability. AgentWorkstations
+          gain access to a Skill via a SkillBinding (RBAC-style — direct
+          inline references on the AW are not used). The Skill's `SKILL.md`
+          content is rendered into each bound agent's workspace per the
+          Anthropic Skills Open Standard, and its required capabilities are
+          validated against the bound AgentGateway before the AW goes Ready.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              SkillSpec defines the desired state of a Skill — a reusable,
+              declarative capability that one or more AgentWorkstations can
+              consume via `SkillBinding`.
+
+              A Skill is more than a MemoryModule: it has an invocation
+              contract (which OpenClaw tool implements it), required
+              capabilities (which the operator validates against the bound
+              AgentGateway), and a version that bindings can pin against. The
+              `.md` content is the procedure documentation the agent reads at
+              session start; the rest is the runtime contract.
+            properties:
+              description:
+                description: |-
+                  Short description of what the skill does. Surfaced in the
+                  Console plugin and in `status` messages.
+                type: string
+              displayName:
+                description: |-
+                  Human-friendly name shown in the Console plugin and
+                  Backstage tile. Defaults to metadata.name when empty.
+                type: string
+              invocation:
+                description: |-
+                  Invocation describes the runtime contract — which OpenClaw
+                  plugin tool implements this skill, and an optional prompt
+                  template rendered into `SKILL.md`.
+                properties:
+                  promptTemplate:
+                    description: |-
+                      Optional Go-template body rendered into the skill's
+                      `SKILL.md`. Variables `{{.Skill}}`, `{{.Agent}}`,
+                      `{{.BindingOverrides}}` are available. Use this for skills
+                      where the shape of the procedure is the same across agents
+                      but the parameters differ.
+                    type: string
+                  tool:
+                    description: |-
+                      Name of the OpenClaw plugin tool this skill is built on
+                      (e.g. "browser", "web_fetch", "exec", "memory"). Recorded in
+                      status and used by the operator to validate the bound
+                      AgentGateway has the matching capability before an AW that
+                      uses this skill is allowed to go Ready.
+                    type: string
+                type: object
+              requires:
+                description: |-
+                  Requires lists OpenClaw capabilities (`browser`,
+                  `web_search`, `web_fetch`, `exec`, `memory`, etc.) the agent
+                  needs to use this skill. The operator validates that the
+                  AgentWorkstation's bound AgentGateway provides each
+                  capability before the AW can go Ready. Missing capabilities
+                  surface in `aw.status.message` so users see why their agent
+                  is Pending.
+                items:
+                  type: string
+                type: array
+              source:
+                description: |-
+                  Source is where the skill's `SKILL.md` content lives.
+                  Exactly one of configMapRef or inline must be set.
+                properties:
+                  configMapRef:
+                    description: |-
+                      Reference to a ConfigMap whose data[key] holds the skill's
+                      `SKILL.md` content.
+                    properties:
+                      key:
+                        description: |-
+                          Key in the ConfigMap's data map (typically the canonical filename,
+                          e.g. AGENTS.md, USER.md, SKILL_<name>.md).
+                        type: string
+                      name:
+                        description: Name of the ConfigMap in the same namespace.
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
+                  inline:
+                    description: Inline `SKILL.md` markdown body.
+                    type: string
+                type: object
+              version:
+                description: |-
+                  Semver-ish version string of the skill's content +
+                  invocation contract. SkillBindings can pin a specific
+                  version via `spec.skillRef.version`; otherwise they float
+                  with whatever this Skill currently declares.
+                type: string
+            required:
+            - source
+            type: object
+          status:
+            description: |-
+              SkillStatus reflects observed state. The controller fills these
+              fields on every reconcile.
+            properties:
+              conditions:
+                description: |-
+                  Conditions reflect the latest observations. Standard types:
+                  Ready, ContentResolved.
+                items:
+                  description: |-
+                    SkillCondition is a standard Kubernetes condition entry on the
+                    skill's status.
+                  properties:
+                    lastTransitionTime:
+                      format: date-time
+                      type: string
+                    message:
+                      type: string
+                    reason:
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+              contentSha256:
+                description: |-
+                  SHA-256 of the resolved `SKILL.md` content. Used by the UI
+                  to detect drift and by agents to know when their cached
+                  copy is stale.
+                type: string
+              referencedBy:
+                description: |-
+                  AgentWorkstation names currently bound to this skill via
+                  any SkillBinding in the same namespace. Maintained by the
+                  controller as bindings + AWs change.
+                items:
+                  type: string
+                type: array
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

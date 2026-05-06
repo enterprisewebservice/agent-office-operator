@@ -23,6 +23,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -30,7 +31,9 @@ import (
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentofficev1alpha1 "github.com/enterprisewebservice/agent-office-operator/api/v1alpha1"
 )
@@ -156,13 +159,88 @@ func (r *AgentWorkstationReconciler) reconcileStatus(ctx context.Context, aw *ag
 }
 
 // SetupWithManager wires the controller. Owns() handles the cascade —
-// re-reconcile whenever an owned child changes.
+// re-reconcile whenever an owned child changes. Watches() handles
+// the cross-resource fan-out: when a SkillBinding or Skill that
+// applies to this AW changes, we need to re-reconcile the AW so
+// the workspace SKILL_*.md files stay in sync.
 func (r *AgentWorkstationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// Route is unstructured; register it as a generic owned source.
 	route := &unstructured.Unstructured{}
 	route.SetGroupVersionKind(schema.GroupVersionKind{
 		Group: "route.openshift.io", Version: "v1", Kind: "Route",
 	})
+
+	// SkillBinding fan-out: enqueue every AW the binding could
+	// possibly apply to (direct subjects + selector matches). On
+	// binding delete the same names get enqueued so the AW
+	// reconciler removes the corresponding SKILL_*.md from the
+	// workspace via the GC step.
+	mapSkillBinding := func(ctx context.Context, obj client.Object) []reconcile.Request {
+		sb, ok := obj.(*agentofficev1alpha1.SkillBinding)
+		if !ok {
+			return nil
+		}
+		seen := map[client.ObjectKey]struct{}{}
+		for _, s := range sb.Spec.Subjects {
+			if s.Kind != "AgentWorkstation" {
+				continue
+			}
+			seen[client.ObjectKey{Namespace: sb.Namespace, Name: s.Name}] = struct{}{}
+		}
+		if sb.Spec.SubjectSelector != nil {
+			ls := sb.Spec.SubjectSelector
+			if len(ls.MatchLabels) > 0 || len(ls.MatchExpressions) > 0 {
+				sel, err := metav1.LabelSelectorAsSelector(ls)
+				if err == nil {
+					var aws agentofficev1alpha1.AgentWorkstationList
+					if err := r.List(ctx, &aws,
+						client.InNamespace(sb.Namespace),
+						client.MatchingLabelsSelector{Selector: sel},
+					); err == nil {
+						for _, aw := range aws.Items {
+							seen[client.ObjectKey{Namespace: aw.Namespace, Name: aw.Name}] = struct{}{}
+						}
+					}
+				}
+			}
+		}
+		out := make([]reconcile.Request, 0, len(seen))
+		for k := range seen {
+			out = append(out, reconcile.Request{NamespacedName: k})
+		}
+		return out
+	}
+
+	// Skill fan-out: when a Skill changes, re-reconcile every AW
+	// that's currently bound to it. Cheaper than re-resolving
+	// every binding's subject set: just iterate the AWs whose
+	// status references this skill. Walk SkillBindings and union
+	// their applied lists for the matching skillRef.
+	mapSkill := func(ctx context.Context, obj client.Object) []reconcile.Request {
+		sk, ok := obj.(*agentofficev1alpha1.Skill)
+		if !ok {
+			return nil
+		}
+		var bindings agentofficev1alpha1.SkillBindingList
+		if err := r.List(ctx, &bindings, client.InNamespace(sk.Namespace)); err != nil {
+			return nil
+		}
+		seen := map[client.ObjectKey]struct{}{}
+		for _, sb := range bindings.Items {
+			if sb.Spec.SkillRef.Name != sk.Name {
+				continue
+			}
+			for _, n := range sb.Status.AppliedTo {
+				seen[client.ObjectKey{Namespace: sk.Namespace, Name: n}] = struct{}{}
+			}
+		}
+		out := make([]reconcile.Request, 0, len(seen))
+		for k := range seen {
+			out = append(out, reconcile.Request{NamespacedName: k})
+		}
+		return out
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&agentofficev1alpha1.AgentWorkstation{}).
 		Owns(&appsv1.Deployment{}).
@@ -171,6 +249,8 @@ func (r *AgentWorkstationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Secret{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(route).
+		Watches(&agentofficev1alpha1.SkillBinding{}, handler.EnqueueRequestsFromMapFunc(mapSkillBinding)).
+		Watches(&agentofficev1alpha1.Skill{}, handler.EnqueueRequestsFromMapFunc(mapSkill)).
 		Named("agentworkstation").
 		Complete(r)
 }
