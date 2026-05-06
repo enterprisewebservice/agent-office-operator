@@ -232,16 +232,30 @@ console.log("SEEDED dir=" + dir + " touched=" + touched + " gcd=" + gcd);
 	//     (transport name), which never matches.
 	//   * If the URL is empty / @me / not parseable, leave bindings
 	//     alone for this agent and surface a friendly status hint.
-	//   * Strip ANY existing binding whose match.channel is a
-	//     transport name (discord/slack/telegram/etc) — those are
-	//     catch-alls that shadow channel-specific routes. Strip
-	//     stale bindings for THIS agent that point at a different
-	//     channel than the AW spec (so renaming the channel updates
-	//     routing without leaving an old rule behind).
+	//   * Drop any binding whose match has neither `peer.id` nor
+	//     `guildId` nor `teamId` AND whose accountPattern isn't a
+	//     specific account — those are real catch-alls that route
+	//     EVERY message on a transport to one agent (almost never
+	//     intended in shared-runtime mode, where multiple agents
+	//     coexist behind one bot).
+	//   * Strip stale bindings for THIS agent (so renaming the
+	//     channel updates routing without leaving an old rule
+	//     behind) — keyed on agentId, regardless of peer.id, so
+	//     every old rule for this agent is replaced by the one
+	//     fresh write below.
 	//
 	// `openclaw config validate` is run advisory after; failures are
 	// logged but not fatal because the merge above only ever
 	// produces schema-valid JSON we constructed in Go.
+	//
+	// SCHEMA NOTE: openclaw's binding matcher reads `match.channel`
+	// as the TRANSPORT NAME ("discord"/"slack"/etc), not the
+	// channel ID. The actual Discord channel ID goes in
+	// `match.peer = { kind: "channel", id: "<id>" }`. Earlier
+	// slices wrote `match.channel: "<channel-id>"` and got "channel
+	// id never matches" silently — every message fell through to
+	// the `main` agent. See dist/resolve-route-*.js
+	// `buildEvaluatedBindingsByChannel` for the lookup.
 	mergeScript := fmt.Sprintf(`
 const fs = require("fs");
 const path = "/home/node/.openclaw/openclaw.json";
@@ -249,8 +263,6 @@ const agentEntry = %[1]s;
 const profile = %[2]q;
 const channelId = %[3]q;
 const agentId = %[4]q;
-
-const TRANSPORTS = new Set(["discord","slack","telegram","whatsapp","matrix","mastodon"]);
 
 const raw = fs.readFileSync(path, "utf8");
 const cfg = JSON.parse(raw);
@@ -272,29 +284,43 @@ const allow = Array.isArray(cfg.nodeHost.browserProxy.allowProfiles) ? cfg.nodeH
 if (!allow.includes(profile)) allow.push(profile);
 cfg.nodeHost.browserProxy.allowProfiles = allow;
 
-// bindings — strip catch-alls + stale-for-this-agent + this-agent's
-// existing entry, then re-add a single channel-specific entry if we
-// have a real channel id. Result: at most one binding per (agentId,
-// channelId) pair, no transport catch-alls anywhere.
+// bindings — strip stale-for-this-agent (any rule keyed on this
+// agent gets replaced by the one fresh write below), strip wide
+// catch-alls (transport-only with no peer/guild/team — they
+// shadow specific routes), then re-add a single peer-specific
+// entry if we have a real channel id from the AW spec.
+function isWideCatchAll(b) {
+  if (!b || !b.match) return true;
+  const m = b.match;
+  const hasPeer = m.peer && m.peer.id;
+  const hasGuild = m.guildId;
+  const hasTeam = m.teamId;
+  const accountWild = !m.accountId || m.accountId === "*";
+  return !hasPeer && !hasGuild && !hasTeam && accountWild;
+}
 let bindings = Array.isArray(cfg.bindings) ? cfg.bindings : [];
 bindings = bindings.filter(b => {
   if (!b || !b.match) return false;
-  const ch = b.match.channel;
-  if (!ch || TRANSPORTS.has(String(ch))) return false;     // catch-alls / empty
-  if (b.agentId === agentId) return false;                  // this agent's old rule(s)
+  if (b.agentId === agentId) return false;     // this agent's old rule(s) — re-added fresh below
+  if (isWideCatchAll(b)) return false;         // wide catch-alls shadow specifics
   return true;
 });
-// Normalize accountId on survivors (legacy rules wrote "discord" here).
-for (const b of bindings) {
-  if (!b.match.accountId || TRANSPORTS.has(String(b.match.accountId))) {
-    b.match.accountId = "default";
-  }
-}
 if (channelId) {
-  bindings.push({ agentId, match: { channel: channelId, accountId: "default" } });
+  bindings.push({
+    agentId,
+    match: {
+      channel: "discord",
+      accountId: "default",
+      peer: { kind: "channel", id: channelId },
+    },
+  });
 }
-// Stable sort by channel id for deterministic file content.
-bindings.sort((a,b) => String(a.match.channel).localeCompare(String(b.match.channel)));
+// Stable sort by (agentId, peer.id) for deterministic file content.
+bindings.sort((a,b) => {
+  const aKey = (a.agentId || "") + "\t" + ((a.match && a.match.peer && a.match.peer.id) || "");
+  const bKey = (b.agentId || "") + "\t" + ((b.match && b.match.peer && b.match.peer.id) || "");
+  return aKey.localeCompare(bKey);
+});
 cfg.bindings = bindings;
 
 const after = JSON.stringify(cfg);
