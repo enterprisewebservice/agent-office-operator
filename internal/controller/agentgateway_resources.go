@@ -139,6 +139,13 @@ func gatewayVolumes(gw *agentofficev1alpha1.AgentGateway, dshmSize resource.Quan
 				},
 			},
 		})
+		// Per-KB git-sync ConfigMap (script + bootstrap
+		// templates) — mounted into the git-sync sidecar at
+		// /sync. Only added when the KB has GitMirror so the
+		// pod stays minimal when mirroring isn't configured.
+		if kb.Spec.GitMirror != nil {
+			vols = append(vols, gitSyncVolume(kb))
+		}
 	}
 	return vols
 }
@@ -372,17 +379,8 @@ func (r *AgentGatewayReconciler) reconcileGatewayDeployment(ctx context.Context,
 						{Name: "workspace", MountPath: "/workspace"},
 					},
 				}},
-				Containers: []corev1.Container{{
-					Name:            "openclaw",
-					Image:           image,
-					ImagePullPolicy: corev1.PullAlways,
-					Ports: []corev1.ContainerPort{{
-						Name: "gateway", ContainerPort: 18789, Protocol: corev1.ProtocolTCP,
-					}},
-					EnvFrom:      gatewayEnvFrom(gw, tokenSecretName),
-					VolumeMounts: gatewayVolumeMounts(gw, attachedKBs),
-				}},
-				Volumes: gatewayVolumes(gw, dshmSize, attachedKBs),
+				Containers: gatewayContainers(image, gw, tokenSecretName, attachedKBs),
+				Volumes:    gatewayVolumes(gw, dshmSize, attachedKBs),
 			},
 		}
 		if gw.Spec.Resources != nil {
@@ -391,6 +389,30 @@ func (r *AgentGatewayReconciler) reconcileGatewayDeployment(ctx context.Context,
 		return controllerutil.SetControllerReference(gw, dep, r.Scheme)
 	})
 	return err
+}
+
+// gatewayContainers returns the pod's container list: always
+// the openclaw runtime, plus one git-sync sidecar per attached
+// KnowledgeBase whose spec.gitMirror is configured. Sidecars
+// share the wiki PVC volume already in the pod (no rsync between
+// containers — both read/write the same files).
+func gatewayContainers(image string, gw *agentofficev1alpha1.AgentGateway, tokenSecretName string, attachedKBs []agentofficev1alpha1.KnowledgeBase) []corev1.Container {
+	out := []corev1.Container{{
+		Name:            "openclaw",
+		Image:           image,
+		ImagePullPolicy: corev1.PullAlways,
+		Ports: []corev1.ContainerPort{{
+			Name: "gateway", ContainerPort: 18789, Protocol: corev1.ProtocolTCP,
+		}},
+		EnvFrom:      gatewayEnvFrom(gw, tokenSecretName),
+		VolumeMounts: gatewayVolumeMounts(gw, attachedKBs),
+	}}
+	for _, kb := range attachedKBs {
+		if kb.Spec.GitMirror != nil {
+			out = append(out, gitSyncContainer(kb))
+		}
+	}
+	return out
 }
 
 func (r *AgentGatewayReconciler) reconcileGatewayService(ctx context.Context, gw *agentofficev1alpha1.AgentGateway) error {

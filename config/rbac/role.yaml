@@ -38,6 +38,7 @@ rules:
   resources:
   - agentgateways
   - agentworkstations
+  - knowledgebases
   - memorymodules
   - skillbindings
   - skills
@@ -54,6 +55,7 @@ rules:
   resources:
   - agentgateways/finalizers
   - agentworkstations/finalizers
+  - knowledgebases/finalizers
   - memorymodules/finalizers
   - skillbindings/finalizers
   - skills/finalizers
@@ -64,6 +66,7 @@ rules:
   resources:
   - agentgateways/status
   - agentworkstations/status
+  - knowledgebases/status
   - memorymodules/status
   - skillbindings/status
   - skills/status

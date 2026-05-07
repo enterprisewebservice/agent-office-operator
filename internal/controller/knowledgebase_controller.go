@@ -52,6 +52,7 @@ type KnowledgeBaseReconciler struct {
 // +kubebuilder:rbac:groups=agentoffice.ai,resources=knowledgebases/finalizers,verbs=update
 // +kubebuilder:rbac:groups=agentoffice.ai,resources=agentgateways,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile provisions the wiki PVC and updates status. It does
 // NOT modify the gateway Deployment — the AgentGatewayReconciler
@@ -119,6 +120,17 @@ func (r *KnowledgeBaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 	if op != controllerutil.OperationResultNone {
 		log.Info("KB PVC reconciled", "op", string(op), "pvc", pvcName)
+	}
+
+	// 1b. If GitMirror is configured, reconcile the per-KB
+	//     ConfigMap holding the sync script + bootstrap
+	//     templates. The gateway controller mounts this CM
+	//     into the git-sync sidecar container it adds to the
+	//     gateway pod. Idempotent — no-op when the CM matches.
+	if err := r.reconcileGitSyncConfigMap(ctx, &kb); err != nil {
+		log.Info("git-sync CM reconcile failed", "err", err)
+		// non-fatal — KB still works without mirroring; status
+		// will surface the gap on the next gateway-side reconcile
 	}
 
 	// 2. Resolve gateway binding (informational — the gateway
@@ -255,6 +267,7 @@ func (r *KnowledgeBaseReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&agentofficev1alpha1.KnowledgeBase{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
+		Owns(&corev1.ConfigMap{}).
 		Watches(&agentofficev1alpha1.AgentGateway{}, handler.EnqueueRequestsFromMapFunc(mapGW)).
 		Named("knowledgebase").
 		Complete(r)
