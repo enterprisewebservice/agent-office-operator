@@ -108,8 +108,12 @@ func gitSyncContainer(kb agentofficev1alpha1.KnowledgeBase) corev1.Container {
 	}
 
 	return corev1.Container{
-		Name:    "git-sync-" + kb.Name,
-		Image:   "alpine/git:latest",
+		Name: "git-sync-" + kb.Name,
+		// Fully qualified registry path — OpenShift enforces
+		// short-names policy and rejects bare `alpine/git`.
+		// Pinned to a known-good tag instead of `:latest` so
+		// rollouts are reproducible across reconciles.
+		Image:   "docker.io/alpine/git:v2.49.0",
 		Command: []string{"/bin/sh", "/sync/sync.sh"},
 		Env: []corev1.EnvVar{
 			{Name: "WIKI_DIR", Value: kbMountPath(kb.Name)},
