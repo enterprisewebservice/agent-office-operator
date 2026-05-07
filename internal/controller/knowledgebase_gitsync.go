@@ -428,11 +428,17 @@ esac
 
 log() { echo "[git-sync $(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"; }
 
+# Force HOME to a writable scratch dir. OpenShift assigns
+# random non-root UIDs by default and the container's image
+# user has no real home; HOME tends to resolve to '/' which the
+# random UID can't write. /tmp is always writable.
+export HOME=/tmp/git-sync-home
+mkdir -p "$HOME"
+
 # Auth setup. We expect a 'token' env from the secretRef holding
 # a GitHub Personal Access Token (or fine-grained token) with
 # repo:write scope. Inject as a credential-helper line so git
 # uses it transparently for any matching host.
-mkdir -p "$HOME"
 git config --global user.email "agents@agent-office.local"
 git config --global user.name "Agent Office"
 git config --global pull.rebase true
