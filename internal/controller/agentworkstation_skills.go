@@ -320,12 +320,13 @@ func (r *AgentWorkstationReconciler) renderWikiMd(ctx context.Context, aw *agent
 		}
 		fmt.Fprintf(&b, "- **Mount path**: `%s`\n", e.MountPath)
 		fmt.Fprintf(&b, "- **KB name**: `%s` (use this when calling `wiki-*` skills)\n", e.Name)
-		b.WriteString("- **Conventions**: `raw/clips/` for unsorted captures, `topics/` for curated articles, `concepts/` for canonical concept pages, `queries/` for query-result snapshots, `_lint/` for nightly lint reports, `_index.md` for the manifest.\n\n")
+		b.WriteString("- **Conventions**: `raw/clips/` for unsorted captures, `topics/` for curated articles, `concepts/` for canonical concept pages, `queries/` for query-result snapshots, `_lint/` for nightly lint reports, `_index.md` for the manifest, **`log.md` for the chronological activity feed**.\n\n")
 	}
 	b.WriteString("## Reading + writing\n\n")
 	b.WriteString("- **Search**: prefer the `wiki-search` skill (or fall back to `exec` running `rg <query> /home/node/.openclaw/wiki/<kb>/`).\n")
 	b.WriteString("- **Clip a URL**: use the `wiki-clip` skill — it captures the page through the VM browser and files clean Markdown into `raw/clips/`.\n")
 	b.WriteString("- **File an article**: use the `wiki-write` skill so the article includes correct frontmatter, backlinks, and entries in `_index.md`.\n")
+	b.WriteString("- **Log every meaningful operation**: every `wiki-clip`, `wiki-write`, and substantial `wiki-search` skill appends a single entry to `log.md` with the format `## [YYYY-MM-DD] <op> | <subject>`. This makes the wiki's history greppable and gives the linter agent a structured timeline to walk.\n")
 	b.WriteString("- **Cite**: when answering from the wiki, cite the source article path so the user can navigate to it directly.\n")
 	return b.String(), nil
 }
