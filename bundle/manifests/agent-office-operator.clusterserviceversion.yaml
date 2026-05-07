@@ -57,7 +57,7 @@ metadata:
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
     repository: https://github.com/enterprisewebservice/agent-office-operator
     support: Red Hat Solution Architecture
-  name: agent-office-operator.v0.0.23
+  name: agent-office-operator.v0.0.24
   namespace: placeholder
 spec:
   apiservicedefinitions: {}
@@ -182,6 +182,9 @@ spec:
           - agentgateways
           - agentworkstations
           - memorymodules
+          - skills
+          - skillbindings
+          - knowledgebases
           verbs:
           - create
           - delete
@@ -196,6 +199,9 @@ spec:
           - agentgateways/finalizers
           - agentworkstations/finalizers
           - memorymodules/finalizers
+          - skills/finalizers
+          - skillbindings/finalizers
+          - knowledgebases/finalizers
           verbs:
           - update
         - apiGroups:
@@ -204,6 +210,9 @@ spec:
           - agentgateways/status
           - agentworkstations/status
           - memorymodules/status
+          - skills/status
+          - skillbindings/status
+          - knowledgebases/status
           verbs:
           - get
           - patch
@@ -280,7 +289,7 @@ spec:
                       fieldPath: metadata.annotations['olm.targetNamespaces']
                 - name: CLUSTER_APPS_DOMAIN
                   value: apps.salamander.aimlworkbench.com
-                image: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-operator:v0.0.23
+                image: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-operator:v0.0.24
                 imagePullPolicy: Always
                 livenessProbe:
                   httpGet:
@@ -383,5 +392,5 @@ spec:
   provider:
     name: Red Hat Solution Architecture
     url: https://github.com/enterprisewebservice
-  replaces: agent-office-operator.v0.0.22
-  version: 0.0.23
+  replaces: agent-office-operator.v0.0.23
+  version: 0.0.24
