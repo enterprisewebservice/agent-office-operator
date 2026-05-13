@@ -7,9 +7,14 @@
 # so a runaway experiment can't trip the 4090 node's breaker.
 #
 # Stack rationale (researched, not guessed):
-#   - Base image is Red Hat OpenShift AI's runtime-pytorch-cuda-py312-ubi9.
-#     UBI9, Python 3.12, PyTorch + CUDA aligned to the cluster's GPU
-#     driver. Same base RHOAI uses for serving/training workbenches.
+#   - Base image is the official PyTorch image (pytorch/pytorch on
+#     Docker Hub). Picked because MODH's runtime-pytorch image
+#     (quay.io/modh/runtime-pytorch-cuda-py312-ubi9) requires auth
+#     for non-cluster pulls and Konflux's build pod doesn't carry
+#     a MODH pull secret. The official PyTorch image gives the
+#     same PyTorch + CUDA + cuDNN stack, just on Debian instead of
+#     UBI9 — fine for the kfp pipeline step since we're not
+#     shipping it into a regulated cluster path.
 #   - training-hub is RHOAI's recommended LLM fine-tuning SDK (Training
 #     Hub, GA in OpenShift AI 3.x). Wraps SFT / OSFT / LoRA / QLoRA.
 #   - peft + bitsandbytes + accelerate are the standard QLoRA stack;
@@ -26,15 +31,19 @@
 # Quay Operator's route is `quay-quay` in namespace `quay-test`, so the
 # rendered route is `quay-quay-quay-test.apps.<cluster>`. Functional;
 # the funny name is cosmetic.
-FROM quay.io/modh/runtime-pytorch-cuda-py312-ubi9:pytorch
+FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
 
 USER 0
 
 # System tools the offload + lm-eval steps occasionally need.
-RUN dnf -y install --setopt=install_weak_deps=False \
+# Debian-based base — apt rather than dnf.
+RUN apt-get update -y \
+    && apt-get install -y --no-install-recommends \
+        git \
         git-lfs \
-        which \
-    && dnf clean all
+        ca-certificates \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
 
 # Pinned-but-not-frozen — we want minor patches but not surprise
 # major bumps. Versions chosen against PyTorch 2.5 + CUDA 12.4 on
@@ -54,20 +63,14 @@ RUN pip install --no-cache-dir \
         'huggingface_hub' \
         'evaluate>=0.4'
 
-# Trim what RHOAI's base image ships that we don't need at training
-# time (Jupyter kernels, code-server, etc.). Saves ~600 MB on the
-# final image; speeds pod-pull on the GPU nodes.
-RUN pip uninstall --yes \
-        jupyterlab \
-        jupyter-server \
-        notebook \
-        ipykernel \
-        ipywidgets \
-    2>/dev/null || true
-
 # The AutoResearch operator drops a small entrypoint script at
 # /opt/autoresearch/run.py in the kfp pipeline step's command;
 # we don't bake a CMD here so the kfp step controls invocation.
 WORKDIR /workspace
 
-USER 1001
+# OpenShift runs pods under a random non-root UID for security;
+# directories the pip wheels installed into need group-write so
+# any UID in the root group can read/write. The pytorch base
+# image is built around root by default — fix the perms here so
+# kfp's UID assignment doesn't break.
+RUN chmod -R g=u /opt/conda /workspace
