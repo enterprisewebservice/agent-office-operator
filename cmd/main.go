@@ -268,6 +268,14 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "KnowledgeBase")
 		os.Exit(1)
 	}
+	if err := (&controller.AutoResearchProjectReconciler{
+		Client:     mgr.GetClient(),
+		Scheme:     mgr.GetScheme(),
+		RestConfig: mgr.GetConfig(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "AutoResearchProject")
+		os.Exit(1)
+	}
 	// +kubebuilder:scaffold:builder
 
 	if metricsCertWatcher != nil {
