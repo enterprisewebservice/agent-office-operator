@@ -1,0 +1,73 @@
+# Trainer container for Karpathy-style AutoResearch QLoRA experiments.
+#
+# Used by Data Science Pipelines steps the operator submits per
+# AutoResearchProject experiment cycle. The pod that runs this image
+# has its GPU power-capped via an init container before training
+# starts (default 250W per GPU; configurable on AutoResearchProject)
+# so a runaway experiment can't trip the 4090 node's breaker.
+#
+# Stack rationale (researched, not guessed):
+#   - Base image is Red Hat OpenShift AI's runtime-pytorch-cuda-py312-ubi9.
+#     UBI9, Python 3.12, PyTorch + CUDA aligned to the cluster's GPU
+#     driver. Same base RHOAI uses for serving/training workbenches.
+#   - training-hub is RHOAI's recommended LLM fine-tuning SDK (Training
+#     Hub, GA in OpenShift AI 3.x). Wraps SFT / OSFT / LoRA / QLoRA.
+#   - peft + bitsandbytes + accelerate are the standard QLoRA stack;
+#     Training Hub depends on them. Listed explicitly so version
+#     pinning stays auditable.
+#   - deepspeed brings ZeRO-3 + ZeRO-Infinity offload — required to
+#     fine-tune anything bigger than ~13B on the cluster's 24GB GPUs.
+#   - The lm-evaluation-harness wrapper (TrustyAI LMEvalJob) runs
+#     deep benchmarks for kept variants from its own image; this
+#     trainer image only needs Training Hub's inline eval (built in).
+#
+# Note: the `quay-quay-quay-test.apps.salamander.aimlworkbench.com`
+# hostname is an OpenShift Route pattern, not three "quay" tokens —
+# Quay Operator's route is `quay-quay` in namespace `quay-test`, so the
+# rendered route is `quay-quay-quay-test.apps.<cluster>`. Functional;
+# the funny name is cosmetic.
+FROM quay.io/modh/runtime-pytorch-cuda-py312-ubi9:pytorch
+
+USER 0
+
+# System tools the offload + lm-eval steps occasionally need.
+RUN dnf -y install --setopt=install_weak_deps=False \
+        git-lfs \
+        which \
+    && dnf clean all
+
+# Pinned-but-not-frozen — we want minor patches but not surprise
+# major bumps. Versions chosen against PyTorch 2.5 + CUDA 12.4 on
+# UBI9 (the RHOAI base image's contract).
+RUN pip install --no-cache-dir \
+        'training-hub>=0.2' \
+        'peft>=0.13,<1' \
+        'bitsandbytes>=0.44,<1' \
+        'accelerate>=1.0,<2' \
+        'transformers>=4.45,<5' \
+        'datasets>=2.21,<4' \
+        'deepspeed>=0.15,<1' \
+        'trl>=0.11,<1' \
+        'sentencepiece' \
+        'safetensors' \
+        'pyyaml' \
+        'huggingface_hub' \
+        'evaluate>=0.4'
+
+# Trim what RHOAI's base image ships that we don't need at training
+# time (Jupyter kernels, code-server, etc.). Saves ~600 MB on the
+# final image; speeds pod-pull on the GPU nodes.
+RUN pip uninstall --yes \
+        jupyterlab \
+        jupyter-server \
+        notebook \
+        ipykernel \
+        ipywidgets \
+    2>/dev/null || true
+
+# The AutoResearch operator drops a small entrypoint script at
+# /opt/autoresearch/run.py in the kfp pipeline step's command;
+# we don't bake a CMD here so the kfp step controls invocation.
+WORKDIR /workspace
+
+USER 1001

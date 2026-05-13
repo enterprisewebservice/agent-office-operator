@@ -1,0 +1,87 @@
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  name: autoresearch-trainer-on-push
+  namespace: default-tenant
+  annotations:
+    # PaC trigger — only on push to main when the trainer dockerfile or
+    # its tekton file changed. The path-changes filter keeps unrelated
+    # commits (operator code, bundle YAMLs) from rebuilding this image
+    # for no reason — saves ~5 min per such commit.
+    pipelinesascode.tekton.dev/on-cel-expression: |
+      event == "push"
+      && target_branch == "main"
+      && body.head_commit.author.email != "noreply@argoproj.io"
+      && (
+           "Containerfile.autoresearch-trainer".pathChanged()
+           || ".tekton/autoresearch-trainer-on-push.yaml".pathChanged()
+         )
+    pipelinesascode.tekton.dev/cancel-in-progress: "false"
+    pipelinesascode.tekton.dev/max-keep-runs: "5"
+    build.appstudio.openshift.io/repo: 'https://github.com/enterprisewebservice/agent-office-operator?rev={{revision}}'
+    build.appstudio.redhat.com/commit_sha: '{{revision}}'
+    build.appstudio.redhat.com/target_branch: '{{target_branch}}'
+  labels:
+    appstudio.openshift.io/application: agent-office-operator
+    appstudio.openshift.io/component: autoresearch-trainer
+    pipelines.appstudio.openshift.io/type: build
+spec:
+  params:
+    - name: git-url
+      value: '{{source_url}}'
+    - name: revision
+      value: '{{revision}}'
+    - name: output-image
+      # Stable v0.0.1 tag. Bump when the Containerfile's dependency
+      # pins change in a way kfp pipeline steps need to pick up
+      # (e.g. major training-hub bump). AutoResearchProject CRs
+      # reference this tag explicitly in spec.trainer.image so they
+      # don't get surprised by ":latest" drift.
+      value: 'quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/autoresearch-trainer:v0.0.1'
+    - name: dockerfile
+      value: Containerfile.autoresearch-trainer
+    - name: path-context
+      value: .
+    - name: rebuild
+      value: "true"
+    - name: skip-checks
+      value: "true"
+  pipelineRef:
+    resolver: bundles
+    params:
+      - name: bundle
+        value: 'quay.io/konflux-ci/tekton-catalog/pipeline-docker-build@sha256:1b2a544f5308a50b8ebf76e76f10f8be3e12342d6ce7233d2520aca724294a82'
+      - name: name
+        value: docker-build
+      - name: kind
+        value: pipeline
+  taskRunSpecs:
+    - pipelineTaskName: build-container
+      stepSpecs:
+        - name: build
+          # Bigger image (PyTorch + CUDA layers are ~4 GB), pip install
+          # of training-hub + deps is CPU-bound. Same 16-core ceiling
+          # the operator build uses; trainer build typically finishes
+          # in 6-8 minutes cold.
+          computeResources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "16"
+              memory: 12Gi
+  workspaces:
+    - name: workspace
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              # Larger than the operator's 1Gi workspace because the
+              # build pulls the PyTorch base image (~6 GB) plus pip's
+              # cache plus the assembled layers.
+              storage: 10Gi
+    - name: git-auth
+      secret:
+        secretName: '{{ git_auth_secret }}'
