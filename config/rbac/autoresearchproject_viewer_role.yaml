@@ -1,0 +1,14 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: agent-office-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: autoresearchproject-viewer-role
+rules:
+- apiGroups: [agentoffice.ai]
+  resources: [autoresearchprojects]
+  verbs: [get, list, watch]
+- apiGroups: [agentoffice.ai]
+  resources: [autoresearchprojects/status]
+  verbs: [get]

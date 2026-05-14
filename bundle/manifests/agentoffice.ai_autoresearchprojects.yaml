@@ -1,0 +1,488 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  name: autoresearchprojects.agentoffice.ai
+spec:
+  group: agentoffice.ai
+  names:
+    categories:
+    - agent-office
+    kind: AutoResearchProject
+    listKind: AutoResearchProjectList
+    plural: autoresearchprojects
+    shortNames:
+    - arp
+    singular: autoresearchproject
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.displayName
+      name: DisplayName
+      type: string
+    - jsonPath: .spec.baseModel.huggingfaceId
+      name: BaseModel
+      type: string
+    - jsonPath: .status.round
+      name: Round
+      type: integer
+    - description: Kept experiments out of total run
+      jsonPath: .status.experimentsKept
+      name: Kept/Total
+      type: string
+    - jsonPath: .status.bestEvalLoss
+      name: Best
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          AutoResearchProject is a Karpathy-style autonomous
+          ML-experimentation loop, packaged as a declarative resource.
+
+          Each AutoResearchProject runs an unbounded sequence of QLoRA
+          fine-tuning experiments against a base model. The
+          experimenter agent proposes configurations by reading the
+          referenced KnowledgeBase's experiment log; the operator
+          submits Data Science Pipeline runs; results land back in
+          the wiki + the OpenShift AI Experiments UI; kept variants
+          optionally trigger TrustyAI LMEvalJob benchmark runs.
+
+          Hardware-aware: the trainer pod's init container applies a
+          per-GPU `nvidia-smi -pl` cap before any training so power
+          stays within circuit budget. Pod-anti-affinity keeps one
+          trainer pod per node by default (relevant on the 2x 4090
+          node, where two simultaneous full-throttle pods would risk
+          tripping a 15A breaker).
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              AutoResearchProjectSpec defines the desired state — what to
+              research, with whom, against what target, under what limits.
+            properties:
+              baseModel:
+                description: BaseModel the QLoRA adapters fine-tune.
+                properties:
+                  huggingfaceId:
+                    description: |-
+                      HuggingfaceID (e.g. "ibm-granite/granite-3.1-8b-instruct").
+                      Required.
+                    type: string
+                  revision:
+                    description: |-
+                      Revision (commit / tag / branch) for reproducibility.
+                      Defaults to "main" when empty.
+                    type: string
+                required:
+                - huggingfaceId
+                type: object
+              description:
+                description: Description shown in the same surfaces.
+                type: string
+              displayName:
+                description: |-
+                  DisplayName shown in the OpenShift Console plugin and in
+                  the wiki's project pages.
+                type: string
+              eval:
+                description: |-
+                  Eval is the keep/revert metric + (optional) deep
+                  benchmark config.
+                properties:
+                  deepBenchmark:
+                    description: |-
+                      DeepBenchmark, when set, triggers a TrustyAI LMEvalJob CR
+                      for each kept variant — runs benchmark tasks (MMLU, ARC,
+                      HellaSwag) against the merged-adapter checkpoint. Slower
+                      than inline eval, so only runs on variants that already
+                      passed the keep/revert gate. Phase 3.
+                    properties:
+                      fewShot:
+                        description: |-
+                          FewShot is the number of in-context examples per task.
+                          Default 0 (zero-shot). 5 is common for MMLU.
+                        format: int32
+                        type: integer
+                      limit:
+                        description: |-
+                          Limit caps the number of examples per task — useful for
+                          fast smoke-test benchmarks. Default 200; full eval (no
+                          limit) takes ~30-60 minutes per kept variant on this
+                          cluster's GPUs.
+                        format: int32
+                        type: integer
+                      tasks:
+                        description: |-
+                          Tasks is the lm-evaluation-harness task list to run
+                          (e.g. ["mmlu", "arc_easy", "hellaswag"]). Required when
+                          DeepBenchmark is set.
+                        items:
+                          type: string
+                        type: array
+                    required:
+                    - tasks
+                    type: object
+                  direction:
+                    default: minimize
+                    description: 'Direction: minimize for losses, maximize for accuracies.'
+                    enum:
+                    - minimize
+                    - maximize
+                    type: string
+                  marginPct:
+                    description: |-
+                      MarginPct is how much better than current best a new
+                      experiment must score to be "kept" (anti-noise). String-
+                      encoded float (e.g. "0.5") because CRDs discourage raw
+                      floats. Default "0" = any improvement keeps; "1" = must
+                      be 1% better.
+                    type: string
+                  metric:
+                    default: eval_loss
+                    description: |-
+                      Metric the keep/revert decision keys on. v0.0.1 supports
+                      "eval_loss" (inline, from Training Hub). Future:
+                      "mmlu", "arc_easy", etc. (LMEvalJob-backed).
+                    type: string
+                type: object
+              experimentName:
+                description: |-
+                  ExperimentName is the OpenShift AI Experiment that
+                  pipeline runs roll up under. All runs from this project
+                  land in the same Experiment so the Experiments UI shows
+                  them grouped + sortable. Defaults to metadata.name.
+                type: string
+              experimenter:
+                description: |-
+                  Experimenter is the agent proposing experiments. v0.0.1
+                  supports one; later versions support multiple
+                  (council-pattern parallel proposers + a chairman that
+                  picks winners across them).
+                properties:
+                  promptOverride:
+                    description: |-
+                      Optional: override the per-cycle prompt. When empty the
+                      operator uses its baked-in default prompt that points the
+                      agent at the wiki's experiment log + the current best
+                      configuration and asks for a next-experiment proposal.
+                    type: string
+                  workstation:
+                    description: |-
+                      Name of the AgentWorkstation in the same namespace as this
+                      AutoResearchProject. Required.
+                    type: string
+                required:
+                - workstation
+                type: object
+              knowledgeBase:
+                description: |-
+                  KnowledgeBase that the experimenter agent reads prior
+                  runs from and files new findings into. The KB must be
+                  bound to the same gateway as the experimenter
+                  AgentWorkstation (so the agent can see the wiki PVC).
+                type: string
+              loopConfig:
+                description: LoopConfig governs cadence + safety caps.
+                properties:
+                  cadenceMinutes:
+                    default: 30
+                    description: |-
+                      CadenceMinutes between reconcile-triggered cycles. Each
+                      cycle asks the experimenter for a proposal + submits a
+                      pipeline run if budget allows. Default 30 — enough for
+                      most single-GPU QLoRA experiments to complete between
+                      cycles without queuing up.
+                    format: int32
+                    type: integer
+                  maxConcurrentRuns:
+                    default: 1
+                    description: |-
+                      MaxConcurrentRuns caps how many in-flight DSP runs the
+                      operator allows at once (across cycles). Default 1.
+                    format: int32
+                    type: integer
+                  maxExperimentsPerCycle:
+                    default: 1
+                    description: |-
+                      MaxExperimentsPerCycle caps how many experiments the
+                      operator will submit per cycle. Default 1 (serial).
+                      Raise once you trust the loop + power watchdog.
+                    format: int32
+                    type: integer
+                  maxTotalExperiments:
+                    default: 100
+                    description: |-
+                      MaxTotalExperiments stops the loop after this many runs
+                      total. Default 100. Safety belt against an agent running
+                      forever or burning through budget unobserved.
+                    format: int32
+                    type: integer
+                type: object
+              pipelineRef:
+                description: PipelineRef points at the DSP-registered kfp pipeline.
+                properties:
+                  name:
+                    description: Name of the kfp pipeline in the DSP namespace.
+                    type: string
+                  namespace:
+                    description: |-
+                      Namespace where the DataSciencePipelinesApplication lives
+                      (typically the same as this AutoResearchProject).
+                    type: string
+                required:
+                - name
+                - namespace
+                type: object
+              trainer:
+                description: |-
+                  Trainer configures the per-experiment workload (image,
+                  GPU count, power cap, offload strategy).
+                properties:
+                  gpuCount:
+                    default: 1
+                    description: |-
+                      GPUCount is the number of GPUs per experiment.
+                      v0.0.1 supports only 1 (single-GPU QLoRA, optionally with
+                      CPU/disk offload for larger bases). Phase 5 raises this
+                      for multi-GPU FSDP-QLoRA via Kubeflow Trainer.
+                    format: int32
+                    type: integer
+                  image:
+                    description: |-
+                      Image is the trainer container's pinned tag. Defaults to
+                      the Konflux-built v0.0.1 image when empty.
+                    type: string
+                  offloadStrategy:
+                    default: cpu
+                    description: |-
+                      OffloadStrategy hints DeepSpeed/training-hub about
+                      memory offload. v0.0.1 enum:
+                        - "none"   — fits in GPU memory; fastest
+                        - "cpu"    — optimizer states + grads on CPU RAM
+                        - "nvme"   — full ZeRO-Infinity offload to disk; for
+                                     models that don't fit in GPU + CPU
+                      Agents can override per-experiment by including the key
+                      in their proposed config.
+                    enum:
+                    - none
+                    - cpu
+                    - nvme
+                    type: string
+                  oneTrainingPodPerNode:
+                    default: true
+                    description: |-
+                      OneTrainingPodPerNode, when true, adds a pod
+                      anti-affinity that prevents two trainer pods landing on
+                      the same node simultaneously. Belt-and-suspenders for
+                      the 4090 node: per-GPU cap + node spread. Default true.
+                    type: boolean
+                  powerCapWatts:
+                    default: 250
+                    description: |-
+                      PowerCapWatts is the per-GPU power cap the init container
+                      applies via `nvidia-smi -pl` before training starts.
+                      Safety-critical on this cluster's 2x 4090 node — leave
+                      generous headroom under your circuit's rated amperage.
+                      Default 250W (a 4090 at 250W draws ~56% of TDP for ~80%
+                      of performance; safe on any household circuit).
+                    format: int32
+                    type: integer
+                type: object
+              trainingData:
+                description: TrainingData is what the agents fine-tune on.
+                properties:
+                  huggingfaceDataset:
+                    description: |-
+                      Hugging Face dataset id (e.g. "tatsu-lab/alpaca",
+                      "openbmb/UltraFeedback").
+                    type: string
+                  sampleCount:
+                    description: |-
+                      SampleCount caps the number of training samples used per
+                      experiment. Smaller values = faster iteration. Default is
+                      2000 when unset — chosen to keep single-GPU QLoRA
+                      experiments under ~5 minutes per cycle.
+                    format: int32
+                    type: integer
+                  split:
+                    description: |-
+                      Optional split (e.g. "train", "train[:2000]"). When empty,
+                      the trainer uses "train".
+                    type: string
+                required:
+                - huggingfaceDataset
+                type: object
+            required:
+            - baseModel
+            - eval
+            - experimenter
+            - knowledgeBase
+            - pipelineRef
+            - trainingData
+            type: object
+          status:
+            description: AutoResearchProjectStatus reflects observed state.
+            properties:
+              bestEvalLoss:
+                description: |-
+                  BestEvalLoss / BestMetricValue track the current
+                  champion's score, string-encoded (whichever metric the
+                  user configured).
+                type: string
+              bestMetricValue:
+                type: string
+              bestRunId:
+                description: BestRunID is the DSP run ID of the current champion.
+                type: string
+              conditions:
+                description: |-
+                  Conditions reflect the latest observations. Standard
+                  types: Ready, PipelineResolved, KnowledgeBaseReady,
+                  ExperimenterReady.
+                items:
+                  description: AutoResearchProjectCondition is a standard k8s condition.
+                  properties:
+                    lastTransitionTime:
+                      format: date-time
+                      type: string
+                    message:
+                      type: string
+                    reason:
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+              experimentsKept:
+                description: ExperimentsKept counts the kept (improving) runs.
+                format: int32
+                type: integer
+              experimentsRun:
+                description: |-
+                  ExperimentsRun is the total count of submitted runs
+                  (kept + reverted).
+                format: int32
+                type: integer
+              lastCycleTime:
+                description: |-
+                  LastCycleTime is when the reconciler last evaluated
+                  whether to submit a new experiment. Used to gate
+                  CadenceMinutes.
+                format: date-time
+                type: string
+              openRuns:
+                additionalProperties:
+                  type: string
+                description: |-
+                  OpenRuns is a map of DSP runs the operator submitted
+                  that haven't completed yet. Keyed by run ID. The next
+                  reconcile cycle polls each for status + drains them.
+                type: object
+              phase:
+                description: |-
+                  Phase is one of: Pending (waiting on deps), Running
+                  (cycles firing), Paused (user-suspended), Completed
+                  (hit MaxTotalExperiments), Failed.
+                type: string
+              recentRuns:
+                description: |-
+                  RecentRuns is a bounded ring of the last N experiment
+                  records (typically 20) for the UI to render.
+                items:
+                  description: |-
+                    AutoResearchExperimentRecord is a single run's summary kept in
+                    status for the wiki/UI to render. The authoritative record
+                    lives in the wiki (one Markdown page per round) + in the DSP
+                    run history; this is the operator's bookkeeping.
+                  properties:
+                    adapterArtifactUri:
+                      description: |-
+                        AdapterArtifactURI is the S3/Object-store path to the
+                        LoRA adapter checkpoint (only set for kept runs).
+                      type: string
+                    completedAt:
+                      format: date-time
+                      type: string
+                    evalLoss:
+                      description: |-
+                        EvalLoss from Training Hub's inline eval, string-encoded
+                        (CRDs discourage raw floats). Empty when the run is
+                        still in flight.
+                      type: string
+                    experimenter:
+                      description: |-
+                        Experimenter is the agent name that proposed this
+                        experiment (helpful when council-mode is enabled later).
+                      type: string
+                    kept:
+                      description: |-
+                        Kept is the keep/revert decision (true = adopted as new
+                        baseline; false = reverted).
+                      type: boolean
+                    metricValue:
+                      description: |-
+                        MetricValue is the configured eval metric's value when
+                        it isn't eval_loss (e.g. mmlu accuracy). String-encoded.
+                        Same in-flight semantics.
+                      type: string
+                    proposalPath:
+                      description: |-
+                        ProposalPath is the wiki path where the agent's proposal
+                        (config + reasoning) was filed.
+                      type: string
+                    round:
+                      description: Round is the cycle number (1, 2, 3, ...).
+                      format: int32
+                      type: integer
+                    runId:
+                      description: RunID is the DSP pipeline run identifier.
+                      type: string
+                    startedAt:
+                      description: StartedAt + CompletedAt are operator-observed timestamps.
+                      format: date-time
+                      type: string
+                  required:
+                  - round
+                  - runId
+                  type: object
+                type: array
+              round:
+                description: Round is the current cycle number.
+                format: int32
+                type: integer
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -63,9 +63,13 @@ RUN pip install --no-cache-dir \
         'huggingface_hub' \
         'evaluate>=0.4'
 
-# The AutoResearch operator drops a small entrypoint script at
-# /opt/autoresearch/run.py in the kfp pipeline step's command;
-# we don't bake a CMD here so the kfp step controls invocation.
+# Trainer entrypoint baked in. The operator's Job spec invokes
+# `python /opt/autoresearch/run.py` and passes the agent's
+# QLoRA config via the AUTORESEARCH_CONFIG env var.
+RUN mkdir -p /opt/autoresearch
+COPY scripts/autoresearch-trainer/run.py /opt/autoresearch/run.py
+RUN chmod -R g=u /opt/autoresearch
+
 WORKDIR /workspace
 
 # OpenShift runs pods under a random non-root UID for security;

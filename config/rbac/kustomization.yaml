@@ -38,3 +38,6 @@ resources:
 - knowledgebase_editor_role.yaml
 - knowledgebase_viewer_role.yaml
 
+- autoresearchproject_admin_role.yaml
+- autoresearchproject_editor_role.yaml
+- autoresearchproject_viewer_role.yaml

@@ -57,7 +57,7 @@ metadata:
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
     repository: https://github.com/enterprisewebservice/agent-office-operator
     support: Red Hat Solution Architecture
-  name: agent-office-operator.v0.0.27
+  name: agent-office-operator.v0.0.28
   namespace: placeholder
 spec:
   apiservicedefinitions: {}
@@ -119,6 +119,21 @@ spec:
       displayName: Knowledge Base
       kind: KnowledgeBase
       name: knowledgebases.agentoffice.ai
+      version: v1alpha1
+    - description: |-
+        AutoResearchProject is a Karpathy-style autonomous ML
+        experimentation loop, packaged as a declarative resource. Each
+        cycle, an experimenter agent proposes a QLoRA fine-tuning
+        configuration; the operator submits a Kubernetes Job running the
+        AutoResearch trainer container against the configured base model
+        + dataset; eval_loss drives a keep/revert decision; findings land
+        in the referenced KnowledgeBase + the project's status. Hardware-
+        aware via per-GPU power caps (init container nvidia-smi -pl) and
+        pod-anti-affinity to keep one trainer per node — designed for
+        consumer-GPU clusters where breaker safety matters.
+      displayName: AutoResearch Project
+      kind: AutoResearchProject
+      name: autoresearchprojects.agentoffice.ai
       version: v1alpha1
   description: |
     The Agent Office Operator manages governed coding agents on OpenShift.
@@ -185,6 +200,7 @@ spec:
           - skills
           - skillbindings
           - knowledgebases
+          - autoresearchprojects
           verbs:
           - create
           - delete
@@ -202,6 +218,7 @@ spec:
           - skills/finalizers
           - skillbindings/finalizers
           - knowledgebases/finalizers
+          - autoresearchprojects/finalizers
           verbs:
           - update
         - apiGroups:
@@ -213,9 +230,36 @@ spec:
           - skills/status
           - skillbindings/status
           - knowledgebases/status
+          - autoresearchprojects/status
           verbs:
           - get
           - patch
+        - apiGroups:
+          - batch
+          resources:
+          - jobs
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        - apiGroups:
+          - ""
+          resources:
+          - pods
+          verbs:
+          - get
+          - list
+          - watch
+        - apiGroups:
+          - ""
+          resources:
+          - pods/log
+          verbs:
+          - get
           - update
         - apiGroups:
           - apps
@@ -289,7 +333,7 @@ spec:
                       fieldPath: metadata.annotations['olm.targetNamespaces']
                 - name: CLUSTER_APPS_DOMAIN
                   value: apps.salamander.aimlworkbench.com
-                image: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-operator:v0.0.27
+                image: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-operator:v0.0.28
                 imagePullPolicy: Always
                 livenessProbe:
                   httpGet:
@@ -392,5 +436,5 @@ spec:
   provider:
     name: Red Hat Solution Architecture
     url: https://github.com/enterprisewebservice
-  replaces: agent-office-operator.v0.0.26
-  version: 0.0.27
+  replaces: agent-office-operator.v0.0.27
+  version: 0.0.28

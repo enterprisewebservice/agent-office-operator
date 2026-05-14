@@ -11,10 +11,13 @@ You may obtain a copy of the License at
 package controller
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"sort"
+	"strings"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -24,6 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -62,6 +66,8 @@ type AutoResearchProjectReconciler struct {
 // +kubebuilder:rbac:groups=agentoffice.ai,resources=autoresearchprojects/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=agentoffice.ai,resources=autoresearchprojects/finalizers,verbs=update
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=pods/log,verbs=get
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 
 const (
 	autoResearchExperimentLabel = "agentoffice.ai/autoresearch-experiment"
@@ -335,8 +341,9 @@ func (r *AutoResearchProjectReconciler) submitTrainerJob(ctx context.Context, p 
 					// the 4090 node's circuit breaker.
 					InitContainers: powerCapInitContainers(powerCap),
 					Containers: []corev1.Container{{
-						Name:  "trainer",
-						Image: image,
+						Name:    "trainer",
+						Image:   image,
+						Command: []string{"python", "/opt/autoresearch/run.py"},
 						Env: []corev1.EnvVar{
 							{Name: "AUTORESEARCH_CONFIG", Value: string(cfgJSON)},
 							{Name: "AUTORESEARCH_PROJECT", Value: p.Name},
@@ -492,22 +499,86 @@ func (r *AutoResearchProjectReconciler) drainOpenJobs(ctx context.Context, p *ag
 }
 
 // parseTrainerResult reads the trainer Job's pod logs and
-// extracts the eval_loss from a line shaped:
+// extracts the result payload from a line shaped:
 //
-//	AUTORESEARCH_RESULT={"eval_loss": 1.234, ...}
+//	AUTORESEARCH_RESULT={"status":"ok","eval_loss":1.234, ...}
 //
-// v0.0.1 simplicity: log-line shape over artifact volume.
-// v0.0.2 swaps in artifact-bucket reads.
+// v0.0.1 design choice: log-line shape over artifact volume.
+// Simpler than mounting a PVC or talking to MinIO; works
+// without DSP set up. v0.0.2 will instead read metrics.json
+// from a MinIO artifact via DSP.
+//
+// We scan from the END of the logs because the result line is
+// emitted at the end of the trainer's run — most efficient and
+// avoids re-parsing thousands of intermediate progress lines.
 func (r *AutoResearchProjectReconciler) parseTrainerResult(ctx context.Context, job *batchv1.Job) (float64, error) {
-	// Implementation deferred to a follow-on commit alongside
-	// the trainer entrypoint script that emits the result line.
-	// For v0.0.1 reconciler-only ship, we return a deterministic
-	// placeholder so the loop has visible-but-fake numbers
-	// to drive its keep/revert logic. This gets replaced the
-	// moment the trainer script lands (separate commit).
-	_ = ctx
-	_ = job
-	return 1.0, fmt.Errorf("parseTrainerResult unimplemented in v0.0.1 reconciler-only ship")
+	if r.RestConfig == nil {
+		return 0, fmt.Errorf("RestConfig nil; cannot read pod logs")
+	}
+	cs, err := kubernetes.NewForConfig(r.RestConfig)
+	if err != nil {
+		return 0, fmt.Errorf("kubernetes client: %w", err)
+	}
+
+	// Find the trainer Pod for this Job.
+	pods, err := cs.CoreV1().Pods(job.Namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("%s=%s", autoResearchExperimentLabel, job.Name),
+	})
+	if err != nil {
+		return 0, fmt.Errorf("list job pods: %w", err)
+	}
+	if len(pods.Items) == 0 {
+		return 0, fmt.Errorf("no pods found for job %s", job.Name)
+	}
+	// Prefer the most recent (or only) pod.
+	pod := pods.Items[0]
+	for _, p := range pods.Items {
+		if p.CreationTimestamp.After(pod.CreationTimestamp.Time) {
+			pod = p
+		}
+	}
+
+	logReq := cs.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{
+		Container: "trainer",
+	})
+	stream, err := logReq.Stream(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("open pod log stream: %w", err)
+	}
+	defer stream.Close()
+
+	// Read everything, scan for the last AUTORESEARCH_RESULT=
+	// line. We deliberately don't tail — the trainer pod is
+	// finished by the time we read, so the whole log is finite.
+	var lastResult string
+	scanner := bufio.NewScanner(stream)
+	scanner.Buffer(make([]byte, 1024*1024), 8*1024*1024) // headroom for big lines
+	for scanner.Scan() {
+		line := scanner.Text()
+		if idx := strings.Index(line, "AUTORESEARCH_RESULT="); idx != -1 {
+			lastResult = line[idx+len("AUTORESEARCH_RESULT="):]
+		}
+	}
+	if err := scanner.Err(); err != nil && err != io.EOF {
+		return 0, fmt.Errorf("scan logs: %w", err)
+	}
+	if lastResult == "" {
+		return 0, fmt.Errorf("no AUTORESEARCH_RESULT= line in trainer logs")
+	}
+
+	var payload struct {
+		Status   string  `json:"status"`
+		EvalLoss float64 `json:"eval_loss"`
+		Error    string  `json:"error,omitempty"`
+		Stage    string  `json:"stage,omitempty"`
+	}
+	if err := json.Unmarshal([]byte(lastResult), &payload); err != nil {
+		return 0, fmt.Errorf("decode result JSON: %w (line=%q)", err, lastResult)
+	}
+	if payload.Status != "ok" {
+		return 0, fmt.Errorf("trainer reported error (stage=%s): %s", payload.Stage, payload.Error)
+	}
+	return payload.EvalLoss, nil
 }
 
 // isImprovement reads the project's eval policy and decides
