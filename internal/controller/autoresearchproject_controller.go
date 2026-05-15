@@ -163,15 +163,28 @@ func (r *AutoResearchProjectReconciler) Reconcile(ctx context.Context, req ctrl.
 		proposalSource = "starter (fallback)"
 	}
 
-	// 7. Submit the experiment as a Kubernetes Job.
-	runID := fmt.Sprintf("%s-round-%d-%d", project.Name, round, time.Now().Unix())
+	// 7. Submit the experiment as a Kubernetes Job. RunID is
+	//    deterministic on (project, round) — no timestamp
+	//    suffix. Two reasons:
+	//    a) Two reconciles racing through the cadence gate (one
+	//       set LastCycleTime, the other read stale data) would
+	//       both submit if names were unique-per-reconcile. With
+	//       a deterministic name, the second call's
+	//       CreateOrUpdate finds the existing Job and no-ops.
+	//    b) Operator restarts mid-cycle find the same Job by
+	//       name and resume polling, instead of spawning a
+	//       duplicate.
+	runID := fmt.Sprintf("%s-round-%d", project.Name, round)
 	if err := r.submitTrainerJob(ctx, &project, runID, int(round), proposal); err != nil {
 		_, _ = r.markPhaseAndSave(ctx, &project, "Running",
 			fmt.Sprintf("submit job failed: %v", err))
 		return ctrl.Result{RequeueAfter: 1 * time.Minute}, err
 	}
 
-	// 8. Status bookkeeping.
+	// 8. Status bookkeeping. We set LastCycleTime + Round +
+	//    OpenRuns in one Status().Update so a racing
+	//    reconciler that reads our cluster state sees a
+	//    coherent "cycle is in flight" snapshot.
 	if project.Status.OpenRuns == nil {
 		project.Status.OpenRuns = map[string]string{}
 	}
