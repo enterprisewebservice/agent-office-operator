@@ -1,0 +1,180 @@
+# PIPELINE DEFINITION
+# Name: autoresearch-qlora-train-eval
+# Description: One QLoRA fine-tune + eval cycle for an AutoResearchProject. Operator submits one Run per experiment cycle; eval_loss feeds the keep/revert decision.
+# Inputs:
+#    autoresearch_project: str [Default: '']
+#    autoresearch_round: int [Default: 0.0]
+#    autoresearch_run_id: str [Default: '']
+#    base_model: str [Default: 'ibm-granite/granite-3.1-8b-instruct']
+#    base_model_revision: str [Default: 'main']
+#    eval_direction: str [Default: 'minimize']
+#    eval_metric: str [Default: 'eval_loss']
+#    qlora_config_json: str [Default: '{}']
+#    training_data: str [Default: 'tatsu-lab/alpaca']
+#    training_sample_count: int [Default: 2000.0]
+#    training_split: str [Default: 'train']
+components:
+  comp-train-qlora:
+    executorLabel: exec-train-qlora
+    inputDefinitions:
+      parameters:
+        autoresearch_project:
+          parameterType: STRING
+        autoresearch_round:
+          parameterType: NUMBER_INTEGER
+        autoresearch_run_id:
+          parameterType: STRING
+        base_model:
+          parameterType: STRING
+        base_model_revision:
+          parameterType: STRING
+        eval_direction:
+          parameterType: STRING
+        eval_metric:
+          parameterType: STRING
+        qlora_config_json:
+          parameterType: STRING
+        training_data:
+          parameterType: STRING
+        training_sample_count:
+          parameterType: NUMBER_INTEGER
+        training_split:
+          parameterType: STRING
+    outputDefinitions:
+      artifacts:
+        metrics:
+          artifactType:
+            schemaTitle: system.Metrics
+            schemaVersion: 0.0.1
+deploymentSpec:
+  executors:
+    exec-train-qlora:
+      container:
+        args:
+        - --base-model
+        - '{{$.inputs.parameters[''base_model'']}}'
+        - --base-model-revision
+        - '{{$.inputs.parameters[''base_model_revision'']}}'
+        - --training-data
+        - '{{$.inputs.parameters[''training_data'']}}'
+        - --training-split
+        - '{{$.inputs.parameters[''training_split'']}}'
+        - --training-sample-count
+        - '{{$.inputs.parameters[''training_sample_count'']}}'
+        - --qlora-config-json
+        - '{{$.inputs.parameters[''qlora_config_json'']}}'
+        - --eval-metric
+        - '{{$.inputs.parameters[''eval_metric'']}}'
+        - --eval-direction
+        - '{{$.inputs.parameters[''eval_direction'']}}'
+        - --autoresearch-project
+        - '{{$.inputs.parameters[''autoresearch_project'']}}'
+        - --autoresearch-round
+        - '{{$.inputs.parameters[''autoresearch_round'']}}'
+        - --autoresearch-run-id
+        - '{{$.inputs.parameters[''autoresearch_run_id'']}}'
+        - --metrics-output-path
+        - '{{$.outputs.artifacts[''metrics''].path}}'
+        command:
+        - python
+        - /opt/autoresearch/run.py
+        image: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/autoresearch-trainer:v0.0.2
+        resources:
+          accelerator:
+            count: '1'
+            resourceCount: '1'
+            resourceType: nvidia.com/gpu
+            type: nvidia.com/gpu
+          cpuLimit: 8.0
+          cpuRequest: 2.0
+          memoryLimit: 68.719476736
+          memoryRequest: 17.179869184
+          resourceCpuLimit: '8'
+          resourceCpuRequest: '2'
+          resourceMemoryLimit: 64Gi
+          resourceMemoryRequest: 16Gi
+pipelineInfo:
+  description: One QLoRA fine-tune + eval cycle for an AutoResearchProject. Operator
+    submits one Run per experiment cycle; eval_loss feeds the keep/revert decision.
+  name: autoresearch-qlora-train-eval
+root:
+  dag:
+    tasks:
+      train-qlora:
+        cachingOptions: {}
+        componentRef:
+          name: comp-train-qlora
+        inputs:
+          parameters:
+            autoresearch_project:
+              componentInputParameter: autoresearch_project
+            autoresearch_round:
+              componentInputParameter: autoresearch_round
+            autoresearch_run_id:
+              componentInputParameter: autoresearch_run_id
+            base_model:
+              componentInputParameter: base_model
+            base_model_revision:
+              componentInputParameter: base_model_revision
+            eval_direction:
+              componentInputParameter: eval_direction
+            eval_metric:
+              componentInputParameter: eval_metric
+            qlora_config_json:
+              componentInputParameter: qlora_config_json
+            training_data:
+              componentInputParameter: training_data
+            training_sample_count:
+              componentInputParameter: training_sample_count
+            training_split:
+              componentInputParameter: training_split
+        taskInfo:
+          name: train-qlora
+  inputDefinitions:
+    parameters:
+      autoresearch_project:
+        defaultValue: ''
+        isOptional: true
+        parameterType: STRING
+      autoresearch_round:
+        defaultValue: 0.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      autoresearch_run_id:
+        defaultValue: ''
+        isOptional: true
+        parameterType: STRING
+      base_model:
+        defaultValue: ibm-granite/granite-3.1-8b-instruct
+        isOptional: true
+        parameterType: STRING
+      base_model_revision:
+        defaultValue: main
+        isOptional: true
+        parameterType: STRING
+      eval_direction:
+        defaultValue: minimize
+        isOptional: true
+        parameterType: STRING
+      eval_metric:
+        defaultValue: eval_loss
+        isOptional: true
+        parameterType: STRING
+      qlora_config_json:
+        defaultValue: '{}'
+        isOptional: true
+        parameterType: STRING
+      training_data:
+        defaultValue: tatsu-lab/alpaca
+        isOptional: true
+        parameterType: STRING
+      training_sample_count:
+        defaultValue: 2000.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      training_split:
+        defaultValue: train
+        isOptional: true
+        parameterType: STRING
+schemaVersion: 2.1.0
+sdkVersion: kfp-2.16.1

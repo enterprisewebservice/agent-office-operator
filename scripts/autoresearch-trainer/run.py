@@ -31,14 +31,62 @@ Env vars read:
   HF_TOKEN                     — optional, for gated models
 """
 
+import argparse
 import json
 import os
+import pathlib
 import sys
 import time
 import traceback
 
 # Result delimiters the operator's parseTrainerResult() reads.
 RESULT_PREFIX = "AUTORESEARCH_RESULT="
+
+
+def _parse_args() -> argparse.Namespace:
+    """Accept both CLI args (kfp container component pattern) and
+    env vars (raw Job pattern). CLI args win when both are set.
+    Keeps the script compatible with v0.0.1's raw-Job invocation
+    while supporting v0.0.2's kfp pipeline invocation."""
+    p = argparse.ArgumentParser()
+    p.add_argument("--base-model", default=os.environ.get("BASE_MODEL"))
+    p.add_argument("--base-model-revision", default=os.environ.get("BASE_MODEL_REVISION", "main"))
+    p.add_argument("--training-data", default=os.environ.get("TRAINING_DATA"))
+    p.add_argument("--training-split", default=os.environ.get("TRAINING_SPLIT", "train"))
+    p.add_argument("--training-sample-count", type=int, default=int(os.environ.get("TRAINING_SAMPLE_COUNT", "2000")))
+    p.add_argument("--qlora-config-json", default=os.environ.get("AUTORESEARCH_CONFIG", "{}"))
+    p.add_argument("--eval-metric", default=os.environ.get("EVAL_METRIC", "eval_loss"))
+    p.add_argument("--eval-direction", default=os.environ.get("EVAL_DIRECTION", "minimize"))
+    p.add_argument("--autoresearch-project", default=os.environ.get("AUTORESEARCH_PROJECT", ""))
+    p.add_argument("--autoresearch-round", default=os.environ.get("AUTORESEARCH_ROUND", "0"))
+    p.add_argument("--autoresearch-run-id", default=os.environ.get("AUTORESEARCH_RUN_ID", ""))
+    # kfp v2 passes the metrics output path on the command line.
+    # When set we emit the metrics file kfp expects so values
+    # show up in OpenShift AI's Experiments UI as sortable columns.
+    p.add_argument("--metrics-output-path", default=os.environ.get("METRICS_OUTPUT_PATH"))
+    return p.parse_args()
+
+
+def _emit_kfp_metrics(path: str, metrics: dict) -> None:
+    """Write a kfp v2 Metrics artifact at the given path. kfp's
+    SDK expects the path to be a JSON file matching the
+    system.Metrics schema. If the path is None (e.g. raw-Job
+    run, no kfp context) this is a no-op."""
+    if not path:
+        return
+    try:
+        # kfp v2 metrics file: { "metrics": [ { "name": ..., "numberValue": ... }, ... ] }
+        # The runtime writes to the path as a file directly.
+        out = {"metrics": [{"name": k, "numberValue": float(v)} for k, v in metrics.items()]}
+        p = pathlib.Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(out))
+        print(f"[autoresearch] wrote kfp metrics to {path}: {out}", flush=True)
+    except Exception as e:
+        # Non-fatal: stdout AUTORESEARCH_RESULT line is the
+        # authoritative signal for the operator; kfp metrics are
+        # for the Experiments UI bonus.
+        print(f"[autoresearch] WARN failed to write kfp metrics: {e}", flush=True)
 
 
 def emit_result(payload: dict) -> None:
@@ -54,32 +102,30 @@ def emit_progress(msg: str) -> None:
 
 def main() -> int:
     started = time.time()
-    project = os.environ.get("AUTORESEARCH_PROJECT", "(unknown)")
-    run_id = os.environ.get("AUTORESEARCH_RUN_ID", "(unknown)")
-    round_num = os.environ.get("AUTORESEARCH_ROUND", "0")
+    args = _parse_args()
+    project = args.autoresearch_project or "(unknown)"
+    run_id = args.autoresearch_run_id or "(unknown)"
+    round_num = args.autoresearch_round
 
     emit_progress(f"start project={project} round={round_num} run_id={run_id}")
 
     try:
-        cfg = json.loads(os.environ["AUTORESEARCH_CONFIG"])
-    except KeyError:
-        emit_result({"status": "error", "error": "AUTORESEARCH_CONFIG not set"})
-        return 1
+        cfg = json.loads(args.qlora_config_json)
     except json.JSONDecodeError as e:
-        emit_result({"status": "error", "error": f"AUTORESEARCH_CONFIG not valid JSON: {e}"})
+        emit_result({"status": "error", "error": f"qlora-config-json not valid JSON: {e}"})
         return 1
 
-    base_model = os.environ.get("BASE_MODEL")
+    base_model = args.base_model
     if not base_model:
-        emit_result({"status": "error", "error": "BASE_MODEL not set"})
+        emit_result({"status": "error", "error": "--base-model (or BASE_MODEL env) not set"})
         return 1
-    base_revision = os.environ.get("BASE_MODEL_REVISION", "main")
-    training_data = os.environ.get("TRAINING_DATA")
+    base_revision = args.base_model_revision
+    training_data = args.training_data
     if not training_data:
-        emit_result({"status": "error", "error": "TRAINING_DATA not set"})
+        emit_result({"status": "error", "error": "--training-data (or TRAINING_DATA env) not set"})
         return 1
-    training_split = os.environ.get("TRAINING_SPLIT", "train")
-    sample_count = int(os.environ.get("TRAINING_SAMPLE_COUNT", "2000"))
+    training_split = args.training_split
+    sample_count = args.training_sample_count
 
     emit_progress(f"config: {json.dumps(cfg)}")
     emit_progress(f"base_model={base_model}@{base_revision}")
@@ -198,6 +244,21 @@ def main() -> int:
         return 1
 
     elapsed = time.time() - started
+
+    # Emit kfp metrics so the value shows in OpenShift AI's
+    # Experiments UI columns. Multi-dimensional metrics help the
+    # UI's sort + filter — we expose the QLoRA config dimensions
+    # alongside the eval_loss so users can correlate "rank 16
+    # variants tended to win" without reading every JSON.
+    _emit_kfp_metrics(args.metrics_output_path, {
+        "eval_loss": eval_loss,
+        "elapsed_seconds": elapsed,
+        "lora_rank": cfg.get("lora_rank", 0),
+        "lora_alpha": cfg.get("lora_alpha", 0),
+        "learning_rate": cfg.get("learning_rate", 0),
+        "training_steps": cfg.get("num_training_steps", 0),
+    })
+
     emit_result({
         "status": "ok",
         "project": project,
