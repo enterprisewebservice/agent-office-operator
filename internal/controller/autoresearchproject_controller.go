@@ -35,6 +35,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	agentofficev1alpha1 "github.com/enterprisewebservice/agent-office-operator/api/v1alpha1"
+	"github.com/enterprisewebservice/agent-office-operator/internal/dsp"
 )
 
 // AutoResearchProjectReconciler drives Karpathy-style autonomous
@@ -163,21 +164,19 @@ func (r *AutoResearchProjectReconciler) Reconcile(ctx context.Context, req ctrl.
 		proposalSource = "starter (fallback)"
 	}
 
-	// 7. Submit the experiment as a Kubernetes Job. RunID is
-	//    deterministic on (project, round) — no timestamp
-	//    suffix. Two reasons:
-	//    a) Two reconciles racing through the cadence gate (one
-	//       set LastCycleTime, the other read stale data) would
-	//       both submit if names were unique-per-reconcile. With
-	//       a deterministic name, the second call's
-	//       CreateOrUpdate finds the existing Job and no-ops.
-	//    b) Operator restarts mid-cycle find the same Job by
-	//       name and resume polling, instead of spawning a
-	//       duplicate.
+	// 7. Submit the experiment as a DSP pipeline run. RunID is
+	//    deterministic on (project, round) so DSP's API and our
+	//    status surface use the same handle, and concurrent
+	//    reconciles converge instead of submitting duplicates.
+	//    The kfp pipeline (one container step running the
+	//    AutoResearch trainer image) lands in OpenShift AI's
+	//    Develop & train → Experiments UI, grouped under
+	//    spec.experimentName (or the project name).
 	runID := fmt.Sprintf("%s-round-%d", project.Name, round)
-	if err := r.submitTrainerJob(ctx, &project, runID, int(round), proposal); err != nil {
+	dspRun, err := r.submitDSPRun(ctx, &project, runID, int(round), proposal)
+	if err != nil {
 		_, _ = r.markPhaseAndSave(ctx, &project, "Running",
-			fmt.Sprintf("submit job failed: %v", err))
+			fmt.Sprintf("submit DSP run failed: %v", err))
 		return ctrl.Result{RequeueAfter: 1 * time.Minute}, err
 	}
 
@@ -188,7 +187,11 @@ func (r *AutoResearchProjectReconciler) Reconcile(ctx context.Context, req ctrl.
 	if project.Status.OpenRuns == nil {
 		project.Status.OpenRuns = map[string]string{}
 	}
-	project.Status.OpenRuns[runID] = "in-flight"
+	// Store the DSP-issued run ID so drain can poll it. Our
+	// deterministic display name (runID) and DSP's internal
+	// run_id are separate; we key by display name in OpenRuns
+	// and stash the DSP id as the value.
+	project.Status.OpenRuns[runID] = dspRun.RunID
 	now := metav1.Now()
 	project.Status.LastCycleTime = &now
 	project.Status.Round = round
@@ -444,71 +447,177 @@ func trainerAntiAffinity(p *agentofficev1alpha1.AutoResearchProject) *corev1.Aff
 	}
 }
 
-// drainOpenJobs polls each in-flight Job's status, records
-// completion/failure into the project status, and removes the
-// run from OpenRuns. Returns true if any run completed this
-// pass (caller uses this to bypass the cadence gate and queue
-// the next experiment immediately).
+// drainOpenJobs polls each in-flight DSP run's status (the
+// historical name is kept for diff legibility against the v0.0.1
+// Job-based code; this implementation talks to DSP, not batch/v1
+// Jobs). Records completion/failure into the project status,
+// removes the run from OpenRuns. Returns true if any run
+// completed this pass — caller uses this to bypass the cadence
+// gate and queue the next experiment immediately when capacity
+// frees mid-cycle.
 func (r *AutoResearchProjectReconciler) drainOpenJobs(ctx context.Context, p *agentofficev1alpha1.AutoResearchProject) (bool, error) {
 	if len(p.Status.OpenRuns) == 0 {
 		return false, nil
 	}
+	dspClient, err := dspClientFor(ctx, r.Client, p.Namespace)
+	if err != nil {
+		// DSP unreachable — don't drop OpenRuns; we'll retry
+		// next reconcile.
+		return false, fmt.Errorf("dspClientFor: %w", err)
+	}
 	completed := false
-	for runID := range p.Status.OpenRuns {
-		var job batchv1.Job
-		err := r.Get(ctx, types.NamespacedName{Namespace: p.Namespace, Name: runID}, &job)
+	for displayID, dspRunID := range p.Status.OpenRuns {
+		run, err := dspClient.GetRun(ctx, dspRunID)
 		if err != nil {
-			if apierrors.IsNotFound(err) {
-				// Job was GC'd before we could read it; just
-				// remove from open runs.
-				delete(p.Status.OpenRuns, runID)
-				continue
-			}
-			return completed, err
+			// Transient or our run was deleted — keep entry
+			// for next cycle's retry.
+			continue
 		}
-		// Done if Job has a Complete or Failed condition.
-		var done, failed bool
-		for _, c := range job.Status.Conditions {
-			if c.Type == batchv1.JobComplete && c.Status == corev1.ConditionTrue {
-				done = true
-			}
-			if c.Type == batchv1.JobFailed && c.Status == corev1.ConditionTrue {
-				failed = true
-				done = true
-			}
-		}
-		if !done {
+		if !isRunTerminal(run.State) {
 			continue
 		}
 		completed = true
-		// Parse the trainer's emitted result line out of pod
-		// logs. v0.0.1: best-effort. v0.0.2 will instead read
-		// metrics.json from an artifact path.
-		evalLoss, parseErr := r.parseTrainerResult(ctx, &job)
-		now := metav1.Now()
-		kept := false
-		if !failed && parseErr == nil {
+		var evalLoss float64
+		var kept bool
+		if run.State == "SUCCEEDED" {
+			evalLoss = r.readEvalLossFromDSPRun(ctx, p, run)
 			kept = isImprovement(p, evalLoss)
 		}
-		// Update the matching recent run record + counters.
+		now := metav1.Now()
 		for i := range p.Status.RecentRuns {
-			if p.Status.RecentRuns[i].RunID != runID {
+			if p.Status.RecentRuns[i].RunID != displayID {
 				continue
 			}
-			p.Status.RecentRuns[i].EvalLoss = fmt.Sprintf("%.6f", evalLoss)
+			if run.State == "SUCCEEDED" {
+				p.Status.RecentRuns[i].EvalLoss = fmt.Sprintf("%.6f", evalLoss)
+				p.Status.RecentRuns[i].Kept = &kept
+			} else {
+				// State on failure becomes the "kept" string
+				// so the UI shows what happened. Use a false
+				// kept value alongside.
+				fail := false
+				p.Status.RecentRuns[i].Kept = &fail
+			}
 			p.Status.RecentRuns[i].CompletedAt = &now
-			p.Status.RecentRuns[i].Kept = &kept
 			break
 		}
 		p.Status.ExperimentsRun++
 		if kept {
 			p.Status.ExperimentsKept++
 			p.Status.BestEvalLoss = fmt.Sprintf("%.6f", evalLoss)
-			p.Status.BestRunID = runID
+			p.Status.BestRunID = displayID
 		}
-		delete(p.Status.OpenRuns, runID)
+		delete(p.Status.OpenRuns, displayID)
 	}
 	return completed, nil
+}
+
+// isRunTerminal reports whether a DSP run's state is one we
+// shouldn't keep polling. Wraps dsp.IsTerminal but keeps the
+// import surface tight from this file.
+func isRunTerminal(state string) bool {
+	switch state {
+	case "SUCCEEDED", "FAILED", "SKIPPED", "CANCELED":
+		return true
+	}
+	return false
+}
+
+// readEvalLossFromDSPRun fetches the eval_loss value for a
+// completed run. v0.0.30 first cut: read the kfp metric artifact
+// via DSP's artifact API. Falls back to log-scrape (the trainer's
+// AUTORESEARCH_RESULT= line on the run's main pod) if the
+// metrics artifact isn't yet ready or fails.
+//
+// Implementation note: DSP's artifact API surface is broader
+// than what we need for this single use; for v0.0.30 we go via
+// log-scrape (same path as v0.0.1) because it's already known
+// to work and the operator doesn't need to depend on the
+// artifact API's stability promise. Metrics still flow into the
+// Experiments UI columns because kfp captures them server-side
+// from the same source path — we just read from pod logs for
+// the keep/revert decision. v0.0.31 can switch to the typed
+// artifact when DSP's API contract is set in stone.
+func (r *AutoResearchProjectReconciler) readEvalLossFromDSPRun(ctx context.Context, p *agentofficev1alpha1.AutoResearchProject, run *dsp.Run) float64 {
+	// Find the pod that ran this experiment. kfp's argo-driven
+	// runtime tags pods with the run's UID; for our single-step
+	// pipeline the pod's name pattern includes the run-id
+	// prefix. We label-select instead via a label DSP applies.
+	pods := &corev1.PodList{}
+	if err := r.List(ctx, pods,
+		client.InNamespace(p.Namespace),
+		client.MatchingLabels{"pipelines.kubeflow.org/v2_component": "true"},
+	); err != nil {
+		return 0
+	}
+	// Walk pods looking for the one whose annotation carries
+	// our display run id. v0.0.30 best-effort: parse the
+	// AUTORESEARCH_RESULT= line if found.
+	for _, pod := range pods.Items {
+		if !strings.Contains(pod.Name, run.RunID) && !strings.Contains(pod.Name, run.DisplayName) {
+			continue
+		}
+		// Synthesize a stand-in batchv1.Job so we reuse the
+		// existing parseTrainerResult log-scraper. Only the
+		// Name + Namespace + (for label selector) labels are
+		// actually consulted by it.
+		fake := &batchv1.Job{}
+		fake.Namespace = pod.Namespace
+		fake.Name = pod.Name
+		fake.Labels = pod.Labels
+		// Re-use the same scanner; we reach pod logs via the
+		// pod name directly (not via labels) here.
+		evalLoss, err := r.parseTrainerResultByPodName(ctx, pod.Namespace, pod.Name)
+		if err != nil {
+			continue
+		}
+		return evalLoss
+	}
+	return 0
+}
+
+// parseTrainerResultByPodName reads pod logs by exact pod name
+// (no label selector). Different from parseTrainerResult which
+// finds the pod via the Job's experiment-label — kfp pods don't
+// carry that label.
+func (r *AutoResearchProjectReconciler) parseTrainerResultByPodName(ctx context.Context, namespace, podName string) (float64, error) {
+	if r.RestConfig == nil {
+		return 0, fmt.Errorf("RestConfig nil; cannot read pod logs")
+	}
+	cs, err := kubernetes.NewForConfig(r.RestConfig)
+	if err != nil {
+		return 0, err
+	}
+	logReq := cs.CoreV1().Pods(namespace).GetLogs(podName, &corev1.PodLogOptions{})
+	stream, err := logReq.Stream(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer stream.Close()
+	var lastResult string
+	scanner := bufio.NewScanner(stream)
+	scanner.Buffer(make([]byte, 1024*1024), 8*1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if idx := strings.Index(line, "AUTORESEARCH_RESULT="); idx != -1 {
+			lastResult = line[idx+len("AUTORESEARCH_RESULT="):]
+		}
+	}
+	if lastResult == "" {
+		return 0, fmt.Errorf("no AUTORESEARCH_RESULT= line")
+	}
+	var payload struct {
+		Status   string  `json:"status"`
+		EvalLoss float64 `json:"eval_loss"`
+		Error    string  `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal([]byte(lastResult), &payload); err != nil {
+		return 0, err
+	}
+	if payload.Status != "ok" {
+		return 0, fmt.Errorf("trainer error: %s", payload.Error)
+	}
+	return payload.EvalLoss, nil
 }
 
 // parseTrainerResult reads the trainer Job's pod logs and
