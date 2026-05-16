@@ -82,17 +82,17 @@ spec:
     - pipelineTaskName: build-container
       stepSpecs:
         - name: build
-          # Pip install of pytorch+deps is CPU-bursty but not steady.
-          # CPU REQUEST dropped 2 → 500m after gsm5t got stuck Pending
-          # for 20 min — Tekton's Affinity Assistant pinned the build
-          # to a node where 88% of CPU was already reserved by other
-          # workloads (only 1.7 CPU free vs our 2-CPU request).
-          # The 16-CPU LIMIT stays so pip install still bursts.
-          # Memory limit 24 GiB stays — big multi-layer commits
-          # benefit from headroom (12 GiB was tight, see history).
+          # Bigger image (PyTorch + CUDA layers are ~4 GB), pip install
+          # of training-hub + deps is CPU-bound. Same 16-core ceiling
+          # the operator build uses; trainer build typically finishes
+          # in 6-8 minutes cold. Memory bumped 12 → 24 GiB earlier as
+          # a guess at the COMMIT-step failures — turned out the real
+          # cause was the broken node above (see taskRunTemplate
+          # affinity). Leaving the bump in place: doesn't hurt and
+          # large multi-layer commits do benefit from headroom.
           computeResources:
             requests:
-              cpu: "500m"
+              cpu: "2"
               memory: 4Gi
             limits:
               cpu: "16"
