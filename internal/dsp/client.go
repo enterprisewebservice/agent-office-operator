@@ -221,10 +221,7 @@ func (c *Client) FindOrCreatePipeline(ctx context.Context, displayName, descript
 	// current content hash is already uploaded.
 	versions, err := c.ListPipelineVersions(ctx, existing.PipelineID)
 	if err != nil {
-		// If listing fails, fall through and try the upload
-		// anyway — POSTing the same version name is a 409 we
-		// can swallow, vs blocking on a transient list error.
-		return existing, nil
+		return nil, fmt.Errorf("list pipeline versions: %w", err)
 	}
 	for _, v := range versions {
 		if v.DisplayName == versionName || v.Name == versionName {
@@ -234,12 +231,13 @@ func (c *Client) FindOrCreatePipeline(ctx context.Context, displayName, descript
 
 	// Content drift detected — upload a new version. Use the
 	// hash as the version name so duplicate uploads are no-ops.
+	// Surface upload errors: silently-swallowed failures here
+	// were why operator v0.0.36's drift fix appeared to no-op
+	// on first try — the upload URL was wrong, but the error
+	// was swallowed so runs kept using the cached old version.
 	if _, err := c.UploadPipelineVersion(ctx, existing.PipelineID,
 		versionName, "operator content-hash refresh", irYAML); err != nil {
-		// Best effort: returning the existing pipeline keeps
-		// the loop alive even if the version upload races with
-		// another operator instance.
-		return existing, nil
+		return nil, fmt.Errorf("upload pipeline version %s: %w", versionName, err)
 	}
 	return existing, nil
 }
@@ -271,7 +269,16 @@ func (c *Client) ListPipelineVersions(ctx context.Context, pipelineID string) ([
 
 // UploadPipelineVersion uploads a new version of an existing
 // pipeline. Multipart upload, same shape as UploadPipeline but
-// hits the per-pipeline versions endpoint.
+// hits the kfp v2 upload_version endpoint with pipelineid as a
+// query parameter.
+//
+// Note on the URL: kfp v2 does NOT expose
+//   /apis/v2beta1/pipelines/{id}/versions/upload
+// (that returns 501 Method Not Allowed). The correct endpoint is
+//   /apis/v2beta1/pipelines/upload_version?pipelineid={id}&name=...
+// Verified empirically against RHOAI 3.3.1 DSP. We had this
+// wrong in the initial drift-detection commit (operator v0.0.36)
+// which is why the drift fix silently no-op'd on first try.
 func (c *Client) UploadPipelineVersion(ctx context.Context, pipelineID, versionName, description string, irYAML []byte) (*PipelineVersion, error) {
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
@@ -291,7 +298,7 @@ func (c *Client) UploadPipelineVersion(ctx context.Context, pipelineID, versionN
 		url.QueryEscape(description),
 		url.QueryEscape(pipelineID))
 	req, err := http.NewRequestWithContext(ctx, "POST",
-		c.BaseURL+"/apis/v2beta1/pipelines/"+pipelineID+"/versions/upload"+query, &buf)
+		c.BaseURL+"/apis/v2beta1/pipelines/upload_version"+query, &buf)
 	if err != nil {
 		return nil, err
 	}
