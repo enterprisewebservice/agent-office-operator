@@ -62,14 +62,18 @@ spec:
           # Bigger image (PyTorch + CUDA layers are ~4 GB), pip install
           # of training-hub + deps is CPU-bound. Same 16-core ceiling
           # the operator build uses; trainer build typically finishes
-          # in 6-8 minutes cold.
+          # in 6-8 minutes cold. Memory bumped from 12 → 24 GiB after
+          # v0.0.6 builds (brpgl, hpg4h) failed at STEP 12 LABEL commit
+          # with buildah "Digest did not match" — large-layer commits
+          # under memory pressure can drop pages, corrupting the
+          # layer-cache → commit-storage copy.
           computeResources:
             requests:
               cpu: "2"
               memory: 4Gi
             limits:
               cpu: "16"
-              memory: 12Gi
+              memory: 24Gi
   workspaces:
     - name: workspace
       volumeClaimTemplate:
@@ -78,10 +82,14 @@ spec:
             - ReadWriteOnce
           resources:
             requests:
-              # Larger than the operator's 1Gi workspace because the
-              # build pulls the PyTorch base image (~6 GB) plus pip's
-              # cache plus the assembled layers.
-              storage: 10Gi
+              # Bumped from 10 → 50 Gi after v0.0.6 builds repeatedly
+              # failed at the COMMIT step. The image is ~8 GB; buildah
+              # needs space for: decompressed base (~6 GB) + pip cache
+              # (~2 GB) + intermediate layer storage during commit
+              # (full image again, ~8 GB) + git checkout. With only
+              # 10 Gi, the COMMIT step was running on a near-full
+              # filesystem and randomly corrupting layer writes.
+              storage: 50Gi
     - name: git-auth
       secret:
         secretName: '{{ git_auth_secret }}'
