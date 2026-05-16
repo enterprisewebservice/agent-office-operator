@@ -6,6 +6,12 @@
 # content is inlined as olm.bundle.object properties — that's what
 # package-server needs to extract channel/displayName/etc. without
 # pulling the bundle image at list time.
+#
+# Retrigger marker 2026-05-16T23:10Z: catalog build 8w7fj for
+# v0.0.41 timed out at the 1h Tekton deadline while stuck Pending
+# on a CPU-saturated control-plane node. With stackrox scaled to 0
+# the cluster has CPU headroom now; this comment forces a fresh
+# PipelineRun that should schedule cleanly.
 
 schema: olm.package
 name: agent-office-operator
