@@ -46,7 +46,7 @@ RUN apt-get update -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Pinned tight because the bitsandbytes / transformers / CUDA matrix
-# is fragile on this base image. Verified empirically across v0.0.2-4:
+# is fragile on this base image. Verified empirically across v0.0.2-5:
 #
 #   - bitsandbytes==0.43.3 is the last CUDA-12 release. 0.44+ links
 #     libnvJitLink.so.13 which doesn't exist in cuda12.4-cudnn9-runtime
@@ -57,18 +57,23 @@ RUN apt-get update -y \
 #     and the new bnb backend API, which requires bnb >=0.44. With our
 #     bnb 0.43 pin we hit "Could not import module
 #     'validate_bnb_backend_availability'" at bnb_4bit model load.
-#     transformers==4.46.3 is the last 4.46 release and was the last
-#     to use the old (bnb 0.43-compatible) loader path. Pinning exact
-#     to avoid 4.47/4.48 surprises.
+#     transformers==4.46.3 is the last 4.46 release and the last
+#     to use the old (bnb 0.43-compatible) loader path.
 #
 #   - trl 0.12.x is the first to ship `processing_class=` (we use it)
 #     and stable `SFTConfig`. 0.13+ moves fields off TrainingArguments
 #     in ways that have broken our run.py.
 #
+#   - training-hub is intentionally dropped: it hard-floors
+#     transformers>=4.55 (even at v0.2.0), which transitively forces
+#     bnb 0.44+ and breaks the CUDA-12 matrix. We don't actually
+#     import anything from training-hub in run.py — we call
+#     transformers + peft + trl + bnb directly. Adding it back at
+#     CUDA-13 base time is fine; on CUDA-12 it's a poison pill.
+#
 # When we move to a CUDA-13 PyTorch base, lift the upper pins on bnb
-# and transformers in lockstep.
+# and transformers in lockstep and optionally re-add training-hub.
 RUN pip install --no-cache-dir \
-        'training-hub>=0.2' \
         'peft>=0.13,<1' \
         'bitsandbytes==0.43.3' \
         'accelerate>=1.0,<2' \

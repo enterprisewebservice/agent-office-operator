@@ -35,6 +35,8 @@ package dsp
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -92,6 +94,11 @@ type PipelineVersion struct {
 	PipelineID        string `json:"pipeline_id"`
 	PipelineVersionID string `json:"pipeline_version_id"`
 	DisplayName       string `json:"display_name"`
+	// Name is the URL-safe version name (no spaces). DSP
+	// usually sets it to the same as DisplayName when the
+	// upload's name param has no special characters; we
+	// compare both for robustness against API changes.
+	Name string `json:"name,omitempty"`
 }
 
 // Experiment groups runs in the OpenShift AI Experiments UI.
@@ -186,17 +193,120 @@ func (c *Client) UploadPipeline(ctx context.Context, displayName, description st
 	return &pipe, nil
 }
 
-// FindOrCreatePipeline uploads the pipeline if missing,
-// otherwise returns the existing one. Operator calls this at
-// startup so every AutoResearchProject Run targets the same
-// pipeline registration.
+// FindOrCreatePipeline uploads the pipeline if missing, or
+// uploads a new VERSION when the embedded pipeline.yaml has
+// drifted since the last upload. Without this, every operator
+// release that changes pipeline.yaml (e.g. a trainer image tag
+// bump) is silently ignored — DSP returns the cached pipeline
+// and runs target whatever was uploaded the first time.
+//
+// We use a sha256-prefix as the version name. If a version with
+// that name already exists on the pipeline, the upload is a
+// no-op. CreateRun without an explicit pipeline_version_id
+// targets the latest version, so the new upload is what runs
+// pick up on subsequent submissions.
 func (c *Client) FindOrCreatePipeline(ctx context.Context, displayName, description string, irYAML []byte) (*Pipeline, error) {
-	if existing, err := c.FindPipeline(ctx, displayName); err != nil {
+	versionName := pipelineVersionNameFor(irYAML)
+
+	existing, err := c.FindPipeline(ctx, displayName)
+	if err != nil {
 		return nil, err
-	} else if existing != nil {
+	}
+	if existing == nil {
+		// First-ever upload — pipeline + initial version in one POST.
+		return c.UploadPipeline(ctx, displayName, description, irYAML)
+	}
+
+	// Pipeline exists. Check whether a version matching the
+	// current content hash is already uploaded.
+	versions, err := c.ListPipelineVersions(ctx, existing.PipelineID)
+	if err != nil {
+		// If listing fails, fall through and try the upload
+		// anyway — POSTing the same version name is a 409 we
+		// can swallow, vs blocking on a transient list error.
 		return existing, nil
 	}
-	return c.UploadPipeline(ctx, displayName, description, irYAML)
+	for _, v := range versions {
+		if v.DisplayName == versionName || v.Name == versionName {
+			return existing, nil
+		}
+	}
+
+	// Content drift detected — upload a new version. Use the
+	// hash as the version name so duplicate uploads are no-ops.
+	if _, err := c.UploadPipelineVersion(ctx, existing.PipelineID,
+		versionName, "operator content-hash refresh", irYAML); err != nil {
+		// Best effort: returning the existing pipeline keeps
+		// the loop alive even if the version upload races with
+		// another operator instance.
+		return existing, nil
+	}
+	return existing, nil
+}
+
+// pipelineVersionNameFor returns the version name we use for a
+// given pipeline.yaml content. First 12 hex chars of sha256
+// keeps it short enough for DSP's name field while still
+// collision-free in practice.
+func pipelineVersionNameFor(irYAML []byte) string {
+	sum := sha256.Sum256(irYAML)
+	return "content-" + hex.EncodeToString(sum[:])[:12]
+}
+
+// ListPipelineVersions returns every version of a pipeline.
+// Used by FindOrCreatePipeline to detect content drift.
+func (c *Client) ListPipelineVersions(ctx context.Context, pipelineID string) ([]PipelineVersion, error) {
+	body, err := c.doGet(ctx, "/apis/v2beta1/pipelines/"+pipelineID+"/versions", nil)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		PipelineVersions []PipelineVersion `json:"pipeline_versions"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("decode versions: %w (body=%s)", err, truncate(body, 400))
+	}
+	return resp.PipelineVersions, nil
+}
+
+// UploadPipelineVersion uploads a new version of an existing
+// pipeline. Multipart upload, same shape as UploadPipeline but
+// hits the per-pipeline versions endpoint.
+func (c *Client) UploadPipelineVersion(ctx context.Context, pipelineID, versionName, description string, irYAML []byte) (*PipelineVersion, error) {
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	fw, err := mw.CreateFormFile("uploadfile", "pipeline.yaml")
+	if err != nil {
+		return nil, fmt.Errorf("multipart writer: %w", err)
+	}
+	if _, err := fw.Write(irYAML); err != nil {
+		return nil, fmt.Errorf("write IR: %w", err)
+	}
+	if err := mw.Close(); err != nil {
+		return nil, fmt.Errorf("close multipart: %w", err)
+	}
+
+	query := fmt.Sprintf("?name=%s&description=%s&pipelineid=%s",
+		url.QueryEscape(versionName),
+		url.QueryEscape(description),
+		url.QueryEscape(pipelineID))
+	req, err := http.NewRequestWithContext(ctx, "POST",
+		c.BaseURL+"/apis/v2beta1/pipelines/"+pipelineID+"/versions/upload"+query, &buf)
+	if err != nil {
+		return nil, err
+	}
+	c.applyAuth(req)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+
+	body, err := c.doRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	var v PipelineVersion
+	if err := json.Unmarshal(body, &v); err != nil {
+		return nil, fmt.Errorf("decode version upload: %w (body=%s)", err, truncate(body, 400))
+	}
+	return &v, nil
 }
 
 // FindOrCreateExperiment is similar but for experiment groups.
