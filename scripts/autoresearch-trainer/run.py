@@ -203,6 +203,48 @@ def main() -> int:
         ds = load_dataset(training_data, split=training_split)
         if sample_count and len(ds) > sample_count:
             ds = ds.shuffle(seed=42).select(range(sample_count))
+
+        # Normalize whatever column shape the dataset has into a single
+        # "text" column SFTTrainer can consume. Public instruction
+        # datasets disagree on column names; rather than make the user
+        # specify in the CR for every dataset, we autodetect common
+        # shapes here. Add more cases as we onboard more datasets.
+        cols = set(ds.column_names)
+        if "text" in cols:
+            # tatsu-lab/alpaca, openbmb/UltraFeedback (text variant)
+            emit_progress(f"dataset shape: 'text' column present, using as-is. columns={sorted(cols)}")
+        elif {"problem", "solution"}.issubset(cols):
+            # ise-uiuc/Magicoder-OSS-Instruct-75K and friends
+            lang_in_cols = "lang" in cols
+            def _fmt_problem_solution(ex):
+                lang = ex.get("lang", "") if lang_in_cols else ""
+                fence = f"```{lang}\n" if lang else "```\n"
+                return {"text": f"{ex['problem']}\n\n{fence}{ex['solution']}\n```"}
+            ds = ds.map(_fmt_problem_solution)
+            emit_progress(f"dataset shape: formatted from problem+solution into 'text'. columns={sorted(cols)}")
+        elif {"instruction", "output"}.issubset(cols):
+            # tatsu-lab/alpaca-cleaned, sahil2801/CodeAlpaca-20k, etc.
+            has_input = "input" in cols
+            def _fmt_inst_resp(ex):
+                inp = ex.get("input", "") if has_input else ""
+                instr = ex["instruction"]
+                prompt = (f"### Instruction:\n{instr}\n\n### Input:\n{inp}\n\n### Response:\n"
+                          if inp else
+                          f"### Instruction:\n{instr}\n\n### Response:\n")
+                return {"text": prompt + ex["output"]}
+            ds = ds.map(_fmt_inst_resp)
+            emit_progress(f"dataset shape: formatted from instruction+output into 'text'. columns={sorted(cols)}")
+        else:
+            # Unknown shape — fail loudly with the column list so the
+            # user can either pick a different dataset or extend this
+            # autodetector. Better than silent KeyError inside trl.
+            raise ValueError(
+                f"Dataset {training_data!r} has columns {sorted(cols)}; "
+                f"autoresearch trainer can autoformat 'text', "
+                f"'problem+solution', or 'instruction+output' shapes. "
+                f"Add a case in run.py for this dataset's shape."
+            )
+
         # ~10% held out for eval
         split = ds.train_test_split(test_size=0.1, seed=42)
         train_ds, eval_ds = split["train"], split["test"]
