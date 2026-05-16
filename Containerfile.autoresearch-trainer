@@ -45,26 +45,34 @@ RUN apt-get update -y \
         curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Pinned-but-not-frozen — we want minor patches but not surprise
-# major bumps. Versions chosen against PyTorch 2.5 + CUDA 12.4 on
-# UBI9 (the RHOAI base image's contract).
+# Pinned tight because the bitsandbytes / transformers / CUDA matrix
+# is fragile on this base image. Verified empirically across v0.0.2-4:
 #
-# bitsandbytes is pinned to <0.44 because 0.44+ links against
-# libnvJitLink.so.13 (CUDA 13). The PyTorch base above ships CUDA 12.4,
-# so 0.44 fails to load with "libnvJitLink.so.13: cannot open shared
-# object file". 0.43.x is the last CUDA-12 release line. Bump together
-# with the base image when we move to CUDA 13 PyTorch.
+#   - bitsandbytes==0.43.3 is the last CUDA-12 release. 0.44+ links
+#     libnvJitLink.so.13 which doesn't exist in cuda12.4-cudnn9-runtime
+#     (we hit "libnvJitLink.so.13: cannot open shared object file" on
+#     model load).
 #
-# trl is pinned tight to 0.12.x: 0.12 introduced `processing_class=`
-# (we use it), and SFTConfig is stable. 0.13+ shifts more fields off
-# TrainingArguments into SFTConfig in ways that have broken in the
-# past; pinning keeps the trainer reproducible across image builds.
+#   - transformers 4.48+ introduced `validate_bnb_backend_availability`
+#     and the new bnb backend API, which requires bnb >=0.44. With our
+#     bnb 0.43 pin we hit "Could not import module
+#     'validate_bnb_backend_availability'" at bnb_4bit model load.
+#     transformers==4.46.3 is the last 4.46 release and was the last
+#     to use the old (bnb 0.43-compatible) loader path. Pinning exact
+#     to avoid 4.47/4.48 surprises.
+#
+#   - trl 0.12.x is the first to ship `processing_class=` (we use it)
+#     and stable `SFTConfig`. 0.13+ moves fields off TrainingArguments
+#     in ways that have broken our run.py.
+#
+# When we move to a CUDA-13 PyTorch base, lift the upper pins on bnb
+# and transformers in lockstep.
 RUN pip install --no-cache-dir \
         'training-hub>=0.2' \
         'peft>=0.13,<1' \
-        'bitsandbytes>=0.43,<0.44' \
+        'bitsandbytes==0.43.3' \
         'accelerate>=1.0,<2' \
-        'transformers>=4.45,<5' \
+        'transformers==4.46.3' \
         'datasets>=4.0.0,<5' \
         'deepspeed>=0.15,<1' \
         'trl>=0.12,<0.13' \
