@@ -110,3 +110,24 @@ WORKDIR /workspace
 # image is built around root by default — fix the perms here so
 # kfp's UID assignment doesn't break.
 RUN chmod -R g=u /opt/conda /workspace
+
+# Random-UID pods have no /etc/passwd entry, so $HOME is empty
+# and tools fall back to writing under "/" which is root-owned
+# (read-only for the random UID). Force every cache that ML
+# libraries reach for to land under /workspace, which is chmod
+# g=u so the GID 0 the pod runs with can write freely.
+#
+# Concrete failures this prevents (verified in v0.0.6 run):
+#   - deepspeed Triton kernel cache: /.triton  → PermissionError
+#   - HuggingFace model cache:       /.cache/huggingface
+#   - matplotlib font cache:         /.matplotlib
+#   - torch hub:                     /.cache/torch
+#   - Generic XDG fallbacks
+ENV HOME=/workspace \
+    HF_HOME=/workspace/.cache/huggingface \
+    TRANSFORMERS_CACHE=/workspace/.cache/huggingface/transformers \
+    TRITON_CACHE_DIR=/workspace/.cache/triton \
+    XDG_CACHE_HOME=/workspace/.cache \
+    MPLCONFIGDIR=/workspace/.cache/matplotlib \
+    TORCH_HOME=/workspace/.cache/torch \
+    NUMBA_CACHE_DIR=/workspace/.cache/numba
