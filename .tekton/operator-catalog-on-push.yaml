@@ -43,6 +43,21 @@ spec:
         value: docker-build
       - name: kind
         value: pipeline
+  # Exclude build node ec-0d-9a-89-19-46 — its overlayfs has a
+  # userxattr/metacopy=on misconfig that intermittently corrupts
+  # buildah layer commits. Remove when the node is fixed. See
+  # autoresearch-trainer-on-push.yaml for the diagnosis.
+  taskRunTemplate:
+    podTemplate:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: NotIn
+                    values:
+                      - ec-0d-9a-89-19-46
   taskRunSpecs:
     - pipelineTaskName: build-container
       stepSpecs:

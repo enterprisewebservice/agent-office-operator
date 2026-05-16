@@ -55,6 +55,29 @@ spec:
         value: docker-build
       - name: kind
         value: pipeline
+  # Exclude node ec-0d-9a-89-19-46 from build scheduling.
+  # That node's overlayfs has a userxattr / metacopy=on misconfig
+  # (logged in dmesg dozens of times; healthy nodes have zero of
+  # these messages) which intermittently corrupts xattr round-trip
+  # during buildah layer commit / push. Symptoms we saw on it:
+  #   brpgl, hpg4h: "Digest did not match" during LABEL commit
+  #   cw258:        "file integrity checksum failed" during push
+  # The one build that succeeded (bs2vh) landed on a different
+  # node. Resource limits weren't the cause; node-local storage
+  # correctness was. Other workloads can still run on the bad
+  # node — only Konflux builds (which exercise overlayfs heavily)
+  # need to avoid it. Remove this block once the node is fixed.
+  taskRunTemplate:
+    podTemplate:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: NotIn
+                    values:
+                      - ec-0d-9a-89-19-46
   taskRunSpecs:
     - pipelineTaskName: build-container
       stepSpecs:
@@ -62,11 +85,11 @@ spec:
           # Bigger image (PyTorch + CUDA layers are ~4 GB), pip install
           # of training-hub + deps is CPU-bound. Same 16-core ceiling
           # the operator build uses; trainer build typically finishes
-          # in 6-8 minutes cold. Memory bumped from 12 → 24 GiB after
-          # v0.0.6 builds (brpgl, hpg4h) failed at STEP 12 LABEL commit
-          # with buildah "Digest did not match" — large-layer commits
-          # under memory pressure can drop pages, corrupting the
-          # layer-cache → commit-storage copy.
+          # in 6-8 minutes cold. Memory bumped 12 → 24 GiB earlier as
+          # a guess at the COMMIT-step failures — turned out the real
+          # cause was the broken node above (see taskRunTemplate
+          # affinity). Leaving the bump in place: doesn't hurt and
+          # large multi-layer commits do benefit from headroom.
           computeResources:
             requests:
               cpu: "2"
