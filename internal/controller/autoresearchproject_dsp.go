@@ -16,12 +16,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	agentofficev1alpha1 "github.com/enterprisewebservice/agent-office-operator/api/v1alpha1"
 	"github.com/enterprisewebservice/agent-office-operator/internal/dsp"
@@ -126,17 +132,21 @@ func dspClientFor(ctx context.Context, c client.Client, namespace string) (*dsp.
 // at the top of each reconcile so a freshly-applied project
 // gets its pipeline + experiment registered on first cycle.
 //
-// Caches result in ProjectStatus so we don't re-resolve every
-// reconcile pass.
-func (r *AutoResearchProjectReconciler) ensureDSPRegistration(ctx context.Context, p *agentofficev1alpha1.AutoResearchProject) (pipelineID, experimentID string, err error) {
+// Also returns the pipeline version ID corresponding to the
+// embedded pipeline.yaml's content hash — callers pass that
+// to cullStaleOpenRuns so any in-flight runs from a previous
+// operator version (with a different embedded YAML, e.g. an
+// older trainer image tag) get terminated immediately rather
+// than wasting GPU time on a doomed config.
+func (r *AutoResearchProjectReconciler) ensureDSPRegistration(ctx context.Context, p *agentofficev1alpha1.AutoResearchProject) (pipelineID, currentVersionID, experimentID string, err error) {
 	dspClient, err := dspClientFor(ctx, r.Client, p.Namespace)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 
-	pipe, err := dspClient.FindOrCreatePipeline(ctx, dspPipelineName, dspPipelineDescription, pipelineYAML)
+	pipe, versionID, err := dspClient.FindOrCreatePipeline(ctx, dspPipelineName, dspPipelineDescription, pipelineYAML)
 	if err != nil {
-		return "", "", fmt.Errorf("ensure pipeline: %w", err)
+		return "", "", "", fmt.Errorf("ensure pipeline: %w", err)
 	}
 
 	experimentName := p.Spec.ExperimentName
@@ -146,10 +156,126 @@ func (r *AutoResearchProjectReconciler) ensureDSPRegistration(ctx context.Contex
 	exp, err := dspClient.FindOrCreateExperiment(ctx, experimentName,
 		fmt.Sprintf("AutoResearchProject %s/%s — autonomous QLoRA loop.", p.Namespace, p.Name))
 	if err != nil {
-		return "", "", fmt.Errorf("ensure experiment: %w", err)
+		return "", "", "", fmt.Errorf("ensure experiment: %w", err)
 	}
 
-	return pipe.PipelineID, exp.ExperimentID, nil
+	return pipe.PipelineID, versionID, exp.ExperimentID, nil
+}
+
+// cullStaleOpenRuns terminates and removes any in-flight DSP
+// run whose pipeline_version_id no longer matches the operator's
+// current embedded pipeline.yaml (i.e. the user has deployed a
+// new operator version whose pipeline.yaml differs — e.g.
+// trainer image tag bump). Without this, stale runs keep
+// running on the old trainer config and waste GPU time on a
+// doomed cycle before failing naturally.
+//
+// Termination sequence (DSP doesn't expose a usable :terminate
+// REST endpoint on RHOAI 3.3.1 — both colon and slash forms
+// return 501/404 — so we do this in two steps):
+//
+//  1. Delete the underlying Argo Workflow, label-selected by
+//     pipeline/runid=<dspRunID>. The Workflow's controller then
+//     terminates the running pods immediately.
+//  2. Best-effort delete the DSP run record. (If this fails,
+//     the run record stays around but is harmless — the next
+//     drain pass will see it terminal.)
+//  3. Remove the entry from status.OpenRuns and append a
+//     "Superseded" marker to status.RecentRuns so the wiki +
+//     experiments UI show the lineage.
+//
+// Returns the number culled. Caller uses this >0 as a signal to
+// bypass the cadence gate and immediately submit a fresh cycle
+// on the current pipeline version.
+func (r *AutoResearchProjectReconciler) cullStaleOpenRuns(
+	ctx context.Context,
+	p *agentofficev1alpha1.AutoResearchProject,
+	currentVersionID string,
+) (int, error) {
+	log := logf.FromContext(ctx)
+	if currentVersionID == "" || len(p.Status.OpenRuns) == 0 {
+		return 0, nil
+	}
+	dspClient, err := dspClientFor(ctx, r.Client, p.Namespace)
+	if err != nil {
+		return 0, err
+	}
+	culled := 0
+	for displayID, dspRunID := range p.Status.OpenRuns {
+		run, err := dspClient.GetRun(ctx, dspRunID)
+		if err != nil {
+			continue
+		}
+		runVersionID := run.PipelineVersionReference.PipelineVersionID
+		if runVersionID == "" || runVersionID == currentVersionID {
+			continue
+		}
+		// Stale — cull.
+		log.Info("culling stale-version run",
+			"runID", displayID, "dspRunID", dspRunID,
+			"runVersion", runVersionID, "currentVersion", currentVersionID)
+
+		// 1. Delete the Argo workflow via label selector. The
+		//    kfp v2 runtime labels each step pod with
+		//    `pipeline/runid=<DSP run UUID>`, and the parent
+		//    Workflow inherits this label.
+		wfs := &unstructured.UnstructuredList{}
+		wfs.SetGroupVersionKind(schema.GroupVersionKind{
+			Group: "argoproj.io", Version: "v1alpha1", Kind: "WorkflowList",
+		})
+		_ = r.List(ctx, wfs,
+			client.InNamespace(p.Namespace),
+			client.MatchingLabels{"pipeline/runid": dspRunID},
+		)
+		for i := range wfs.Items {
+			_ = r.Delete(ctx, &wfs.Items[i])
+		}
+
+		// 2. Best-effort delete the DSP run record.
+		_ = dspClient.DeleteRun(ctx, dspRunID)
+
+		// 3. Status bookkeeping: remove from OpenRuns, append
+		//    a Superseded marker to RecentRuns. We extract the
+		//    round number from the runID (deterministic format
+		//    "<project>-round-<N>") rather than reaching into
+		//    DSP's runtime config — the latter shape isn't part
+		//    of our minimal dsp.Run type.
+		delete(p.Status.OpenRuns, displayID)
+		now := metav1.Now()
+		fail := false
+		round := extractRoundFromRunID(displayID, p.Name)
+		var startedPtr *metav1.Time
+		if t, perr := time.Parse(time.RFC3339, run.CreatedAt); perr == nil {
+			started := metav1.NewTime(t)
+			startedPtr = &started
+		}
+		p.Status.RecentRuns = append(p.Status.RecentRuns, agentofficev1alpha1.AutoResearchExperimentRecord{
+			Round:        round,
+			RunID:        displayID,
+			Experimenter: p.Spec.Experimenter.Workstation,
+			ProposalPath: fmt.Sprintf("proposals/round-%d.yaml", round),
+			StartedAt:    startedPtr,
+			CompletedAt:  &now,
+			Kept:         &fail,
+			EvalLoss:     "superseded",
+		})
+		culled++
+	}
+	return culled, nil
+}
+
+// extractRoundFromRunID parses N out of "<project>-round-<N>".
+// Falls back to 0 if the runID doesn't match the format.
+func extractRoundFromRunID(runID, projectName string) int32 {
+	prefix := projectName + "-round-"
+	if !strings.HasPrefix(runID, prefix) {
+		return 0
+	}
+	n, err := strconv.Atoi(strings.TrimPrefix(runID, prefix))
+	if err != nil {
+		return 0
+	}
+	return int32(n)
 }
 
 // submitDSPRun creates a kfp Run for one experiment cycle. The
@@ -160,7 +286,7 @@ func (r *AutoResearchProjectReconciler) submitDSPRun(ctx context.Context, p *age
 	if err != nil {
 		return nil, err
 	}
-	pipelineID, experimentID, err := r.ensureDSPRegistration(ctx, p)
+	pipelineID, _, experimentID, err := r.ensureDSPRegistration(ctx, p)
 	if err != nil {
 		return nil, err
 	}

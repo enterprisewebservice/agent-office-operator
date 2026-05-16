@@ -116,8 +116,24 @@ type Run struct {
 	ExperimentID string                 `json:"experiment_id"`
 	State        string                 `json:"state"`
 	StateHistory []runStateHistoryEntry `json:"state_history,omitempty"`
+	// CreatedAt is the run's submission time (RFC3339).
+	CreatedAt string `json:"created_at,omitempty"`
 	// RuntimeConfig.Parameters are the inputs to the pipeline.
 	RuntimeConfig RuntimeConfig `json:"runtime_config,omitempty"`
+	// PipelineVersionReference tells us which pipeline version
+	// the run was submitted against. Used by the reconciler's
+	// stale-run culling to detect runs from a previous operator
+	// version (different embedded pipeline.yaml → different
+	// content-hash version) and terminate them.
+	PipelineVersionReference PipelineVersionRef `json:"pipeline_version_reference,omitempty"`
+}
+
+// PipelineVersionRef is the run → pipeline + version pointer
+// DSP records on every Run. We only care about pipeline_version_id
+// for staleness checks; the pipeline_id is stable across versions.
+type PipelineVersionRef struct {
+	PipelineID        string `json:"pipeline_id,omitempty"`
+	PipelineVersionID string `json:"pipeline_version_id,omitempty"`
 }
 
 type runStateHistoryEntry struct {
@@ -195,37 +211,48 @@ func (c *Client) UploadPipeline(ctx context.Context, displayName, description st
 
 // FindOrCreatePipeline uploads the pipeline if missing, or
 // uploads a new VERSION when the embedded pipeline.yaml has
-// drifted since the last upload. Without this, every operator
-// release that changes pipeline.yaml (e.g. a trainer image tag
-// bump) is silently ignored — DSP returns the cached pipeline
-// and runs target whatever was uploaded the first time.
+// drifted since the last upload. Returns the pipeline AND the
+// version ID corresponding to the current content hash —
+// callers use the version ID to cull stale in-flight runs that
+// were submitted against an older version.
 //
 // We use a sha256-prefix as the version name. If a version with
 // that name already exists on the pipeline, the upload is a
 // no-op. CreateRun without an explicit pipeline_version_id
 // targets the latest version, so the new upload is what runs
 // pick up on subsequent submissions.
-func (c *Client) FindOrCreatePipeline(ctx context.Context, displayName, description string, irYAML []byte) (*Pipeline, error) {
+func (c *Client) FindOrCreatePipeline(ctx context.Context, displayName, description string, irYAML []byte) (*Pipeline, string, error) {
 	versionName := pipelineVersionNameFor(irYAML)
 
 	existing, err := c.FindPipeline(ctx, displayName)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if existing == nil {
-		// First-ever upload — pipeline + initial version in one POST.
-		return c.UploadPipeline(ctx, displayName, description, irYAML)
+		// First-ever upload — pipeline + initial version in one
+		// POST. The returned Pipeline's PipelineID is what
+		// CreateRun uses; we don't get the version ID back from
+		// this path so we re-list to find it.
+		p, err := c.UploadPipeline(ctx, displayName, description, irYAML)
+		if err != nil {
+			return nil, "", err
+		}
+		versions, lerr := c.ListPipelineVersions(ctx, p.PipelineID)
+		if lerr == nil && len(versions) > 0 {
+			return p, versions[0].PipelineVersionID, nil
+		}
+		return p, "", nil
 	}
 
 	// Pipeline exists. Check whether a version matching the
 	// current content hash is already uploaded.
 	versions, err := c.ListPipelineVersions(ctx, existing.PipelineID)
 	if err != nil {
-		return nil, fmt.Errorf("list pipeline versions: %w", err)
+		return nil, "", fmt.Errorf("list pipeline versions: %w", err)
 	}
 	for _, v := range versions {
 		if v.DisplayName == versionName || v.Name == versionName {
-			return existing, nil
+			return existing, v.PipelineVersionID, nil
 		}
 	}
 
@@ -235,11 +262,29 @@ func (c *Client) FindOrCreatePipeline(ctx context.Context, displayName, descript
 	// were why operator v0.0.36's drift fix appeared to no-op
 	// on first try — the upload URL was wrong, but the error
 	// was swallowed so runs kept using the cached old version.
-	if _, err := c.UploadPipelineVersion(ctx, existing.PipelineID,
-		versionName, "operator content-hash refresh", irYAML); err != nil {
-		return nil, fmt.Errorf("upload pipeline version %s: %w", versionName, err)
+	newV, err := c.UploadPipelineVersion(ctx, existing.PipelineID,
+		versionName, "operator content-hash refresh", irYAML)
+	if err != nil {
+		return nil, "", fmt.Errorf("upload pipeline version %s: %w", versionName, err)
 	}
-	return existing, nil
+	return existing, newV.PipelineVersionID, nil
+}
+
+// DeleteRun removes a run record from DSP. We use this rather
+// than POST :terminate because RHOAI 3.3.1 DSP returns 501 on
+// the kfp-spec colon-syntax verb and 404 on the slash variant.
+// DELETE is the universally-supported removal verb; combined
+// with deleting the underlying Argo workflow (which actually
+// kills the running pods), it gives us the same effect.
+func (c *Client) DeleteRun(ctx context.Context, runID string) error {
+	req, err := http.NewRequestWithContext(ctx, "DELETE",
+		c.BaseURL+"/apis/v2beta1/runs/"+url.PathEscape(runID), nil)
+	if err != nil {
+		return err
+	}
+	c.applyAuth(req)
+	_, err = c.doRequest(req)
+	return err
 }
 
 // pipelineVersionNameFor returns the version name we use for a

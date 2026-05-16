@@ -116,6 +116,32 @@ func (r *AutoResearchProjectReconciler) Reconcile(ctx context.Context, req ctrl.
 		// keep going — status drift is recoverable
 	}
 
+	// 1b. Reconcile DSP registration (uploads new pipeline
+	//     version if our embedded pipeline.yaml drifted from
+	//     what's in DSP — e.g. a new operator version with a
+	//     bumped trainer image tag) and then cull any
+	//     in-flight runs that were submitted against the old
+	//     pipeline version. Without this, stale runs keep
+	//     wasting GPU on a doomed trainer config until they
+	//     fail naturally. We do this BEFORE the cadence gate
+	//     so a culled run frees a slot immediately for a fresh
+	//     submission on the new pipeline version.
+	_, currentVersionID, _, regErr := r.ensureDSPRegistration(ctx, &project)
+	if regErr != nil {
+		log.Error(regErr, "ensure DSP registration (continuing; cull skipped)")
+	} else if currentVersionID != "" {
+		culled, cerr := r.cullStaleOpenRuns(ctx, &project, currentVersionID)
+		if cerr != nil {
+			log.Error(cerr, "culling stale open runs")
+		}
+		if culled > 0 {
+			// Treat culling as completion-this-pass so the
+			// cadence gate doesn't artificially delay the
+			// replacement run.
+			completedThisPass = true
+		}
+	}
+
 	// 2. Stop conditions.
 	if project.Status.ExperimentsRun >= int32(maxTotal) {
 		return r.markPhaseAndSave(ctx, &project, "Completed",
