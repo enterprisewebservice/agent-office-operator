@@ -40,6 +40,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -341,20 +342,12 @@ func (c *Client) doRequest(req *http.Request) ([]byte, error) {
 }
 
 func urlEncode(s string) string {
-	// Minimal — the queries we issue use safe values (display
-	// names, JSON-encoded filter strings). For the JSON
-	// filters we need to encode %, {, }, etc.
-	r := strings.NewReplacer(
-		" ", "%20",
-		"\"", "%22",
-		"{", "%7B",
-		"}", "%7D",
-		"[", "%5B",
-		"]", "%5D",
-		",", "%2C",
-		":", "%3A",
-	)
-	return r.Replace(s)
+	// Use Go's stdlib so we get correct handling of every
+	// reserved character (e.g. ';' which Go's url.Parse strictly
+	// rejects in queries since 1.17; '+' which gets parsed as a
+	// space without encoding; '%' itself). Hand-rolled encoders
+	// always end up missing something.
+	return url.QueryEscape(s)
 }
 
 func truncate(b []byte, n int) string {
