@@ -31,11 +31,17 @@
 # Quay Operator's route is `quay-quay` in namespace `quay-test`, so the
 # rendered route is `quay-quay-quay-test.apps.<cluster>`. Functional;
 # the funny name is cosmetic.
-# Retry marker 2026-05-16T18:00Z: v0.0.7 build cw258 hit a blob
-# integrity error during PUSH (libcublasLt.so.12 file checksum
-# mismatch). Storage flake — see bs2vh (v0.0.6) for the success
-# precedent on the same dockerfile family. Retriggering.
-FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+# `-devel` (not `-runtime`) because we ship deepspeed for the
+# spec's offload_strategy=nvme path. deepspeed's module init
+# probes torch.utils.cpp_extension.CUDA_HOME → falls back to
+# /usr/local/cuda/bin/nvcc — the runtime image has neither, so
+# `from deepspeed import DeepSpeedEngine` (called eagerly by
+# accelerate.extract_model_from_parallel) raises
+# MissingCUDAException. Verified empirically with v0.0.7 trainer.
+#
+# Cost: devel image is ~2 GB larger than runtime, pushes final
+# image to ~9-10 GB. Under our 50Gi PVC + affinity-routed build.
+FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
 
 USER 0
 

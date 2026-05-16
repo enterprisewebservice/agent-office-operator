@@ -75,7 +75,7 @@ const (
 	autoResearchProjectLabel    = "agentoffice.ai/autoresearch-project"
 	autoResearchRoundAnnotation = "agentoffice.ai/autoresearch-round"
 
-	defaultTrainerImage = "quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/autoresearch-trainer:v0.0.7"
+	defaultTrainerImage = "quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/autoresearch-trainer:v0.0.8"
 
 	maxRecentRunsRetained = 20
 )
