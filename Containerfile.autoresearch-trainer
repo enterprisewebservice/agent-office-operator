@@ -31,10 +31,13 @@
 # Quay Operator's route is `quay-quay` in namespace `quay-test`, so the
 # rendered route is `quay-quay-quay-test.apps.<cluster>`. Functional;
 # the funny name is cosmetic.
-# Build-retry marker 2026-05-16T13:50Z: previous v0.0.6 build hit a
-# transient buildah layer digest mismatch during LABEL commit. The
-# pip install itself succeeded; this comment forces PaC to retrigger
-# (the trigger filter requires this Containerfile to have changed).
+# Build-retry note (2026-05-16): two consecutive v0.0.6 builds
+# failed at STEP 12 (final LABEL commit) with buildah
+# "Digest did not match" while writing the final layered blob —
+# transient storage flake, not a code issue. To reduce surface
+# area for the flake we slim the image below by dropping
+# deepspeed (200-300 MB; only needed for ZeRO-Infinity offload
+# which we don't use for granite-8b QLoRA on a 24GB GPU).
 FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
 
 USER 0
@@ -75,6 +78,13 @@ RUN apt-get update -y \
 #     transformers + peft + trl + bnb directly. Adding it back at
 #     CUDA-13 base time is fine; on CUDA-12 it's a poison pill.
 #
+#   - deepspeed is intentionally dropped: only useful for ZeRO-3 +
+#     ZeRO-Infinity offload (multi-billion-param models that don't
+#     fit in GPU + CPU). For granite-8b at 4-bit NF4 + LoRA + grad
+#     checkpointing on a single 24GB GPU we use bnb's built-in
+#     compute_dtype offload, not deepspeed. Re-add when we want
+#     multi-GPU FSDP-QLoRA via Kubeflow Trainer (Phase 5+).
+#
 # When we move to a CUDA-13 PyTorch base, lift the upper pins on bnb
 # and transformers in lockstep and optionally re-add training-hub.
 RUN pip install --no-cache-dir \
@@ -83,7 +93,6 @@ RUN pip install --no-cache-dir \
         'accelerate>=1.0,<2' \
         'transformers==4.46.3' \
         'datasets>=4.0.0,<5' \
-        'deepspeed>=0.15,<1' \
         'trl>=0.12,<0.13' \
         'sentencepiece' \
         'safetensors' \
