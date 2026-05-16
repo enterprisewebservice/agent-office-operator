@@ -5,7 +5,7 @@ metadata:
   namespace: default-tenant
   annotations:
     pipelinesascode.tekton.dev/on-cel-expression: 'event == "push" && target_branch == "main" && body.head_commit.author.email != "noreply@argoproj.io"'
-    pipelinesascode.tekton.dev/cancel-in-progress: "false"
+    pipelinesascode.tekton.dev/cancel-in-progress: "true"
     pipelinesascode.tekton.dev/max-keep-runs: "5"
     build.appstudio.openshift.io/repo: 'https://github.com/enterprisewebservice/agent-office-operator?rev={{revision}}'
     build.appstudio.redhat.com/commit_sha: '{{revision}}'

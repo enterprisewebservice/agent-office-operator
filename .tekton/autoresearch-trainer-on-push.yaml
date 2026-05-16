@@ -16,7 +16,11 @@ metadata:
            "Containerfile.autoresearch-trainer".pathChanged()
            || ".tekton/autoresearch-trainer-on-push.yaml".pathChanged()
          )
-    pipelinesascode.tekton.dev/cancel-in-progress: "false"
+    # Cancel any in-flight build when a newer push lands. Without
+    # this, rapid iteration produces 4-5 concurrent build pods all
+    # contending for the same workspace-PVC-pinned node — only one
+    # can actually run, the others sit Pending burning resources.
+    pipelinesascode.tekton.dev/cancel-in-progress: "true"
     pipelinesascode.tekton.dev/max-keep-runs: "5"
     build.appstudio.openshift.io/repo: 'https://github.com/enterprisewebservice/agent-office-operator?rev={{revision}}'
     build.appstudio.redhat.com/commit_sha: '{{revision}}'
