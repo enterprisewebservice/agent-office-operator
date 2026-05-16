@@ -75,7 +75,7 @@ const (
 	autoResearchProjectLabel    = "agentoffice.ai/autoresearch-project"
 	autoResearchRoundAnnotation = "agentoffice.ai/autoresearch-round"
 
-	defaultTrainerImage = "quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/autoresearch-trainer:v0.0.3"
+	defaultTrainerImage = "quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/autoresearch-trainer:v0.0.4"
 
 	maxRecentRunsRetained = 20
 )
@@ -539,34 +539,27 @@ func isRunTerminal(state string) bool {
 // the keep/revert decision. v0.0.31 can switch to the typed
 // artifact when DSP's API contract is set in stone.
 func (r *AutoResearchProjectReconciler) readEvalLossFromDSPRun(ctx context.Context, p *agentofficev1alpha1.AutoResearchProject, run *dsp.Run) float64 {
-	// Find the pod that ran this experiment. kfp's argo-driven
-	// runtime tags pods with the run's UID; for our single-step
-	// pipeline the pod's name pattern includes the run-id
-	// prefix. We label-select instead via a label DSP applies.
+	// kfp v2 labels every pipeline-step pod with
+	// `pipeline/runid=<DSP run UUID>`. Verified empirically on
+	// RHOAI 3.3.1 DSP — direct label match beats the previous
+	// name-substring loop, which mis-fired when run IDs shared
+	// prefixes. The trainer's container-impl pod is the only
+	// one in the matched set that produces AUTORESEARCH_RESULT=
+	// (driver/wait pods produce kfp launcher chatter only), so
+	// we walk them and return the first parseable result.
 	pods := &corev1.PodList{}
 	if err := r.List(ctx, pods,
 		client.InNamespace(p.Namespace),
-		client.MatchingLabels{"pipelines.kubeflow.org/v2_component": "true"},
+		client.MatchingLabels{"pipeline/runid": run.RunID},
 	); err != nil {
 		return 0
 	}
-	// Walk pods looking for the one whose annotation carries
-	// our display run id. v0.0.30 best-effort: parse the
-	// AUTORESEARCH_RESULT= line if found.
 	for _, pod := range pods.Items {
-		if !strings.Contains(pod.Name, run.RunID) && !strings.Contains(pod.Name, run.DisplayName) {
+		// Only the container-impl pod has our trainer; the
+		// driver pods are kfp scaffolding.
+		if !strings.Contains(pod.Name, "container-impl") {
 			continue
 		}
-		// Synthesize a stand-in batchv1.Job so we reuse the
-		// existing parseTrainerResult log-scraper. Only the
-		// Name + Namespace + (for label selector) labels are
-		// actually consulted by it.
-		fake := &batchv1.Job{}
-		fake.Namespace = pod.Namespace
-		fake.Name = pod.Name
-		fake.Labels = pod.Labels
-		// Re-use the same scanner; we reach pod logs via the
-		// pod name directly (not via labels) here.
 		evalLoss, err := r.parseTrainerResultByPodName(ctx, pod.Namespace, pod.Name)
 		if err != nil {
 			continue
@@ -588,7 +581,14 @@ func (r *AutoResearchProjectReconciler) parseTrainerResultByPodName(ctx context.
 	if err != nil {
 		return 0, err
 	}
-	logReq := cs.CoreV1().Pods(namespace).GetLogs(podName, &corev1.PodLogOptions{})
+	// kfp v2 pipeline pods have three containers (main, wait,
+	// kfp-launcher). GetLogs without an explicit container name
+	// errors on multi-container pods, so the previous version
+	// silently returned no result for DSP-pipeline runs. We
+	// always want the trainer's stdout, which lives in `main`.
+	logReq := cs.CoreV1().Pods(namespace).GetLogs(podName, &corev1.PodLogOptions{
+		Container: "main",
+	})
 	stream, err := logReq.Stream(ctx)
 	if err != nil {
 		return 0, err

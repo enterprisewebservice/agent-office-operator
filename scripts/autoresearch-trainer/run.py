@@ -102,30 +102,38 @@ def emit_progress(msg: str) -> None:
 
 def main() -> int:
     started = time.time()
-    args = _parse_args()
-    project = args.autoresearch_project or "(unknown)"
-    run_id = args.autoresearch_run_id or "(unknown)"
-    round_num = args.autoresearch_round
+    cli = _parse_args()
+    # Save the metrics output path before TrainingArguments
+    # shadows any name we might keep cli args under. Past bug:
+    # `args` was reused for both the CLI namespace and the
+    # HF TrainingArguments, so the final _emit_kfp_metrics
+    # crashed with AttributeError after a successful training
+    # run — losing the AUTORESEARCH_RESULT= line the operator
+    # depends on. We now hold all cli values in distinct locals.
+    metrics_output_path = cli.metrics_output_path
+    project = cli.autoresearch_project or "(unknown)"
+    run_id = cli.autoresearch_run_id or "(unknown)"
+    round_num = cli.autoresearch_round
 
     emit_progress(f"start project={project} round={round_num} run_id={run_id}")
 
     try:
-        cfg = json.loads(args.qlora_config_json)
+        cfg = json.loads(cli.qlora_config_json)
     except json.JSONDecodeError as e:
         emit_result({"status": "error", "error": f"qlora-config-json not valid JSON: {e}"})
         return 1
 
-    base_model = args.base_model
+    base_model = cli.base_model
     if not base_model:
         emit_result({"status": "error", "error": "--base-model (or BASE_MODEL env) not set"})
         return 1
-    base_revision = args.base_model_revision
-    training_data = args.training_data
+    base_revision = cli.base_model_revision
+    training_data = cli.training_data
     if not training_data:
         emit_result({"status": "error", "error": "--training-data (or TRAINING_DATA env) not set"})
         return 1
-    training_split = args.training_split
-    sample_count = args.training_sample_count
+    training_split = cli.training_split
+    sample_count = cli.training_sample_count
 
     emit_progress(f"config: {json.dumps(cfg)}")
     emit_progress(f"base_model={base_model}@{base_revision}")
@@ -141,10 +149,14 @@ def main() -> int:
             AutoModelForCausalLM,
             AutoTokenizer,
             BitsAndBytesConfig,
-            TrainingArguments,
         )
         from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-        from trl import SFTTrainer
+        # SFTConfig (a TrainingArguments subclass) is the trl 0.12+
+        # way to pass SFT-specific knobs (dataset_text_field,
+        # max_seq_length, packing). Using SFTConfig keeps everything
+        # in one config object and avoids version-drift bugs where
+        # newer trl moves fields off TrainingArguments.
+        from trl import SFTTrainer, SFTConfig
     except Exception as e:
         emit_result({"status": "error", "stage": "imports", "error": str(e), "trace": traceback.format_exc()})
         return 1
@@ -203,7 +215,11 @@ def main() -> int:
         emit_progress("starting fine-tune")
         output_dir = f"/workspace/output/{run_id}"
         os.makedirs(output_dir, exist_ok=True)
-        args = TrainingArguments(
+        # SFTConfig (TrainingArguments subclass) holds both the
+        # HF + trl-specific knobs. dataset_text_field="text"
+        # matches tatsu-lab/alpaca's pre-formatted column;
+        # max_seq_length passed here, not as a SFTTrainer kwarg.
+        sft_args = SFTConfig(
             output_dir=output_dir,
             per_device_train_batch_size=int(cfg.get("per_device_batch_size", 4)),
             gradient_accumulation_steps=int(cfg.get("gradient_accumulation_steps", 4)),
@@ -219,10 +235,13 @@ def main() -> int:
             gradient_checkpointing=True,
             report_to="none",
             dataloader_pin_memory=False,
+            dataset_text_field="text",
+            max_seq_length=int(cfg.get("max_seq_length", 1024)),
+            packing=False,
         )
         trainer = SFTTrainer(
             model=model,
-            args=args,
+            args=sft_args,
             train_dataset=train_ds,
             eval_dataset=eval_ds,
             processing_class=tokenizer,
@@ -250,7 +269,7 @@ def main() -> int:
     # UI's sort + filter — we expose the QLoRA config dimensions
     # alongside the eval_loss so users can correlate "rank 16
     # variants tended to win" without reading every JSON.
-    _emit_kfp_metrics(args.metrics_output_path, {
+    _emit_kfp_metrics(metrics_output_path, {
         "eval_loss": eval_loss,
         "elapsed_seconds": elapsed,
         "lora_rank": cfg.get("lora_rank", 0),

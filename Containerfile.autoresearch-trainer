@@ -54,6 +54,11 @@ RUN apt-get update -y \
 # so 0.44 fails to load with "libnvJitLink.so.13: cannot open shared
 # object file". 0.43.x is the last CUDA-12 release line. Bump together
 # with the base image when we move to CUDA 13 PyTorch.
+#
+# trl is pinned tight to 0.12.x: 0.12 introduced `processing_class=`
+# (we use it), and SFTConfig is stable. 0.13+ shifts more fields off
+# TrainingArguments into SFTConfig in ways that have broken in the
+# past; pinning keeps the trainer reproducible across image builds.
 RUN pip install --no-cache-dir \
         'training-hub>=0.2' \
         'peft>=0.13,<1' \
@@ -62,7 +67,7 @@ RUN pip install --no-cache-dir \
         'transformers>=4.45,<5' \
         'datasets>=4.0.0,<5' \
         'deepspeed>=0.15,<1' \
-        'trl>=0.11,<1' \
+        'trl>=0.12,<0.13' \
         'sentencepiece' \
         'safetensors' \
         'pyyaml' \
