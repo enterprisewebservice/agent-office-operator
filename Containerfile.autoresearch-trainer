@@ -48,10 +48,16 @@ RUN apt-get update -y \
 # Pinned-but-not-frozen — we want minor patches but not surprise
 # major bumps. Versions chosen against PyTorch 2.5 + CUDA 12.4 on
 # UBI9 (the RHOAI base image's contract).
+#
+# bitsandbytes is pinned to <0.44 because 0.44+ links against
+# libnvJitLink.so.13 (CUDA 13). The PyTorch base above ships CUDA 12.4,
+# so 0.44 fails to load with "libnvJitLink.so.13: cannot open shared
+# object file". 0.43.x is the last CUDA-12 release line. Bump together
+# with the base image when we move to CUDA 13 PyTorch.
 RUN pip install --no-cache-dir \
         'training-hub>=0.2' \
         'peft>=0.13,<1' \
-        'bitsandbytes>=0.44,<1' \
+        'bitsandbytes>=0.43,<0.44' \
         'accelerate>=1.0,<2' \
         'transformers>=4.45,<5' \
         'datasets>=4.0.0,<5' \
