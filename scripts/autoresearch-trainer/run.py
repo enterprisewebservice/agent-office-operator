@@ -290,7 +290,13 @@ def main() -> int:
         )
         trainer.train()
         emit_progress("training finished; running final eval")
-        eval_result = trainer.evaluate(eval_dataset=eval_ds)
+        # NB: pass no eval_dataset arg here — SFTTrainer's __init__
+        # tokenizes the eval_dataset we gave it into input_ids /
+        # attention_mask / labels columns. Re-passing the RAW eval_ds
+        # bypasses that tokenization and the base Trainer evaluate()
+        # path then raises "No columns in the dataset match the
+        # model's forward method signature" (v0.0.9 failure mode).
+        eval_result = trainer.evaluate()
         eval_loss = float(eval_result.get("eval_loss", float("nan")))
         emit_progress(f"eval_loss={eval_loss}")
 
