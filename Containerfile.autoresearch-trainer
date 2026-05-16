@@ -31,6 +31,10 @@
 # Quay Operator's route is `quay-quay` in namespace `quay-test`, so the
 # rendered route is `quay-quay-quay-test.apps.<cluster>`. Functional;
 # the funny name is cosmetic.
+# Retry marker 2026-05-16T18:00Z: v0.0.7 build cw258 hit a blob
+# integrity error during PUSH (libcublasLt.so.12 file checksum
+# mismatch). Storage flake — see bs2vh (v0.0.6) for the success
+# precedent on the same dockerfile family. Retriggering.
 FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
 
 USER 0
