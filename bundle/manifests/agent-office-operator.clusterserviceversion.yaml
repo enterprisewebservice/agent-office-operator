@@ -57,7 +57,7 @@ metadata:
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
     repository: https://github.com/enterprisewebservice/agent-office-operator
     support: Red Hat Solution Architecture
-  name: agent-office-operator.v0.0.33
+  name: agent-office-operator.v0.0.34
   namespace: placeholder
 spec:
   apiservicedefinitions: {}
@@ -334,7 +334,7 @@ spec:
                       fieldPath: metadata.annotations['olm.targetNamespaces']
                 - name: CLUSTER_APPS_DOMAIN
                   value: apps.salamander.aimlworkbench.com
-                image: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-operator:v0.0.33
+                image: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-operator:v0.0.34
                 imagePullPolicy: Always
                 livenessProbe:
                   httpGet:
@@ -437,5 +437,5 @@ spec:
   provider:
     name: Red Hat Solution Architecture
     url: https://github.com/enterprisewebservice
-  replaces: agent-office-operator.v0.0.32
-  version: 0.0.33
+  replaces: agent-office-operator.v0.0.33
+  version: 0.0.34

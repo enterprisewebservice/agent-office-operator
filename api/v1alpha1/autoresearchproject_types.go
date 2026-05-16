@@ -280,6 +280,20 @@ type AutoResearchProjectSpec struct {
 	// them grouped + sortable. Defaults to metadata.name.
 	// +optional
 	ExperimentName string `json:"experimentName,omitempty"`
+
+	// ValidationMode, when true, overrides the proposed QLoRA
+	// config with a smoke-test profile (10 training steps,
+	// batch=1, rank=4, max_seq_length=256) and clamps the
+	// dataset sample count to 200. Use to validate end-to-end
+	// plumbing — image pull, GPU scheduling, model load,
+	// dataset load, AUTORESEARCH_RESULT= emission, operator
+	// status writeback, kfp metrics — in ~3-5 minutes per
+	// round before committing to a real 30-90 min run.
+	// Eval loss is still reported but is meaningless at this
+	// scale; do not feed validation rounds into keep/revert
+	// heuristics. Flip to false for production runs.
+	// +optional
+	ValidationMode bool `json:"validationMode,omitempty"`
 }
 
 // AutoResearchExperimentRecord is a single run's summary kept in

@@ -283,13 +283,47 @@ func starterQLoRAConfig(round int) QLoRAConfig {
 	}
 }
 
+// validationQLoRAConfig is the smoke-test profile triggered by
+// spec.validationMode=true. Designed to complete on a single
+// 24GB GPU in 3-5 min including model load — small enough to
+// validate end-to-end plumbing without burning a real run's
+// worth of GPU time. Loss numbers from this profile mean
+// nothing; the only signal we want is "did the pipeline run
+// reach AUTORESEARCH_RESULT= and did the operator scrape it."
+func validationQLoRAConfig(round int) QLoRAConfig {
+	return QLoRAConfig{
+		Round:            round,
+		LoraRank:         4,
+		LoraAlpha:        8,
+		LoraDropout:      0.05,
+		TargetModules:    []string{"q_proj", "v_proj"},
+		LearningRate:     2e-4,
+		NumTrainingSteps: 10,
+		PerDeviceBatch:   1,
+		GradAccum:        1,
+		MaxSeqLen:        256,
+		WarmupSteps:      0,
+		WeightDecay:      0.0,
+		OffloadStrategy:  "cpu",
+		Notes:            "VALIDATION mode (10 steps, batch 1, seq 256); loss meaningless",
+	}
+}
+
 // requestProposal asks the experimenter agent for the next
 // QLoRA config. v0.0.1 falls back to starterQLoRAConfig if the
 // agent isn't wired up yet — the agent-driven proposal is
 // added in v0.0.2 alongside the wiki integration. This keeps
 // the loop runnable in isolation while we iterate on the
 // agent prompt.
+//
+// spec.validationMode=true short-circuits everything to the
+// validation profile — neither the agent nor the starter is
+// consulted, since the whole point of validation mode is to
+// run a tiny known-shape experiment.
 func (r *AutoResearchProjectReconciler) requestProposal(ctx context.Context, p *agentofficev1alpha1.AutoResearchProject, round int) (QLoRAConfig, string, error) {
+	if p.Spec.ValidationMode {
+		return validationQLoRAConfig(round), "validation (spec.validationMode=true)", nil
+	}
 	// Placeholder for v0.0.1 — the deterministic starter config
 	// IS the proposal until the agent-skill wiring lands in
 	// v0.0.2. This keeps the reconciler-end of the loop

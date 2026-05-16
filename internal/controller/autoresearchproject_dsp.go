@@ -174,6 +174,13 @@ func (r *AutoResearchProjectReconciler) submitDSPRun(ctx context.Context, p *age
 	if p.Spec.TrainingData.SampleCount != nil {
 		sampleCount = *p.Spec.TrainingData.SampleCount
 	}
+	// ValidationMode clamps the dataset down to a smoke-test
+	// slice so dataset load + tokenization stay fast. Paired
+	// with validationQLoRAConfig (10 steps / batch 1) the
+	// whole run including model download lands in 3-5 min.
+	if p.Spec.ValidationMode && sampleCount > 200 {
+		sampleCount = 200
+	}
 
 	params := map[string]any{
 		"base_model":              p.Spec.BaseModel.HuggingfaceID,
