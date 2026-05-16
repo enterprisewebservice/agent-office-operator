@@ -31,6 +31,10 @@
 # Quay Operator's route is `quay-quay` in namespace `quay-test`, so the
 # rendered route is `quay-quay-quay-test.apps.<cluster>`. Functional;
 # the funny name is cosmetic.
+# Build-retry marker 2026-05-16T13:50Z: previous v0.0.6 build hit a
+# transient buildah layer digest mismatch during LABEL commit. The
+# pip install itself succeeded; this comment forces PaC to retrigger
+# (the trigger filter requires this Containerfile to have changed).
 FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
 
 USER 0
