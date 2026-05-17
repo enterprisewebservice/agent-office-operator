@@ -11,7 +11,7 @@
 # embedded olm.bundle.object content (which is what OLM reads when
 # computing channel heads). Keep in sync with the image tag in
 # .tekton/operator-image-on-push.yaml etc.
-VERSION ?= 0.0.48
+VERSION ?= 0.0.49
 
 # CHANNELS define the bundle channels used in the bundle.
 # Add a new line here if you would like to change its default config. (E.g CHANNELS = "candidate,fast,stable")
@@ -521,17 +521,22 @@ preflight: verify-version ## Run all structural sanity checks before commit.
 	else \
 	  echo "  OK  catalog.yaml has olm.channel block"; \
 	fi; \
-	IMG_PIPE=$$(grep -oE 'autoresearch-trainer:v[0-9]+\.[0-9]+\.[0-9]+' internal/controller/pipeline.yaml | head -1); \
-	IMG_SCRIPT=$$(grep -oE 'autoresearch-trainer:v[0-9]+\.[0-9]+\.[0-9]+' scripts/autoresearch-pipeline/pipeline.yaml | head -1); \
-	IMG_DEF=$$(grep -oE 'autoresearch-trainer:v[0-9]+\.[0-9]+\.[0-9]+' internal/controller/autoresearchproject_controller.go | head -1); \
-	if [ "$$IMG_PIPE" = "$$IMG_SCRIPT" ] && [ "$$IMG_PIPE" = "$$IMG_DEF" ] && [ -n "$$IMG_PIPE" ]; then \
-	  echo "  OK  trainer image consistent at $$IMG_PIPE"; \
+	if grep -q "image: '{{TRAINER_IMAGE}}'" internal/controller/pipeline.yaml \
+	   && grep -q "image: '{{TRAINER_IMAGE}}'" scripts/autoresearch-pipeline/pipeline.yaml; then \
+	  echo "  OK  pipeline.yaml uses {{TRAINER_IMAGE}} placeholder (operator templates at upload)"; \
 	else \
-	  echo "  ERR trainer image drift:"; \
-	  echo "        pipeline.yaml         = $$IMG_PIPE"; \
-	  echo "        scripts/.../pipeline  = $$IMG_SCRIPT"; \
-	  echo "        defaultTrainerImage   = $$IMG_DEF"; \
-	  BAD=1; \
+	  IMG_PIPE=$$(grep -oE 'autoresearch-trainer:v[0-9]+\.[0-9]+\.[0-9]+' internal/controller/pipeline.yaml | head -1); \
+	  IMG_SCRIPT=$$(grep -oE 'autoresearch-trainer:v[0-9]+\.[0-9]+\.[0-9]+' scripts/autoresearch-pipeline/pipeline.yaml | head -1); \
+	  IMG_DEF=$$(grep -oE 'autoresearch-trainer:v[0-9]+\.[0-9]+\.[0-9]+' internal/controller/autoresearchproject_controller.go | head -1); \
+	  if [ "$$IMG_PIPE" = "$$IMG_SCRIPT" ] && [ "$$IMG_PIPE" = "$$IMG_DEF" ] && [ -n "$$IMG_PIPE" ]; then \
+	    echo "  OK  trainer image consistent at $$IMG_PIPE (untemplated mode)"; \
+	  else \
+	    echo "  ERR pipeline.yaml is neither templated NOR consistently pinned:"; \
+	    echo "        pipeline.yaml         = $$IMG_PIPE"; \
+	    echo "        scripts/.../pipeline  = $$IMG_SCRIPT"; \
+	    echo "        defaultTrainerImage   = $$IMG_DEF"; \
+	    BAD=1; \
+	  fi; \
 	fi; \
 	if [ $$BAD -ne 0 ]; then echo "PREFLIGHT FAIL — see ERR lines above"; exit 1; else echo "All preflight checks passed"; fi
 

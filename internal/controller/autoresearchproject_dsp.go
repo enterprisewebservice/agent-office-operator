@@ -39,8 +39,33 @@ import (
 // operator can register the pipeline with DSP at startup
 // without depending on Python/kfp at runtime.
 //
+// The embedded copy contains the literal placeholder
+// '{{TRAINER_IMAGE}}' for the trainer container's image field.
+// renderPipelineYAML() substitutes the resolved image before
+// upload; the substituted bytes are the basis for the kfp
+// content-hash version name, so a trainer-image bump produces a
+// new DSP pipeline version with no operator rebuild needed.
+//
 //go:embed pipeline.yaml
 var pipelineYAML []byte
+
+// trainerImagePlaceholder is the substring in the embedded
+// pipeline.yaml that resolveTrainerImage()'s output replaces.
+const trainerImagePlaceholder = "{{TRAINER_IMAGE}}"
+
+// trainerImageDefaultsConfigMap is the well-known ConfigMap name
+// in the project's namespace whose `trainerImage` key supplies the
+// default trainer image when the project's spec.trainer.image is
+// empty. Lets cluster admins roll a trainer-image bump cluster-
+// wide by editing one ConfigMap in GitOps — no operator rebuild,
+// no per-project CR edits.
+//
+// Lookup precedence (resolveTrainerImage):
+//
+//   1. p.Spec.Trainer.Image                                — explicit per-project pin
+//   2. ConfigMap autoresearch-defaults.trainerImage         — namespace default
+//   3. defaultTrainerImage const in controller package      — last-resort fallback
+const trainerImageDefaultsConfigMap = "autoresearch-defaults"
 
 // dspPipelineName + dspPipelineDescription are constants
 // referenced by both the upload-on-startup and the per-run
@@ -144,7 +169,17 @@ func (r *AutoResearchProjectReconciler) ensureDSPRegistration(ctx context.Contex
 		return "", "", "", err
 	}
 
-	pipe, versionID, err := dspClient.FindOrCreatePipeline(ctx, dspPipelineName, dspPipelineDescription, pipelineYAML)
+	// Render the embedded pipeline.yaml with the resolved trainer
+	// image. The substituted bytes are what DSP sees AND what
+	// FindOrCreatePipeline content-hashes to derive the version
+	// name — so a trainer-image change produces a fresh pipeline
+	// version automatically without any operator rebuild.
+	renderedYAML, renderErr := r.renderPipelineYAML(ctx, p)
+	if renderErr != nil {
+		return "", "", "", fmt.Errorf("render pipeline: %w", renderErr)
+	}
+
+	pipe, versionID, err := dspClient.FindOrCreatePipeline(ctx, dspPipelineName, dspPipelineDescription, renderedYAML)
 	if err != nil {
 		return "", "", "", fmt.Errorf("ensure pipeline: %w", err)
 	}
@@ -424,3 +459,166 @@ func (r *AutoResearchProjectReconciler) submitDSPRun(ctx context.Context, p *age
 	}
 	return run, nil
 }
+
+// renderPipelineYAML substitutes {{TRAINER_IMAGE}} in the embedded
+// pipeline.yaml with the resolved image for this project. Returns
+// an error only if the placeholder is missing from the embedded
+// YAML — that's a developer error (someone edited pipeline.yaml
+// and accidentally inlined the image again), not a runtime
+// condition the operator should silently tolerate.
+func (r *AutoResearchProjectReconciler) renderPipelineYAML(ctx context.Context, p *agentofficev1alpha1.AutoResearchProject) ([]byte, error) {
+	if !strings.Contains(string(pipelineYAML), trainerImagePlaceholder) {
+		return nil, fmt.Errorf("embedded pipeline.yaml missing %s placeholder — "+
+			"someone reverted the templating in pipeline.yaml line 93", trainerImagePlaceholder)
+	}
+	image := r.resolveTrainerImage(ctx, p)
+	rendered := strings.Replace(string(pipelineYAML), trainerImagePlaceholder, image, 1)
+	return []byte(rendered), nil
+}
+
+// resolveTrainerImage returns the trainer container image the
+// operator should plumb into pipeline.yaml for this project,
+// honoring the precedence documented at trainerImageDefaultsConfigMap.
+//
+// ConfigMap lookup is best-effort — if it doesn't exist or the
+// key is missing we silently fall through to the compiled-in
+// default. This keeps a fresh cluster install working without any
+// extra bootstrap; admins opt into ConfigMap-driven defaults by
+// creating the resource.
+func (r *AutoResearchProjectReconciler) resolveTrainerImage(ctx context.Context, p *agentofficev1alpha1.AutoResearchProject) string {
+	if p.Spec.Trainer.Image != "" {
+		return p.Spec.Trainer.Image
+	}
+	var cm corev1.ConfigMap
+	err := r.Get(ctx, types.NamespacedName{
+		Namespace: p.Namespace,
+		Name:      trainerImageDefaultsConfigMap,
+	}, &cm)
+	if err == nil {
+		if v, ok := cm.Data["trainerImage"]; ok && strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return defaultTrainerImage
+}
+
+// verifyAdapterArtifact does an OCI manifest HEAD against the given
+// adapter URI to confirm the trainer's reported push actually
+// landed in the registry. Used by the post-round drain to flip
+// silent persistence skips into loud, status-visible failures.
+//
+// Returns:
+//   - status="OK"      → 200; adapter is pullable
+//   - status="Missing" → 404; trainer reported success but registry has no manifest
+//   - status="Unknown" → network/auth error; treat as inconclusive, don't punish round
+//
+// Auth: reads Secret/quay-push-secret in the project's namespace
+// (the same one the trainer uses for the push side), decodes the
+// `.dockerconfigjson` value, finds the matching registry's
+// "auth" field, and uses it as the Authorization header. If the
+// Secret is missing or auth can't be extracted we still send the
+// HEAD unauthenticated — public manifests work, private ones come
+// back 401 and we surface that as Unknown rather than failure.
+func (r *AutoResearchProjectReconciler) verifyAdapterArtifact(ctx context.Context, p *agentofficev1alpha1.AutoResearchProject, uri string) (status, detail string) {
+	registry, repo, tag, perr := splitOCIURI(uri)
+	if perr != nil {
+		return "Unknown", fmt.Sprintf("malformed adapter URI %q: %v", uri, perr)
+	}
+	authHeader := r.readQuayBasicAuth(ctx, p.Namespace, registry)
+	headURL := fmt.Sprintf("https://%s/v2/%s/manifests/%s", registry, repo, tag)
+
+	req, _ := newHTTPRequestWithContext(ctx, "HEAD", headURL, nil)
+	if authHeader != "" {
+		req.Header.Set("Authorization", authHeader)
+	}
+	// Accept the modern OCI + Docker v2 manifest media types so the
+	// registry returns a 200 instead of an old "manifest unknown"
+	// fallback when the content is OCI-specific (our adapter
+	// artifact is application/vnd.peft.lora.v1).
+	req.Header.Set("Accept", "application/vnd.oci.image.manifest.v1+json, "+
+		"application/vnd.oci.image.index.v1+json, "+
+		"application/vnd.docker.distribution.manifest.v2+json")
+
+	resp, err := insecureHTTPClient().Do(req)
+	if err != nil {
+		return "Unknown", fmt.Sprintf("HEAD %s failed: %v", headURL, err)
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case 200:
+		return "OK", fmt.Sprintf("manifest present at %s", uri)
+	case 404:
+		return "Missing", fmt.Sprintf("registry returned 404 for %s — trainer reported "+
+			"push success but the manifest isn't there", uri)
+	case 401, 403:
+		return "Unknown", fmt.Sprintf("registry returned %d for %s — operator can't see this "+
+			"repo (auth issue); persistence may still be working", resp.StatusCode, uri)
+	default:
+		return "Unknown", fmt.Sprintf("registry returned HTTP %d for %s", resp.StatusCode, uri)
+	}
+}
+
+// splitOCIURI parses "registry/repo:tag" into its three parts.
+// Repo may itself contain slashes; tag is the substring after the
+// LAST colon (digest references with @sha256:... are not supported
+// since the trainer always pushes by tag).
+func splitOCIURI(uri string) (registry, repo, tag string, err error) {
+	colon := strings.LastIndex(uri, ":")
+	if colon < 0 {
+		return "", "", "", fmt.Errorf("no :tag suffix")
+	}
+	tag = uri[colon+1:]
+	body := uri[:colon]
+	slash := strings.Index(body, "/")
+	if slash < 0 {
+		return "", "", "", fmt.Errorf("no registry/repo separator")
+	}
+	registry = body[:slash]
+	repo = body[slash+1:]
+	if registry == "" || repo == "" || tag == "" {
+		return "", "", "", fmt.Errorf("empty registry, repo, or tag")
+	}
+	return registry, repo, tag, nil
+}
+
+// readQuayBasicAuth fetches Secret/quay-push-secret in the given
+// namespace and returns a "Basic <base64>" Authorization header
+// for the given registry hostname, or "" if the secret is missing
+// or doesn't have an entry for that registry.
+//
+// Best-effort by design — verifyAdapterArtifact falls back to an
+// unauthenticated HEAD when this returns "".
+func (r *AutoResearchProjectReconciler) readQuayBasicAuth(ctx context.Context, namespace, registry string) string {
+	var sec corev1.Secret
+	if err := r.Get(ctx, types.NamespacedName{
+		Namespace: namespace,
+		Name:      "quay-push-secret",
+	}, &sec); err != nil {
+		return ""
+	}
+	raw, ok := sec.Data[".dockerconfigjson"]
+	if !ok {
+		return ""
+	}
+	var cfg struct {
+		Auths map[string]struct {
+			Auth string `json:"auth"`
+		} `json:"auths"`
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return ""
+	}
+	// Docker config keys can be exact hostname OR a URL like
+	// "https://<host>/v1/"; check both. Quay typically uses the
+	// hostname directly.
+	for k, v := range cfg.Auths {
+		if v.Auth == "" {
+			continue
+		}
+		if k == registry || strings.Contains(k, registry) {
+			return "Basic " + v.Auth
+		}
+	}
+	return ""
+}
+

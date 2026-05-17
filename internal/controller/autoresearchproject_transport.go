@@ -11,8 +11,11 @@ You may obtain a copy of the License at
 package controller
 
 import (
+	"context"
 	"crypto/tls"
+	"io"
 	"net/http"
+	"time"
 )
 
 // defaultInsecureTransport returns an http.Transport that skips
@@ -28,4 +31,28 @@ func defaultInsecureTransport() *http.Transport {
 	return &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
 	}
+}
+
+// insecureHTTPClient returns a short-timeout http.Client built on
+// defaultInsecureTransport. Used by adapter-URI verification —
+// the in-cluster Quay route presents a self-signed cert, same
+// trust story as the DSP API call above.
+//
+// 10s timeout is intentional: we want the HEAD to fail FAST and
+// surface "Unknown" so the round-drain loop isn't blocked when
+// the registry is briefly unreachable.
+func insecureHTTPClient() *http.Client {
+	return &http.Client{
+		Transport: defaultInsecureTransport(),
+		Timeout:   10 * time.Second,
+	}
+}
+
+// newHTTPRequestWithContext is a thin wrapper around
+// http.NewRequestWithContext that drops the error return for the
+// callers that can't usefully handle a malformed-URL error
+// (verifyAdapterArtifact already validates the URI shape via
+// splitOCIURI, so by the time we get here the URL is well-formed).
+func newHTTPRequestWithContext(ctx context.Context, method, url string, body io.Reader) (*http.Request, error) {
+	return http.NewRequestWithContext(ctx, method, url, body)
 }

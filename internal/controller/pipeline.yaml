@@ -90,7 +90,18 @@ deploymentSpec:
         command:
         - python
         - /opt/autoresearch/run.py
-        image: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/autoresearch-trainer:v0.0.13
+        # Templated by the operator at upload time. The literal
+        # string '{{TRAINER_IMAGE}}' (with the surrounding quotes)
+        # is replaced with the resolved trainer image before this
+        # YAML is sent to DSP. Resolution order (in dsp.go's
+        # resolveTrainerImage): spec.trainer.image > ConfigMap
+        # autoresearch-defaults.trainerImage in the project's
+        # namespace > the compiled-in defaultTrainerImage const.
+        # The substituted bytes are the basis for the kfp pipeline
+        # version's content hash, so a trainer-image bump produces
+        # a new DSP pipeline version automatically — no operator
+        # rebuild needed.
+        image: '{{TRAINER_IMAGE}}'
         resources:
           accelerator:
             count: '1'

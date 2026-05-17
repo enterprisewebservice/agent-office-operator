@@ -90,7 +90,11 @@ deploymentSpec:
         command:
         - python
         - /opt/autoresearch/run.py
-        image: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/autoresearch-trainer:v0.0.13
+        # Templated by the operator (see internal/controller/pipeline.yaml
+        # for the canonical comment). The hand-edited script copy in
+        # this dir stays in sync with the operator-embedded one;
+        # both use the same placeholder.
+        image: '{{TRAINER_IMAGE}}'
         resources:
           accelerator:
             count: '1'

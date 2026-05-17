@@ -129,16 +129,41 @@ func (r *AutoResearchProjectReconciler) Reconcile(ctx context.Context, req ctrl.
 	_, currentVersionID, _, regErr := r.ensureDSPRegistration(ctx, &project)
 	if regErr != nil {
 		log.Error(regErr, "ensure DSP registration (continuing; cull skipped)")
-	} else if currentVersionID != "" {
-		culled, cerr := r.cullStaleOpenRuns(ctx, &project, currentVersionID)
-		if cerr != nil {
-			log.Error(cerr, "culling stale open runs")
-		}
-		if culled > 0 {
-			// Treat culling as completion-this-pass so the
-			// cadence gate doesn't artificially delay the
-			// replacement run.
-			completedThisPass = true
+		// Surface the DSP rejection on Status so it's visible via
+		// `oc describe`/`oc get conditions` without log-tailing.
+		// Caught real failure: v0.0.46 silently shipped a kfp
+		// schema (platforms.kubernetes.secretAsVolume) that RHOAI
+		// 3.3.1's DSP rejects with "unknown template format" —
+		// loop kept reusing the prior version so no one noticed
+		// for hours.
+		project.Status.Conditions = mergeARPConditions(project.Status.Conditions,
+			agentofficev1alpha1.AutoResearchProjectCondition{
+				Type:               "PipelineUploadOK",
+				Status:             "False",
+				Reason:             "DSPRejected",
+				Message:            truncateMsg(regErr.Error(), 256),
+				LastTransitionTime: metav1.Now(),
+			})
+	} else {
+		project.Status.Conditions = mergeARPConditions(project.Status.Conditions,
+			agentofficev1alpha1.AutoResearchProjectCondition{
+				Type:               "PipelineUploadOK",
+				Status:             "True",
+				Reason:             "Uploaded",
+				Message:            "embedded pipeline.yaml accepted by DSP (version " + currentVersionID + ")",
+				LastTransitionTime: metav1.Now(),
+			})
+		if currentVersionID != "" {
+			culled, cerr := r.cullStaleOpenRuns(ctx, &project, currentVersionID)
+			if cerr != nil {
+				log.Error(cerr, "culling stale open runs")
+			}
+			if culled > 0 {
+				// Treat culling as completion-this-pass so the
+				// cadence gate doesn't artificially delay the
+				// replacement run.
+				completedThisPass = true
+			}
 		}
 	}
 
@@ -561,6 +586,53 @@ func (r *AutoResearchProjectReconciler) drainOpenJobs(ctx context.Context, p *ag
 				adapterURI = full.AdapterURI
 			}
 			kept = isImprovement(p, evalLoss)
+
+			// v0.0.49: verify the adapter URI is actually
+			// pullable from the registry before trusting the
+			// trainer's "I pushed it" claim. Silent persistence
+			// skips (round 17 in v0.0.47/v0.0.12 — trainer warned
+			// "no quay-push-secret mounted" and the loop kept
+			// happily marking rounds Succeeded) now produce a
+			// loud, status-visible AdapterPushOK=False condition.
+			//
+			// We only set the condition when persistence was
+			// actually expected — i.e., either spec.adapterStorage
+			// is configured OR the trainer reported a non-empty
+			// adapter_uri. Otherwise we'd flap False on every
+			// project that legitimately doesn't want persistence.
+			storageWanted := p.Spec.AdapterStorage != nil
+			if adapterURI != "" {
+				status, detail := r.verifyAdapterArtifact(ctx, p, adapterURI)
+				condStatus := "True"
+				reason := "Verified"
+				if status == "Missing" {
+					condStatus = "False"
+					reason = "ManifestMissing"
+				} else if status == "Unknown" {
+					condStatus = "Unknown"
+					reason = "VerifyInconclusive"
+				}
+				p.Status.Conditions = mergeARPConditions(p.Status.Conditions,
+					agentofficev1alpha1.AutoResearchProjectCondition{
+						Type:               "AdapterPushOK",
+						Status:             condStatus,
+						Reason:             reason,
+						Message:            detail,
+						LastTransitionTime: metav1.Now(),
+					})
+			} else if storageWanted {
+				p.Status.Conditions = mergeARPConditions(p.Status.Conditions,
+					agentofficev1alpha1.AutoResearchProjectCondition{
+						Type:   "AdapterPushOK",
+						Status: "False",
+						Reason: "EmptyURI",
+						Message: "spec.adapterStorage is configured but trainer reported an " +
+							"empty adapter_uri — the push step in run.py likely failed " +
+							"silently (check the round's pod logs for a [autoresearch] " +
+							"WARN line)",
+						LastTransitionTime: metav1.Now(),
+					})
+			}
 		}
 		now := metav1.Now()
 		for i := range p.Status.RecentRuns {
@@ -949,6 +1021,16 @@ func deref(p *int32, fallback int32) int32 {
 		return fallback
 	}
 	return *p
+}
+
+// truncateMsg caps a condition Message at maxLen runes. Kept tight
+// because Status updates with multi-KB error blobs (e.g. full DSP
+// JSON error responses) eat etcd quota and crowd `oc describe`.
+func truncateMsg(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
 }
 
 // SetupWithManager wires the controller.
