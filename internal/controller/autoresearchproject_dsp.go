@@ -278,6 +278,91 @@ func extractRoundFromRunID(runID, projectName string) int32 {
 	return int32(n)
 }
 
+// deriveQuayPushDestination builds the full OCI URI the trainer
+// pushes the adapter to for a given round. Honors spec.adapterStorage
+// overrides; auto-derives the rest from project metadata.
+//
+// Default registry: the cluster's internal Quay route (the same one
+// our operator + trainer images already live in — verified via the
+// `quay-quay-quay-test.apps.salamander.aimlworkbench.com` hostname
+// across all the .tekton pipeline output-image refs).
+//
+// Default repository: "<namespace>-<projectName>" — uses a dash
+// (Quay disallows slashes inside a repo path component) so multi-
+// project namespaces stay collision-free.
+//
+// Default tag: "round-<N>" — deterministic per round so re-runs
+// overwrite the previous attempt's adapter for the same round.
+//
+// Returns "" when adapter persistence is intentionally disabled
+// (no spec.adapterStorage + no default Quay reachable) so the
+// trainer's "skip push when destination is empty" path kicks in.
+func deriveQuayPushDestination(p *agentofficev1alpha1.AutoResearchProject, round int) string {
+	defaultRegistry := "quay-quay-quay-test.apps.salamander.aimlworkbench.com"
+	defaultRepo := fmt.Sprintf("%s-%s", p.Namespace, p.Name)
+	defaultTag := fmt.Sprintf("round-%d", round)
+
+	registry := defaultRegistry
+	repo := defaultRepo
+	tag := defaultTag
+
+	if p.Spec.AdapterStorage != nil && p.Spec.AdapterStorage.Quay != nil {
+		q := p.Spec.AdapterStorage.Quay
+		if q.Registry != "" {
+			registry = q.Registry
+		}
+		if q.Repository != "" {
+			repo = q.Repository
+		}
+		if q.TagPattern != "" {
+			// Templated tag substitution: only "{{.Round}}" is
+			// currently honored. Add more substitutions as
+			// users ask for them.
+			tag = strings.ReplaceAll(q.TagPattern, "{{.Round}}", fmt.Sprintf("%d", round))
+		}
+	}
+	return fmt.Sprintf("%s/%s:%s", registry, repo, tag)
+}
+
+// deriveModelRegistryTarget returns the (URL, RegisteredModel name)
+// pair the trainer should register its ModelVersion against.
+// Auto-discovers the cluster's default ModelRegistry instance via
+// the in-cluster service when no override is given.
+//
+// Returns ("", "") when no Model Registry is reachable / configured
+// — trainer's "skip registration when URL empty" path then no-ops.
+func deriveModelRegistryTarget(ctx context.Context, c client.Client, p *agentofficev1alpha1.AutoResearchProject) (url, name string) {
+	defaultInstance := "default-modelregistry"
+	defaultRegistryNS := "rhoai-model-registries"
+
+	instance := defaultInstance
+	regName := p.Name
+	if p.Spec.AdapterStorage != nil && p.Spec.AdapterStorage.ModelRegistry != nil {
+		mr := p.Spec.AdapterStorage.ModelRegistry
+		if mr.RegistryInstance != "" {
+			instance = mr.RegistryInstance
+		}
+		if mr.Name != "" {
+			regName = mr.Name
+		}
+	}
+
+	// Look up the Service the ModelRegistry instance exposes for
+	// REST. RHOAI's operator names it "<instance>-rest" in the
+	// rhoai-model-registries namespace.
+	var svc corev1.Service
+	if err := c.Get(ctx, types.NamespacedName{
+		Namespace: defaultRegistryNS,
+		Name:      instance + "-rest",
+	}, &svc); err != nil {
+		// Fallback: no service → skip registration this round.
+		// Don't fail the whole training — adapter still pushes
+		// to Quay, just no MR record. The next reconcile retries.
+		return "", regName
+	}
+	return fmt.Sprintf("https://%s.%s.svc.cluster.local:8443", svc.Name, svc.Namespace), regName
+}
+
 // submitDSPRun creates a kfp Run for one experiment cycle. The
 // operator calls this instead of submitTrainerJob when DSP
 // integration is active (v0.0.2 default).
@@ -308,6 +393,13 @@ func (r *AutoResearchProjectReconciler) submitDSPRun(ctx context.Context, p *age
 		sampleCount = 200
 	}
 
+	// Adapter storage destinations — auto-derived from project
+	// metadata when spec.adapterStorage is omitted or has empty
+	// fields. Workshop attendees don't have to specify any of
+	// this; team leads can override per project.
+	quayDest := deriveQuayPushDestination(p, round)
+	mrURL, mrName := deriveModelRegistryTarget(ctx, r.Client, p)
+
 	params := map[string]any{
 		"base_model":              p.Spec.BaseModel.HuggingfaceID,
 		"base_model_revision":     defaultIfEmpty(p.Spec.BaseModel.Revision, "main"),
@@ -320,6 +412,10 @@ func (r *AutoResearchProjectReconciler) submitDSPRun(ctx context.Context, p *age
 		"autoresearch_project":    p.Name,
 		"autoresearch_round":      round,
 		"autoresearch_run_id":     runID,
+		// New in v0.0.43: adapter persistence + registration.
+		"adapter_push_destination": quayDest,
+		"model_registry_url":       mrURL,
+		"model_registry_name":      mrName,
 	}
 
 	run, err := dspClient.CreateRun(ctx, runID, experimentID, pipelineID, params)

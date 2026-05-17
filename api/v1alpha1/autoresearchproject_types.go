@@ -294,6 +294,92 @@ type AutoResearchProjectSpec struct {
 	// heuristics. Flip to false for production runs.
 	// +optional
 	ValidationMode bool `json:"validationMode,omitempty"`
+
+	// AdapterStorage configures where the trainer pushes the
+	// fine-tuned LoRA adapter weights after each round, and
+	// how the operator registers them for serving. When omitted,
+	// the operator auto-derives sensible defaults from the
+	// project's namespace + name so attendees don't have to
+	// specify anything for the common case.
+	// +optional
+	AdapterStorage *AutoResearchAdapterStorage `json:"adapterStorage,omitempty"`
+}
+
+// AutoResearchAdapterStorage describes the two-layer adapter
+// storage path the operator wires up per project:
+//
+//  1. Quay (OCI registry) — the trainer pushes the adapter
+//     directory as an OCI artifact each round. Quay holds the
+//     actual weight bytes and supports tag-based aliasing
+//     (e.g. ":best" updated when a new round wins).
+//  2. RHOAI Model Registry — the operator registers each
+//     ModelVersion with a URI pointing at the Quay artifact,
+//     plus eval metrics + the QLoRA config as metadata. This
+//     is the surface the dashboard exposes for governance,
+//     lineage tracking, and one-click deploy-to-vLLM.
+//
+// All fields are optional. When the whole struct is omitted (or
+// any sub-field is blank), the operator auto-derives. Workshop
+// attendees never have to fill any of this in.
+type AutoResearchAdapterStorage struct {
+	// Quay describes where the trainer pushes adapter weights.
+	// +optional
+	Quay *AutoResearchAdapterQuay `json:"quay,omitempty"`
+
+	// ModelRegistry describes how the operator registers each
+	// adapter as a ModelVersion in RHOAI Model Registry.
+	// +optional
+	ModelRegistry *AutoResearchAdapterModelRegistry `json:"modelRegistry,omitempty"`
+}
+
+// AutoResearchAdapterQuay is the OCI push target. The operator
+// fills empty fields from project metadata.
+type AutoResearchAdapterQuay struct {
+	// Repository is the Quay repo path the adapter pushes to.
+	// Format: "<org-or-user>/<repo-name>". When empty, the
+	// operator derives "<namespace>-<projectName>" against the
+	// cluster's internal Quay.
+	// +optional
+	Repository string `json:"repository,omitempty"`
+
+	// Registry is the OCI registry hostname. When empty,
+	// defaults to the cluster's internal Quay route.
+	// +optional
+	Registry string `json:"registry,omitempty"`
+
+	// TagPattern is a Go-template-style tag generated per
+	// round. Default: "round-{{.Round}}". The substitution
+	// happens in the operator; trainer just receives the
+	// final tag in its pipeline params.
+	// +optional
+	TagPattern string `json:"tagPattern,omitempty"`
+
+	// BestTag is the moving alias updated to point at whichever
+	// round has the current best eval metric. The operator
+	// re-tags Quay after every kept run. Workshops can use
+	// this tag in vLLM ModelCar configs to always serve the
+	// current best. Default: "best".
+	// +optional
+	BestTag string `json:"bestTag,omitempty"`
+}
+
+// AutoResearchAdapterModelRegistry configures RHOAI Model
+// Registry registration. The operator handles the create-or-
+// update of the RegisteredModel + ModelVersion records.
+type AutoResearchAdapterModelRegistry struct {
+	// Name of the RegisteredModel record. When empty, the
+	// operator derives from "<projectName>" so each project
+	// gets a single RegisteredModel with multiple ModelVersions
+	// (one per round).
+	// +optional
+	Name string `json:"name,omitempty"`
+
+	// RegistryInstance is the name of the ModelRegistry CR
+	// in rhoai-model-registries to register against. Defaults
+	// to "default-modelregistry" — the instance RHOAI ships
+	// out of the box.
+	// +optional
+	RegistryInstance string `json:"registryInstance,omitempty"`
 }
 
 // AutoResearchExperimentRecord is a single run's summary kept in

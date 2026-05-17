@@ -85,6 +85,67 @@ spec:
               AutoResearchProjectSpec defines the desired state — what to
               research, with whom, against what target, under what limits.
             properties:
+              adapterStorage:
+                description: |-
+                  AdapterStorage configures where the trainer pushes the
+                  fine-tuned LoRA adapter weights after each round, and
+                  how the operator registers them for serving. When omitted,
+                  the operator auto-derives sensible defaults from the
+                  project's namespace + name so attendees don't have to
+                  specify anything for the common case.
+                properties:
+                  modelRegistry:
+                    description: |-
+                      ModelRegistry describes how the operator registers each
+                      adapter as a ModelVersion in RHOAI Model Registry.
+                    properties:
+                      name:
+                        description: |-
+                          Name of the RegisteredModel record. When empty, the
+                          operator derives from "<projectName>" so each project
+                          gets a single RegisteredModel with multiple ModelVersions
+                          (one per round).
+                        type: string
+                      registryInstance:
+                        description: |-
+                          RegistryInstance is the name of the ModelRegistry CR
+                          in rhoai-model-registries to register against. Defaults
+                          to "default-modelregistry" — the instance RHOAI ships
+                          out of the box.
+                        type: string
+                    type: object
+                  quay:
+                    description: Quay describes where the trainer pushes adapter weights.
+                    properties:
+                      bestTag:
+                        description: |-
+                          BestTag is the moving alias updated to point at whichever
+                          round has the current best eval metric. The operator
+                          re-tags Quay after every kept run. Workshops can use
+                          this tag in vLLM ModelCar configs to always serve the
+                          current best. Default: "best".
+                        type: string
+                      registry:
+                        description: |-
+                          Registry is the OCI registry hostname. When empty,
+                          defaults to the cluster's internal Quay route.
+                        type: string
+                      repository:
+                        description: |-
+                          Repository is the Quay repo path the adapter pushes to.
+                          Format: "<org-or-user>/<repo-name>". When empty, the
+                          operator derives "<namespace>-<projectName>" against the
+                          cluster's internal Quay.
+                        type: string
+                      tagPattern:
+                        description: |-
+                          TagPattern is a Go-template-style tag generated per
+                          round. Default: "round-{{.Round}}". The substitution
+                          happens in the operator; trainer just receives the
+                          final tag in its pipeline params.
+                        type: string
+                    type: object
+                type: object
               baseModel:
                 description: BaseModel the QLoRA adapters fine-tune.
                 properties:

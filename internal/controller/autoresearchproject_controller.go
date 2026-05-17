@@ -75,7 +75,7 @@ const (
 	autoResearchProjectLabel    = "agentoffice.ai/autoresearch-project"
 	autoResearchRoundAnnotation = "agentoffice.ai/autoresearch-round"
 
-	defaultTrainerImage = "quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/autoresearch-trainer:v0.0.10"
+	defaultTrainerImage = "quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/autoresearch-trainer:v0.0.11"
 
 	maxRecentRunsRetained = 20
 )
@@ -538,9 +538,16 @@ func (r *AutoResearchProjectReconciler) drainOpenJobs(ctx context.Context, p *ag
 		}
 		completed = true
 		var evalLoss float64
+		var adapterURI string
 		var kept bool
 		if run.State == "SUCCEEDED" {
-			evalLoss = r.readEvalLossFromDSPRun(ctx, p, run)
+			// v0.0.43: fetch the full trainer result so we
+			// can record adapter_uri + model_version_id in
+			// status.recentRuns, not just eval_loss.
+			if full := r.readFullResultFromDSPRun(ctx, p, run); full != nil {
+				evalLoss = full.EvalLoss
+				adapterURI = full.AdapterURI
+			}
 			kept = isImprovement(p, evalLoss)
 		}
 		now := metav1.Now()
@@ -551,6 +558,9 @@ func (r *AutoResearchProjectReconciler) drainOpenJobs(ctx context.Context, p *ag
 			if run.State == "SUCCEEDED" {
 				p.Status.RecentRuns[i].EvalLoss = fmt.Sprintf("%.6f", evalLoss)
 				p.Status.RecentRuns[i].Kept = &kept
+				if adapterURI != "" {
+					p.Status.RecentRuns[i].AdapterArtifactURI = adapterURI
+				}
 			} else {
 				// State on failure becomes the "kept" string
 				// so the UI shows what happened. Use a false
@@ -629,6 +639,31 @@ func (r *AutoResearchProjectReconciler) readEvalLossFromDSPRun(ctx context.Conte
 	return 0
 }
 
+// readFullResultFromDSPRun is the v0.0.43 cousin of the eval-only
+// reader. Same pod-discovery logic, but returns the structured
+// autoresearchResult (with adapter_uri, model_version_id) so the
+// drain can record them in status.recentRuns[].
+func (r *AutoResearchProjectReconciler) readFullResultFromDSPRun(ctx context.Context, p *agentofficev1alpha1.AutoResearchProject, run *dsp.Run) *autoresearchResult {
+	pods := &corev1.PodList{}
+	if err := r.List(ctx, pods,
+		client.InNamespace(p.Namespace),
+		client.MatchingLabels{"pipeline/runid": run.RunID},
+	); err != nil {
+		return nil
+	}
+	for _, pod := range pods.Items {
+		if !strings.Contains(pod.Name, "container-impl") {
+			continue
+		}
+		res, err := r.parseTrainerResultFullByPodName(ctx, pod.Namespace, pod.Name)
+		if err != nil {
+			continue
+		}
+		return res
+	}
+	return nil
+}
+
 // parseTrainerResultByPodName reads pod logs by exact pod name
 // (no label selector). Different from parseTrainerResult which
 // finds the pod via the Job's experiment-label — kfp pods don't
@@ -666,18 +701,72 @@ func (r *AutoResearchProjectReconciler) parseTrainerResultByPodName(ctx context.
 	if lastResult == "" {
 		return 0, fmt.Errorf("no AUTORESEARCH_RESULT= line")
 	}
-	var payload struct {
-		Status   string  `json:"status"`
-		EvalLoss float64 `json:"eval_loss"`
-		Error    string  `json:"error,omitempty"`
-	}
-	if err := json.Unmarshal([]byte(lastResult), &payload); err != nil {
+	res, err := parseAutoresearchResult(lastResult)
+	if err != nil {
 		return 0, err
 	}
-	if payload.Status != "ok" {
-		return 0, fmt.Errorf("trainer error: %s", payload.Error)
+	return res.EvalLoss, nil
+}
+
+// autoresearchResult is the structured result the trainer's stdout
+// AUTORESEARCH_RESULT={...} line is parsed into. v0.0.43 added
+// adapter_uri + model_version_id for the Quay + Model Registry
+// persistence path.
+type autoresearchResult struct {
+	Status         string  `json:"status"`
+	EvalLoss       float64 `json:"eval_loss"`
+	Error          string  `json:"error,omitempty"`
+	AdapterURI     string  `json:"adapter_uri,omitempty"`
+	ModelVersionID string  `json:"model_version_id,omitempty"`
+}
+
+// parseAutoresearchResult unmarshals + validates the trainer's
+// AUTORESEARCH_RESULT= JSON payload. Returns an error for non-ok
+// status so callers can treat trainer-emitted errors as failures.
+func parseAutoresearchResult(payload string) (*autoresearchResult, error) {
+	var res autoresearchResult
+	if err := json.Unmarshal([]byte(payload), &res); err != nil {
+		return nil, err
 	}
-	return payload.EvalLoss, nil
+	if res.Status != "ok" {
+		return nil, fmt.Errorf("trainer error: %s", res.Error)
+	}
+	return &res, nil
+}
+
+// parseTrainerResultFullByPodName is the richer cousin of
+// parseTrainerResultByPodName — returns the full autoresearchResult
+// instead of just the eval_loss. Used by the drain path to record
+// adapter_uri + model_version_id alongside eval_loss in status.
+func (r *AutoResearchProjectReconciler) parseTrainerResultFullByPodName(ctx context.Context, namespace, podName string) (*autoresearchResult, error) {
+	if r.RestConfig == nil {
+		return nil, fmt.Errorf("RestConfig nil; cannot read pod logs")
+	}
+	cs, err := kubernetes.NewForConfig(r.RestConfig)
+	if err != nil {
+		return nil, err
+	}
+	logReq := cs.CoreV1().Pods(namespace).GetLogs(podName, &corev1.PodLogOptions{
+		Container: "main",
+	})
+	stream, err := logReq.Stream(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer stream.Close()
+	var lastResult string
+	scanner := bufio.NewScanner(stream)
+	scanner.Buffer(make([]byte, 1024*1024), 8*1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if idx := strings.Index(line, "AUTORESEARCH_RESULT="); idx != -1 {
+			lastResult = line[idx+len("AUTORESEARCH_RESULT="):]
+		}
+	}
+	if lastResult == "" {
+		return nil, fmt.Errorf("no AUTORESEARCH_RESULT= line")
+	}
+	return parseAutoresearchResult(lastResult)
 }
 
 // parseTrainerResult reads the trainer Job's pod logs and

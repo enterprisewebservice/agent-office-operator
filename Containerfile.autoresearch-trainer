@@ -103,7 +103,17 @@ RUN pip install --no-cache-dir \
         'safetensors' \
         'pyyaml' \
         'huggingface_hub' \
-        'evaluate>=0.4'
+        'evaluate>=0.4' \
+        'model-registry>=0.2,<1'
+
+# oras CLI for pushing the LoRA adapter directory to Quay as an OCI
+# artifact. Small (~10 MB), single-binary download — much lighter
+# than the python ORAS client and works without any python deps so
+# we can also invoke it from a shell entrypoint if needed.
+ARG ORAS_VERSION=1.2.0
+RUN curl -sSL "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_amd64.tar.gz" \
+        | tar -xz -C /usr/local/bin oras \
+    && oras version
 
 # Trainer entrypoint baked in. The operator's Job spec invokes
 # `python /opt/autoresearch/run.py` and passes the agent's

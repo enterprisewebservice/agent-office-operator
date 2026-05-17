@@ -41,7 +41,7 @@ spec:
       # (e.g. major training-hub bump). AutoResearchProject CRs
       # reference this tag explicitly in spec.trainer.image so they
       # don't get surprised by ":latest" drift.
-      value: 'quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/autoresearch-trainer:v0.0.10'
+      value: 'quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/autoresearch-trainer:v0.0.11'
     - name: dockerfile
       value: Containerfile.autoresearch-trainer
     - name: path-context

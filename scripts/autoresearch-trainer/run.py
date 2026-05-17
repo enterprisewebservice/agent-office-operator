@@ -64,7 +64,116 @@ def _parse_args() -> argparse.Namespace:
     # When set we emit the metrics file kfp expects so values
     # show up in OpenShift AI's Experiments UI as sortable columns.
     p.add_argument("--metrics-output-path", default=os.environ.get("METRICS_OUTPUT_PATH"))
+    # Adapter persistence destinations passed by the operator.
+    # All are optional — if any is empty the corresponding push
+    # step is skipped (graceful degradation for dev/testing).
+    p.add_argument("--adapter-push-destination", default=os.environ.get("ADAPTER_PUSH_DESTINATION", ""))
+    p.add_argument("--model-registry-url", default=os.environ.get("MODEL_REGISTRY_URL", ""))
+    p.add_argument("--model-registry-name", default=os.environ.get("MODEL_REGISTRY_NAME", ""))
+    p.add_argument("--model-registry-author", default=os.environ.get("MODEL_REGISTRY_AUTHOR", "autoresearch-operator"))
     return p.parse_args()
+
+
+def _push_adapter_to_quay(adapter_path: str, destination: str) -> str:
+    """oras push <adapter_path>/ to the given OCI destination.
+    Returns the full OCI URI on success. Raises on failure.
+
+    Uses the docker config at /var/run/secrets/quay-push/config.json
+    if present (mounted by the operator's pipeline pod spec). Falls
+    back to the standard ~/.docker/config.json otherwise.
+    """
+    import subprocess
+    env = os.environ.copy()
+    pushsecret_dir = "/var/run/secrets/quay-push"
+    if os.path.isdir(pushsecret_dir):
+        env["DOCKER_CONFIG"] = pushsecret_dir
+    # oras push <dest> --artifact-type application/vnd.peft.lora.v1+tar <files...>
+    # We push the directory contents (oras handles tarring the dir
+    # listing). Layer media type identifies our format so consumers
+    # know it's a PEFT/LoRA adapter, not a generic blob.
+    cmd = [
+        "oras", "push", destination,
+        "--artifact-type", "application/vnd.peft.lora.v1",
+        # Push the whole adapter directory as one layer. oras will
+        # walk the dir and pack it into the OCI artifact.
+        f"{adapter_path}:application/vnd.peft.lora.dir+tar",
+    ]
+    emit_progress(f"oras push: {' '.join(cmd)}")
+    result = subprocess.run(cmd, env=env, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"oras push failed (rc={result.returncode}): "
+            f"stdout={result.stdout[-500:]} stderr={result.stderr[-500:]}"
+        )
+    return destination
+
+
+def _register_in_model_registry(
+    *,
+    registry_url: str,
+    model_name: str,
+    author: str,
+    adapter_uri: str,
+    version: str,
+    eval_loss: float,
+    cfg: dict,
+) -> str:
+    """Register the just-pushed adapter as a ModelVersion in RHOAI
+    Model Registry. Returns the version ID on success.
+
+    Uses the model-registry Python client. Authentication via the
+    pod's SA token at the standard mount path — the operator's SA
+    needs Model Registry user/editor permission via RoleBinding.
+    """
+    from model_registry import ModelRegistry
+
+    # SA token (mounted by every pod by default)
+    token_path = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+    with open(token_path) as f:
+        token = f.read().strip()
+
+    # registry_url shape: https://<service>.<ns>.svc.cluster.local:443
+    # ModelRegistry client wants host (no scheme) + port separately.
+    from urllib.parse import urlparse
+    parsed = urlparse(registry_url)
+    host = parsed.hostname
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    secure = parsed.scheme == "https"
+
+    mr = ModelRegistry(
+        server_address=host,
+        port=port,
+        author=author,
+        is_secure=secure,
+        user_token=token,
+    )
+    # register_model is idempotent on the model name + version; if
+    # the version already exists it returns the existing one.
+    registered = mr.register_model(
+        name=model_name,
+        uri=adapter_uri,
+        version=version,
+        model_format_name="peft-lora",
+        model_format_version="v1",
+        storage_key="quay-oci",
+        storage_path=adapter_uri,
+        description=f"Round {cfg.get('round', '?')} of autoresearch loop",
+        metadata={
+            "eval_loss": str(eval_loss),
+            "lora_rank": str(cfg.get("lora_rank", "?")),
+            "lora_alpha": str(cfg.get("lora_alpha", "?")),
+            "learning_rate": str(cfg.get("learning_rate", "?")),
+            "training_steps": str(cfg.get("num_training_steps", "?")),
+        },
+    )
+    # Different model-registry client versions return either a
+    # RegisteredModel obj or a ModelVersion. Handle both.
+    version_id = (
+        getattr(registered, "id", None)
+        or getattr(registered, "model_version_id", None)
+        or ""
+    )
+    return str(version_id)
 
 
 def _emit_kfp_metrics(path: str, metrics: dict) -> None:
@@ -300,15 +409,56 @@ def main() -> int:
         eval_loss = float(eval_result.get("eval_loss", float("nan")))
         emit_progress(f"eval_loss={eval_loss}")
 
-        # Save adapter — kept variants get this artifact copied
-        # somewhere durable by the operator/pipeline. v0.0.1
-        # writes to PVC; v0.0.2 will push to MinIO via DSP.
+        # Save adapter to pod-local first, then push to durable
+        # storage. The pod-local path is ephemeral — its purpose
+        # is to give save_pretrained() somewhere to land. The
+        # subsequent Quay push + Model Registry registration
+        # below is what makes the adapter actually persistent.
         adapter_path = f"{output_dir}/adapter"
         trainer.model.save_pretrained(adapter_path)
         emit_progress(f"adapter saved to {adapter_path}")
     except Exception as e:
         emit_result({"status": "error", "stage": "train", "error": str(e), "trace": traceback.format_exc()})
         return 1
+
+    # Push adapter to Quay (OCI artifact) + register in Model
+    # Registry. Both steps are best-effort and log failures —
+    # we don't want to lose a successful 30-min training run
+    # because of an auth or networking blip in the persistence
+    # phase. Operator sees adapter_uri/model_version_id missing
+    # in AUTORESEARCH_RESULT and marks the round "stored=false".
+    adapter_uri = ""
+    model_version_id = ""
+    if cli.adapter_push_destination:
+        try:
+            emit_progress(f"pushing adapter to {cli.adapter_push_destination}")
+            adapter_uri = _push_adapter_to_quay(adapter_path, cli.adapter_push_destination)
+            emit_progress(f"adapter pushed: {adapter_uri}")
+        except Exception as e:
+            emit_progress(f"WARN adapter push failed: {e}")
+    else:
+        emit_progress("adapter push skipped (no --adapter-push-destination)")
+
+    if adapter_uri and cli.model_registry_url and cli.model_registry_name:
+        try:
+            version = f"round-{cfg.get('round', round_num)}"
+            emit_progress(f"registering version={version} in Model Registry {cli.model_registry_url}")
+            model_version_id = _register_in_model_registry(
+                registry_url=cli.model_registry_url,
+                model_name=cli.model_registry_name,
+                author=cli.model_registry_author,
+                adapter_uri=adapter_uri,
+                version=version,
+                eval_loss=eval_loss,
+                cfg=cfg,
+            )
+            emit_progress(f"Model Registry version_id={model_version_id}")
+        except Exception as e:
+            emit_progress(f"WARN model registry registration failed: {e}")
+    elif not adapter_uri:
+        emit_progress("model registry registration skipped (no adapter_uri)")
+    else:
+        emit_progress("model registry registration skipped (no --model-registry-url/--model-registry-name)")
 
     elapsed = time.time() - started
 
@@ -333,6 +483,8 @@ def main() -> int:
         "run_id": run_id,
         "eval_loss": eval_loss,
         "adapter_path": adapter_path,
+        "adapter_uri": adapter_uri,
+        "model_version_id": model_version_id,
         "elapsed_seconds": round(elapsed, 1),
         "config": cfg,
     })
