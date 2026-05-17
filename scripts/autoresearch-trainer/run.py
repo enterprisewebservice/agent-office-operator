@@ -74,40 +74,102 @@ def _parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _materialize_quay_credentials() -> str | None:
+    """Find or fetch a dockerconfigjson the local oras CLI can use.
+
+    Discovery order:
+      1. /var/run/secrets/quay-push/.dockerconfigjson — file mounted
+         by the pod spec (preferred path when the pipeline pod is
+         rendered with a kfp `secretAsVolume` platform-config block).
+      2. /var/run/secrets/quay-push/config.json — same idea, renamed.
+      3. Runtime fetch via the in-pod SA token: GET Secret/quay-push-secret
+         in the trainer pod's own namespace, base64-decode the
+         `.dockerconfigjson` value, write it to /tmp/auth/config.json
+         with mode 0600. The DSP-managed `pipeline-runner-dspa` role
+         already has `get,list` on `secrets`, so no extra RBAC is
+         needed. This path lets us push adapters without depending on
+         the `platforms.kubernetes.secretAsVolume` block that RHOAI
+         3.3.1's DSP kfp-server rejects with "unknown template
+         format: pipeline spec is invalid" (see internal/controller/
+         pipeline.yaml comment).
+      4. Give up — oras falls back to ~/.docker/config.json (which
+         is usually empty in a pipeline pod).
+
+    Returns the absolute path to use as `--registry-config`, or None
+    if nothing was found / runtime fetch failed (caller logs and
+    proceeds with the bare oras CLI).
+    """
+    import base64
+    import urllib.request
+    import ssl
+    for c in (
+        "/var/run/secrets/quay-push/.dockerconfigjson",
+        "/var/run/secrets/quay-push/config.json",
+    ):
+        if os.path.exists(c):
+            emit_progress(f"oras using mounted auth file: {c}")
+            return c
+    # Runtime fetch from the K8s API.
+    try:
+        token_path = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+        ns_path = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+        ca_path = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+        if not (os.path.exists(token_path) and os.path.exists(ns_path)):
+            emit_progress("no SA token mounted; skipping runtime secret fetch")
+            return None
+        with open(token_path) as f:
+            token = f.read().strip()
+        with open(ns_path) as f:
+            ns = f.read().strip()
+        # In-cluster API server is reachable via the well-known hostname.
+        url = f"https://kubernetes.default.svc/api/v1/namespaces/{ns}/secrets/quay-push-secret"
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+        ctx = ssl.create_default_context(cafile=ca_path) if os.path.exists(ca_path) else ssl.create_default_context()
+        with urllib.request.urlopen(req, context=ctx, timeout=10) as resp:
+            payload = json.loads(resp.read())
+        encoded = payload.get("data", {}).get(".dockerconfigjson")
+        if not encoded:
+            emit_progress("quay-push-secret has no .dockerconfigjson data key; skipping")
+            return None
+        raw = base64.b64decode(encoded)
+        out_dir = "/tmp/auth"
+        os.makedirs(out_dir, mode=0o700, exist_ok=True)
+        out_path = os.path.join(out_dir, "config.json")
+        with open(out_path, "wb") as f:
+            f.write(raw)
+        os.chmod(out_path, 0o600)
+        emit_progress(f"oras using runtime-fetched auth file: {out_path} (from Secret/{ns}/quay-push-secret)")
+        return out_path
+    except Exception as e:  # noqa: BLE001 — graceful degradation
+        emit_progress(f"WARN runtime fetch of quay-push-secret failed: {e}")
+        return None
+
+
 def _push_adapter_to_quay(adapter_path: str, destination: str) -> str:
     """oras push <adapter_path>/ to the given OCI destination.
     Returns the full OCI URI on success. Raises on failure.
 
-    Credentials discovery order:
-      1. /var/run/secrets/quay-push/.dockerconfigjson — Kubernetes
-         Secret of type kubernetes.io/dockerconfigjson mounted into
-         the pod. This is what the operator will arrange once the
-         pipeline pod spec gains a volume mount for quay-push-secret.
-      2. /var/run/secrets/quay-push/config.json — fallback for
-         pre-renamed mounts.
-      3. ~/.docker/config.json — the default oras lookup.
-
-    The first existing file becomes oras's --registry-config.
+    Auth resolution is delegated to _materialize_quay_credentials().
     """
     import subprocess
+    auth_file = _materialize_quay_credentials()
     cmd = ["oras", "push", destination,
            "--artifact-type", "application/vnd.peft.lora.v1"]
-    auth_candidates = [
-        "/var/run/secrets/quay-push/.dockerconfigjson",
-        "/var/run/secrets/quay-push/config.json",
-    ]
-    for c in auth_candidates:
-        if os.path.exists(c):
-            cmd.extend(["--registry-config", c])
-            emit_progress(f"oras using auth file: {c}")
-            break
+    if auth_file:
+        cmd.extend(["--registry-config", auth_file])
     else:
-        emit_progress("oras using default ~/.docker/config.json (no quay-push-secret mounted)")
-    # Push the whole adapter directory as one layer. oras will
-    # walk the dir and pack it into the OCI artifact.
-    cmd.append(f"{adapter_path}:application/vnd.peft.lora.dir+tar")
-    emit_progress(f"oras push: {' '.join(cmd)}")
-    result = subprocess.run(cmd, capture_output=True, text=True)
+        emit_progress("oras using default ~/.docker/config.json (no quay-push auth resolved)")
+    # IMPORTANT: oras 1.x rejects absolute paths in the push args with
+    # "absolute file path detected ... use --disable-path-validation".
+    # The clean fix is to cd into the parent dir and push the basename
+    # so oras only sees a relative path. Avoids needing the escape-hatch
+    # flag and produces a saner OCI manifest (file name in the
+    # annotation is just the directory leaf, not the whole host path).
+    parent = os.path.dirname(os.path.abspath(adapter_path)) or "."
+    leaf = os.path.basename(os.path.abspath(adapter_path))
+    cmd.append(f"{leaf}:application/vnd.peft.lora.dir+tar")
+    emit_progress(f"oras push (cwd={parent}): {' '.join(cmd)}")
+    result = subprocess.run(cmd, capture_output=True, text=True, cwd=parent)
     if result.returncode != 0:
         raise RuntimeError(
             f"oras push failed (rc={result.returncode}): "

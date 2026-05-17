@@ -90,7 +90,7 @@ deploymentSpec:
         command:
         - python
         - /opt/autoresearch/run.py
-        image: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/autoresearch-trainer:v0.0.12
+        image: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/autoresearch-trainer:v0.0.13
         resources:
           accelerator:
             count: '1'
