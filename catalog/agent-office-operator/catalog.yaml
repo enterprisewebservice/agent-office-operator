@@ -28,6 +28,14 @@ description: |
   detail page in OpenShift Console.
 
 ---
+schema: olm.channel
+package: agent-office-operator
+name: alpha
+entries:
+  - name: agent-office-operator.v0.0.46
+    replaces: agent-office-operator.v0.0.42
+    skipRange: ">=0.0.1 <0.0.46"
+
 ---
 image: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-operator-bundle:v0.0.46
 name: agent-office-operator.v0.0.46
