@@ -334,7 +334,14 @@ func extractRoundFromRunID(runID, projectName string) int32 {
 // trainer's "skip push when destination is empty" path kicks in.
 func deriveQuayPushDestination(p *agentofficev1alpha1.AutoResearchProject, round int) string {
 	defaultRegistry := "quay-quay-quay-test.apps.salamander.aimlworkbench.com"
-	defaultRepo := fmt.Sprintf("%s-%s", p.Namespace, p.Name)
+	// IMPORTANT: Quay rejects pushes with no namespace component
+	// (the path before the first /) with a 401 from the registry
+	// API even when the robot's auth is valid. The trainer +
+	// operator images all live under the "deanpeterson" Quay
+	// namespace on this cluster, so we default adapter pushes
+	// there too. Override per-project via spec.adapterStorage.quay.
+	defaultNamespace := "deanpeterson"
+	defaultRepo := fmt.Sprintf("%s/%s-%s", defaultNamespace, p.Namespace, p.Name)
 	defaultTag := fmt.Sprintf("round-%d", round)
 
 	registry := defaultRegistry
