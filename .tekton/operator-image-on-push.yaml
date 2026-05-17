@@ -27,7 +27,7 @@ spec:
       # the CatalogSource) detects digest changes behind this tag, so we
       # don't need ArgoCD Image Updater for the operator chain. Multiple
       # tags can be added later via Konflux's release pipeline.
-      value: 'quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-operator:v0.0.53'
+      value: 'quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-operator:v0.0.54'
     - name: dockerfile
       value: Dockerfile
     - name: path-context

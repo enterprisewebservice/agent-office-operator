@@ -469,6 +469,16 @@ git config --global user.name "Agent Office"
 git config --global pull.rebase true
 git config --global rebase.autoStash true
 
+# v0.0.54: declare the wiki directory safe. OpenShift random-UID
+# SCC assigns a different UID per pod, and the PVC directory may be
+# owned by a previous pod UID; git refuses with dubious ownership
+# otherwise. Adding the path here once (before any git invocation
+# against it) lets all subsequent ops succeed. Without this, init
+# block git remote add origin exits 128 silently because set -e
+# captures the failure mid-pipeline, and the only log line is the
+# misleading "fetch failed" message from the main loop.
+git config --global --add safe.directory "$WIKI_DIR"
+
 if [ -n "$GIT_TOKEN" ]; then
   # 'x-access-token' user works for fine-grained tokens; for
   # classic PATs the username can be anything non-empty.
