@@ -142,6 +142,18 @@ func (r *AutoResearchProjectReconciler) Reconcile(ctx context.Context, req ctrl.
 		}
 	}
 
+	// 1c. Periodically clean up orphaned MLMD Executions stuck
+	//     in RUNNING state. kfp v2's launcher doesn't always
+	//     close its Executions when a run dies mid-flight,
+	//     so the OpenShift AI dashboard's Pipelines/Executions
+	//     view fills with stale "Running" entries that aren't
+	//     actually running anywhere. Internal cooldown (10 min)
+	//     prevents hammering the DSP MariaDB. Errors logged
+	//     but never block the reconcile.
+	if _, mlmdErr := r.cleanupStaleMLMDExecutions(ctx, &project); mlmdErr != nil {
+		log.V(1).Info("mlmd janitor skipped this pass", "err", mlmdErr.Error())
+	}
+
 	// 2. Stop conditions.
 	if project.Status.ExperimentsRun >= int32(maxTotal) {
 		return r.markPhaseAndSave(ctx, &project, "Completed",

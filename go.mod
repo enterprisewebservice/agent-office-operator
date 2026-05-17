@@ -3,6 +3,7 @@ module github.com/enterprisewebservice/agent-office-operator
 go 1.24.0
 
 require (
+	github.com/go-sql-driver/mysql v1.10.0
 	github.com/onsi/ginkgo/v2 v2.22.0
 	github.com/onsi/gomega v1.36.1
 	k8s.io/api v0.33.0
@@ -13,6 +14,7 @@ require (
 
 require (
 	cel.dev/expr v0.19.1 // indirect
+	filippo.io/edwards25519 v1.2.0 // indirect
 	github.com/antlr4-go/antlr/v4 v4.13.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/blang/semver/v4 v4.0.0 // indirect
