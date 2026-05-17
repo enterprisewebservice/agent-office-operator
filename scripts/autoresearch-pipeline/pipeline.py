@@ -27,7 +27,7 @@ Compile:
   python pipeline.py     # writes pipeline.yaml in cwd
 """
 
-from kfp import dsl, compiler
+from kfp import dsl, compiler, kubernetes
 
 
 @dsl.container_component
@@ -100,6 +100,9 @@ def autoresearch_qlora_pipeline(
     autoresearch_project: str = "",
     autoresearch_round: int = 0,
     autoresearch_run_id: str = "",
+    adapter_push_destination: str = "",
+    model_registry_url: str = "",
+    model_registry_name: str = "",
 ):
     """One-step pipeline wrapping the AutoResearch trainer image."""
     step = train_qlora(
@@ -114,6 +117,9 @@ def autoresearch_qlora_pipeline(
         autoresearch_project=autoresearch_project,
         autoresearch_round=autoresearch_round,
         autoresearch_run_id=autoresearch_run_id,
+        adapter_push_destination=adapter_push_destination,
+        model_registry_url=model_registry_url,
+        model_registry_name=model_registry_name,
     )
     # GPU resource request. Single GPU per experiment in v0.0.2;
     # multi-GPU FSDP comes later (Phase 5 of the roadmap).
@@ -125,6 +131,17 @@ def autoresearch_qlora_pipeline(
     # Per-experiment timeout. 35 minutes covers cold image pull +
     # model download + 200-step training + eval at the 250W cap.
     step.set_caching_options(False)
+    # Mount the in-namespace `quay-push-secret` (created when the
+    # project namespace is bootstrapped) so the trainer's
+    # _push_adapter_to_quay() oras call has push credentials.
+    # `optional=True` keeps the pipeline runnable in namespaces
+    # without the secret — push just gracefully skips.
+    kubernetes.use_secret_as_volume(
+        step,
+        secret_name="quay-push-secret",
+        mount_path="/var/run/secrets/quay-push",
+        optional=True,
+    )
 
 
 if __name__ == "__main__":

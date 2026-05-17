@@ -15,6 +15,7 @@ metadata:
       && (
            "Containerfile.autoresearch-trainer".pathChanged()
            || ".tekton/autoresearch-trainer-on-push.yaml".pathChanged()
+           || "scripts/autoresearch-trainer/***".pathChanged()
          )
     # Cancel any in-flight build when a newer push lands. Without
     # this, rapid iteration produces 4-5 concurrent build pods all
@@ -41,7 +42,7 @@ spec:
       # (e.g. major training-hub bump). AutoResearchProject CRs
       # reference this tag explicitly in spec.trainer.image so they
       # don't get surprised by ":latest" drift.
-      value: 'quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/autoresearch-trainer:v0.0.11'
+      value: 'quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/autoresearch-trainer:v0.0.12'
     - name: dockerfile
       value: Containerfile.autoresearch-trainer
     - name: path-context
