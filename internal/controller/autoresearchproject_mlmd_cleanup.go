@@ -67,7 +67,24 @@ const (
 	// pathological state leaves thousands stuck. The next pass
 	// picks up the remainder.
 	mlmdMaxOrphansPerPass = 500
+
+	// Retention for FAILED Executions per type. Beyond this,
+	// older Failed Executions are deleted entirely from MLMD
+	// (including their ExecutionProperty/Event/Association rows)
+	// so the UI doesn't drown in historical failures from
+	// iteration. 10 is enough to spot a regression pattern,
+	// not enough to fill the page. SUCCEEDED Executions are
+	// kept indefinitely — they're real research history.
+	mlmdFailedRetention = 10
 )
+
+// mlmdPrunableTypes lists the Execution type names we GC. Limited
+// to kfp v2's standard pipeline-step types — we don't want to
+// touch any Executions another tool may have produced.
+var mlmdPrunableTypes = []string{
+	"system.DAGExecution",
+	"system.ContainerExecution",
+}
 
 // mlmdCleanupTracker tracks when we last ran the janitor per
 // namespace, so multiple AutoResearchProjects in the same ns
@@ -217,7 +234,120 @@ func (r *AutoResearchProjectReconciler) cleanupStaleMLMDExecutions(
 			"checkedRuns", len(runTerminal),
 			"ns", p.Namespace)
 	}
+
+	// Now also prune old FAILED Executions beyond the retention
+	// cap. This runs in the same DB connection / cooldown window
+	// as the orphan transition above, so we get both housekeeping
+	// passes for one cooldown's cost.
+	if pruned, perr := r.pruneOldFailedExecutions(dbCtx, db, p.Namespace); perr != nil {
+		log.Error(perr, "pruning old FAILED Executions (continuing)")
+	} else if pruned > 0 {
+		log.Info("mlmd janitor: pruned old FAILED Executions",
+			"rows", pruned, "ns", p.Namespace)
+		rowsAffected += pruned
+	}
 	return rowsAffected, nil
+}
+
+// pruneOldFailedExecutions deletes FAILED Executions beyond the
+// mlmdFailedRetention cap per Execution type. Removes their
+// dependent rows (ExecutionProperty, Association, Event,
+// EventPath) so MLMD's foreign-key invariants stay intact.
+//
+// Ordering matters: child tables first, then parent. Wrapped in
+// a transaction so a partial failure rolls back rather than
+// leaving inconsistent foreign-key references.
+//
+// Note: SUCCEEDED Executions (state=3) are NOT pruned. Those
+// represent successful research history users + the operator
+// reference for keep/revert + leaderboards.
+func (r *AutoResearchProjectReconciler) pruneOldFailedExecutions(
+	ctx context.Context,
+	db *sql.DB,
+	namespace string,
+) (int64, error) {
+	var totalPruned int64
+	for _, typeName := range mlmdPrunableTypes {
+		// Find IDs to delete: all FAILED Executions of this type
+		// except the most recent mlmdFailedRetention. Ordering
+		// by create_time_since_epoch DESC + OFFSET keeps the
+		// newest N and returns the rest.
+		rows, err := db.QueryContext(ctx, `
+			SELECT e.id
+			  FROM Execution e
+			  JOIN Type t ON e.type_id = t.id
+			 WHERE t.name = ?
+			   AND e.last_known_state = ?
+			 ORDER BY e.create_time_since_epoch DESC
+			 LIMIT 18446744073709551615 OFFSET ?
+		`, typeName, mlmdStateFailed, mlmdFailedRetention)
+		if err != nil {
+			return totalPruned, fmt.Errorf("select prune candidates (%s): %w", typeName, err)
+		}
+		var ids []int64
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return totalPruned, fmt.Errorf("scan prune id: %w", err)
+			}
+			ids = append(ids, id)
+		}
+		rows.Close()
+		if len(ids) == 0 {
+			continue
+		}
+
+		// Cascade-delete in dependent order, wrapped in a
+		// transaction. MLMD doesn't define DB-level cascades, so
+		// we walk the foreign-key relationships ourselves.
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return totalPruned, fmt.Errorf("begin tx (%s): %w", typeName, err)
+		}
+		placeholders := strings.Repeat("?,", len(ids))
+		placeholders = placeholders[:len(placeholders)-1]
+		args := make([]any, 0, len(ids))
+		for _, id := range ids {
+			args = append(args, id)
+		}
+
+		// Dependent tables, in safe-to-delete order:
+		//   EventPath → Event → Association → ExecutionProperty → Execution
+		deletes := []struct {
+			label string
+			query string
+		}{
+			{"EventPath", fmt.Sprintf(
+				`DELETE FROM EventPath WHERE event_id IN (
+				   SELECT id FROM Event WHERE execution_id IN (%s)
+				 )`, placeholders)},
+			{"Event", fmt.Sprintf(
+				`DELETE FROM Event WHERE execution_id IN (%s)`, placeholders)},
+			{"Association", fmt.Sprintf(
+				`DELETE FROM Association WHERE execution_id IN (%s)`, placeholders)},
+			{"ExecutionProperty", fmt.Sprintf(
+				`DELETE FROM ExecutionProperty WHERE execution_id IN (%s)`, placeholders)},
+			{"Execution", fmt.Sprintf(
+				`DELETE FROM Execution WHERE id IN (%s)`, placeholders)},
+		}
+		var typePruned int64
+		for _, d := range deletes {
+			res, derr := tx.ExecContext(ctx, d.query, args...)
+			if derr != nil {
+				_ = tx.Rollback()
+				return totalPruned, fmt.Errorf("prune %s (%s): %w", d.label, typeName, derr)
+			}
+			if d.label == "Execution" {
+				typePruned, _ = res.RowsAffected()
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return totalPruned, fmt.Errorf("commit prune tx (%s): %w", typeName, err)
+		}
+		totalPruned += typePruned
+	}
+	return totalPruned, nil
 }
 
 // mlmdDSN reads the DSP MariaDB credentials from the
