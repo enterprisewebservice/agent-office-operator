@@ -28,16 +28,23 @@ import (
 	agentofficev1alpha1 "github.com/enterprisewebservice/agent-office-operator/api/v1alpha1"
 )
 
-// MLMD (kfp v2's ML Metadata DB, stored in the DSP MariaDB) keeps
-// an Execution record per pipeline run + per step. When a run dies
-// mid-flight (Konflux build failure, crashed trainer, deleted run
-// record via the runs API), kfp's launcher doesn't always clean
-// up its Executions — they stay stuck `last_known_state = 2`
-// (RUNNING) in the DB. The OpenShift AI dashboard's Pipelines/
-// Executions view then shows them as still Running indefinitely.
+// kfp v2 keeps MLMD Execution records in the DSP MariaDB. When a
+// pipeline run dies mid-flight, kfp's launcher doesn't always
+// close its Executions — they stay `last_known_state = 2` (RUNNING)
+// indefinitely, polluting the OpenShift AI dashboard's Pipelines/
+// Executions view with stale entries.
 //
-// This file owns the periodic janitor that transitions those
-// orphans to FAILED so the UI matches reality.
+// This janitor cleans them up DETERMINISTICALLY: for each Execution
+// still marked RUNNING, look up the DSP run it belongs to. If DSP
+// itself reports that run as terminal (FAILED / SUCCEEDED /
+// CANCELED / SKIPPED) or the run is gone, the Execution is an
+// orphan and gets transitioned to FAILED. If DSP still has the run
+// alive, the Execution is left alone — never falsely killed.
+//
+// We discovered the schema linkage by inspection: each Execution
+// is associated (via the Association table) with a Context of
+// `system.PipelineRun` type, and that Context's name field equals
+// the DSP run UUID.
 
 const (
 	// MLMD state codes (from the ml-metadata schema).
@@ -49,25 +56,25 @@ const (
 	mlmdStateCached   = 5
 	mlmdStateCanceled = 6
 
-	// Skip Executions whose last_update_time_since_epoch is
-	// within this window — we don't want to mark an actively-
-	// running training pod's Execution as Failed. 20 min covers
-	// the longest plausible kfp gap between updates while still
-	// catching truly-dead orphans quickly.
-	mlmdStaleAfter = 20 * time.Minute
-
-	// Cooldown between cleanup passes per namespace. The cleanup
-	// itself is cheap (single UPDATE), but we don't need to run
-	// it more often than once per autoresearch cycle.
+	// Cooldown between cleanup passes per namespace. Reads the
+	// MariaDB + makes one DSP API call per stuck Execution; this
+	// is cheap, but doesn't need to run more often than once per
+	// autoresearch cycle.
 	mlmdCleanupCooldown = 10 * time.Minute
+
+	// Cap how many orphan candidates we check per pass — prevents
+	// the operator from blocking reconcile for minutes if some
+	// pathological state leaves thousands stuck. The next pass
+	// picks up the remainder.
+	mlmdMaxOrphansPerPass = 500
 )
 
-// mlmdCleanupState tracks when we last ran the janitor per
+// mlmdCleanupTracker tracks when we last ran the janitor per
 // namespace, so multiple AutoResearchProjects in the same ns
 // don't all hit the DB simultaneously.
 type mlmdCleanupTracker struct {
-	mu       sync.Mutex
-	lastRun  map[string]time.Time
+	mu      sync.Mutex
+	lastRun map[string]time.Time
 }
 
 var mlmdCleanups = &mlmdCleanupTracker{lastRun: map[string]time.Time{}}
@@ -83,18 +90,14 @@ func (t *mlmdCleanupTracker) shouldRun(namespace string) bool {
 	return true
 }
 
-// cleanupStaleMLMDExecutions transitions orphaned RUNNING
-// Executions in the project's DSP MariaDB to FAILED. Returns the
-// row count touched. Safe to call repeatedly — the cooldown above
-// prevents DB hammering, and the staleness window protects active
-// runs from being marked failed prematurely.
+// cleanupStaleMLMDExecutions deterministically transitions
+// orphaned RUNNING Executions to FAILED. Each candidate is
+// verified against DSP's actual run state before being touched.
+// Returns the row count actually transitioned.
 //
-// Why we connect to MariaDB directly rather than via the MLMD
-// gRPC API: the gRPC API requires its own client + schema deps
-// (ml-metadata is a large package), whereas an UPDATE statement
-// is six SQL lines via the standard database/sql driver. We
-// already have full read access to the kfp DB's password Secret
-// in the project's namespace (the same one DSP itself uses).
+// Safe to call from every reconcile — the cooldown above
+// prevents DB hammering, and the deterministic check protects
+// genuinely-active runs from being marked failed.
 func (r *AutoResearchProjectReconciler) cleanupStaleMLMDExecutions(
 	ctx context.Context,
 	p *agentofficev1alpha1.AutoResearchProject,
@@ -108,45 +111,119 @@ func (r *AutoResearchProjectReconciler) cleanupStaleMLMDExecutions(
 	if err != nil {
 		return 0, fmt.Errorf("build MariaDB DSN: %w", err)
 	}
-
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		return 0, fmt.Errorf("open mysql: %w", err)
 	}
 	defer db.Close()
 
-	// Short timeout: this should be < 1 sec on a healthy DB. If
-	// it hangs, the reconcile shouldn't wait long for it.
-	dbCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	dbCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	cutoffMillis := time.Now().Add(-mlmdStaleAfter).UnixMilli()
-	result, err := db.ExecContext(dbCtx,
-		`UPDATE Execution
-		 SET last_known_state = ?
-		 WHERE last_known_state = ?
-		   AND last_update_time_since_epoch < ?`,
-		mlmdStateFailed, mlmdStateRunning, cutoffMillis,
-	)
+	// Find all (execution_id, dsp_run_id) pairs where the
+	// Execution is still RUNNING in MLMD. dsp_run_id comes from
+	// the system.PipelineRun Context the Execution is associated
+	// with — that Context's name field IS the DSP run UUID.
+	rows, err := db.QueryContext(dbCtx, `
+		SELECT e.id, c.name
+		  FROM Execution e
+		  JOIN Association a ON a.execution_id = e.id
+		  JOIN Context c     ON a.context_id   = c.id
+		  JOIN Type t        ON c.type_id      = t.id
+		 WHERE e.last_known_state = ?
+		   AND t.name = 'system.PipelineRun'
+		 LIMIT ?
+	`, mlmdStateRunning, mlmdMaxOrphansPerPass)
 	if err != nil {
-		return 0, fmt.Errorf("UPDATE Execution: %w", err)
+		return 0, fmt.Errorf("query stuck executions: %w", err)
 	}
-	rows, _ := result.RowsAffected()
-	if rows > 0 {
-		log.Info("mlmd janitor: transitioned stale RUNNING executions to FAILED",
-			"rows", rows, "ns", p.Namespace)
+
+	type candidate struct {
+		executionID int64
+		dspRunID    string
 	}
-	return rows, nil
+	var candidates []candidate
+	for rows.Next() {
+		var c candidate
+		if err := rows.Scan(&c.executionID, &c.dspRunID); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("scan candidate: %w", err)
+		}
+		candidates = append(candidates, c)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("iterate candidates: %w", err)
+	}
+	if len(candidates) == 0 {
+		return 0, nil
+	}
+
+	// For each candidate, ask DSP whether the run is actually
+	// terminal. Cache per-run lookups so multi-step pipelines
+	// (one DAGExecution + N ContainerExecutions sharing a
+	// run_id) only cost one DSP API call.
+	dspClient, err := dspClientFor(ctx, r.Client, p.Namespace)
+	if err != nil {
+		return 0, fmt.Errorf("dsp client: %w", err)
+	}
+	runTerminal := map[string]bool{} // dspRunID → true if confirmed orphan
+	var orphanExecIDs []int64
+	for _, c := range candidates {
+		t, known := runTerminal[c.dspRunID]
+		if !known {
+			run, gerr := dspClient.GetRun(ctx, c.dspRunID)
+			switch {
+			case gerr != nil && strings.Contains(gerr.Error(), "404"):
+				// Run was deleted entirely — definitely orphan.
+				t = true
+			case gerr != nil:
+				// Transient DSP error — skip this candidate
+				// this pass, try next time.
+				continue
+			default:
+				t = isRunTerminal(run.State)
+			}
+			runTerminal[c.dspRunID] = t
+		}
+		if t {
+			orphanExecIDs = append(orphanExecIDs, c.executionID)
+		}
+	}
+	if len(orphanExecIDs) == 0 {
+		log.V(1).Info("mlmd janitor: no orphans this pass",
+			"candidates", len(candidates), "ns", p.Namespace)
+		return 0, nil
+	}
+
+	// Transition only the confirmed orphans. Build a single
+	// IN-clause UPDATE so this is one round trip.
+	placeholders := strings.Repeat("?,", len(orphanExecIDs))
+	placeholders = placeholders[:len(placeholders)-1]
+	args := make([]any, 0, len(orphanExecIDs)+1)
+	args = append(args, mlmdStateFailed)
+	for _, id := range orphanExecIDs {
+		args = append(args, id)
+	}
+	q := fmt.Sprintf(`UPDATE Execution SET last_known_state = ? WHERE id IN (%s)`, placeholders)
+	result, err := db.ExecContext(dbCtx, q, args...)
+	if err != nil {
+		return 0, fmt.Errorf("UPDATE Execution orphans: %w", err)
+	}
+	rowsAffected, _ := result.RowsAffected()
+	if rowsAffected > 0 {
+		log.Info("mlmd janitor: transitioned confirmed-orphan executions to FAILED",
+			"rows", rowsAffected,
+			"checkedRuns", len(runTerminal),
+			"ns", p.Namespace)
+	}
+	return rowsAffected, nil
 }
 
 // mlmdDSN reads the DSP MariaDB credentials from the
 // ds-pipeline-db-dspa Secret (created by the DSP operator in
 // every DSPA-enabled namespace) and returns a database/sql DSN
 // pointing at the in-cluster mariadb-dspa Service.
-//
-// The DB name is `mlpipeline` — DSP uses one DB for both kfp's
-// pipeline tables and the embedded MLMD tables (we verified the
-// MLMD-schema tables Execution/Artifact/Context all live there).
 func mlmdDSN(ctx context.Context, c client.Client, namespace string) (string, error) {
 	var sec corev1.Secret
 	if err := c.Get(ctx, types.NamespacedName{
@@ -167,10 +244,6 @@ func mlmdDSN(ctx context.Context, c client.Client, namespace string) (string, er
 	if dbname == "" {
 		dbname = "mlpipeline" // DSP default
 	}
-	// In-cluster MariaDB Service. Plain TCP — TLS to MariaDB is
-	// optional; the DSP setup uses cleartext on the cluster
-	// internal network (same as the DSP API server's own
-	// connection). If your DSPA is TLS-only, append ?tls=true.
 	host := fmt.Sprintf("mariadb-dspa.%s.svc.cluster.local:3306", namespace)
 	return fmt.Sprintf("%s:%s@tcp(%s)/%s?parseTime=true&timeout=5s",
 		user, pass, host, dbname), nil
