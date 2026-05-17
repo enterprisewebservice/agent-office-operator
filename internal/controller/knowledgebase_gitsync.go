@@ -19,14 +19,29 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	agentofficev1alpha1 "github.com/enterprisewebservice/agent-office-operator/api/v1alpha1"
 )
+
+// autoresearchProjectLabel is the well-known label on a KnowledgeBase
+// that binds it to a specific AutoResearchProject. When the
+// KnowledgeBase controller sees this label, it generates the richer
+// bootstrap fileset (GOALS.md, DASHBOARD.md, agents/<name>.md,
+// proposals/, results/, log/) — derived from the project + its
+// experimenter agent spec, so every autoresearch project gets the
+// same structure for free.
+//
+// Standalone KnowledgeBases (no label, like redhat-ai-research-wiki)
+// keep the existing minimal bootstrap.
+const autoresearchProjectLabel = "agentoffice.ai/autoresearch-project"
 
 // kbGitSyncCMName names the ConfigMap holding the sync script +
 // bootstrap templates for a single KnowledgeBase. The gateway
@@ -72,6 +87,16 @@ func (r *KnowledgeBaseReconciler) reconcileGitSyncConfigMap(ctx context.Context,
 			"gitignore":            kbGitignore,
 			"README.md":            renderReadme(kb),
 		}
+
+		// v0.0.53: if this KnowledgeBase is bound to an
+		// AutoResearchProject (via label), render the additional
+		// project-specific bootstrap files. Every autoresearch
+		// project gets the same scaffolding without any human
+		// hand-writing — that's the whole point.
+		if projectName := kb.Labels[autoresearchProjectLabel]; projectName != "" {
+			r.addAutoresearchBootstrap(ctx, kb, projectName, cm.Data)
+		}
+
 		return controllerutil.SetControllerReference(kb, cm, r.Scheme)
 	})
 	if err != nil {
@@ -498,6 +523,34 @@ write_if_missing "/sync/obsidian_link.py"  "$WIKI_DIR/obsidian_link.py"
 write_if_missing "/sync/README.md"         "$WIKI_DIR/README.md"
 write_if_missing "/sync/gitignore"         "$WIKI_DIR/.gitignore"
 
+# v0.0.53: AutoResearchProject-bound KBs get extra bootstrap files.
+# The operator only adds these ConfigMap keys when the KB has the
+# agentoffice.ai/autoresearch-project label. Keys with __ are
+# translated to / for the destination path (ConfigMap keys cannot
+# contain /). [ -f "$src" ] short-circuits when the file isn't in
+# the CM, so standalone KBs silently no-op these lines.
+for src in /sync/GOALS.md /sync/DASHBOARD.md; do
+  [ -f "$src" ] && write_if_missing "$src" "$WIKI_DIR/$(basename "$src")"
+done
+for src in /sync/log__*.md; do
+  [ -f "$src" ] || continue
+  rel=$(basename "$src" | sed 's|__|/|g')
+  mkdir -p "$WIKI_DIR/$(dirname "$rel")"
+  write_if_missing "$src" "$WIKI_DIR/$rel"
+done
+for src in /sync/proposals__.gitkeep /sync/results__.gitkeep /sync/agents__.gitkeep; do
+  [ -f "$src" ] || continue
+  rel=$(basename "$src" | sed 's|__|/|g')
+  mkdir -p "$WIKI_DIR/$(dirname "$rel")"
+  write_if_missing "$src" "$WIKI_DIR/$rel"
+done
+for src in /sync/agents__*.md; do
+  [ -f "$src" ] || continue
+  rel=$(basename "$src" | sed 's|__|/|g')
+  mkdir -p "$WIKI_DIR/$(dirname "$rel")"
+  write_if_missing "$src" "$WIKI_DIR/$rel"
+done
+
 # Main sync loop. One cycle per CADENCE seconds.
 while true; do
   cd "$WIKI_DIR"
@@ -550,3 +603,273 @@ while true; do
   sleep "$CADENCE_SEC"
 done
 `
+
+// addAutoresearchBootstrap injects the project-specific bootstrap
+// files into the ConfigMap when the KnowledgeBase is bound to an
+// AutoResearchProject. Falls back gracefully if the project or
+// experimenter agent aren't found — bootstrap is best-effort, and
+// the KB controller doesn't fail reconcile if the linked project
+// hasn't been created yet.
+//
+// Files added (each written via the sync.sh write_if_missing so
+// they never overwrite user edits):
+//
+//   - GOALS.md                        derived from spec.{baseModel,trainingData,eval}
+//   - DASHBOARD.md                    scaffold; rounds filled by operator on drain
+//   - agents/<experimenter-name>.md  full agent description + system prompt
+//   - log/log.md                      empty header (operator appends entries)
+//   - log/decisions.md                empty table header
+//   - proposals/.gitkeep + results/.gitkeep + agents/.gitkeep   directory anchors
+//
+// All of these are append-only from the autoresearch loop's
+// perspective — the operator adds rows to DASHBOARD.md and
+// entries to log.md as rounds complete; the agent writes its
+// proposal reasoning to proposals/round-N.md via its file_write
+// tool. Nothing in this scaffold ever gets clobbered.
+func (r *KnowledgeBaseReconciler) addAutoresearchBootstrap(ctx context.Context, kb *agentofficev1alpha1.KnowledgeBase, projectName string, data map[string]string) {
+	var project agentofficev1alpha1.AutoResearchProject
+	projectErr := r.Get(ctx, types.NamespacedName{Namespace: kb.Namespace, Name: projectName}, &project)
+	// project may legitimately not exist yet (KB created first); we
+	// still write GOALS/DASHBOARD using zero-value-safe defaults.
+	if projectErr != nil && !apierrors.IsNotFound(projectErr) {
+		// Real error — fail noisily on the CM data so it's visible.
+		data["BOOTSTRAP_ERROR.md"] = fmt.Sprintf("# Bootstrap warning\n\nFailed to look up AutoResearchProject %s/%s: %v\n",
+			kb.Namespace, projectName, projectErr)
+		return
+	}
+
+	data["GOALS.md"] = renderAutoresearchGoals(projectName, &project)
+	data["DASHBOARD.md"] = renderAutoresearchDashboard(projectName, &project)
+	data["log__log.md"] = renderAutoresearchLogStub()
+	data["log__decisions.md"] = renderAutoresearchDecisionsStub()
+	data["proposals__.gitkeep"] = ""
+	data["results__.gitkeep"] = ""
+	data["agents__.gitkeep"] = ""
+
+	// Experimenter agent description, if the agent exists. ConfigMap
+	// keys can't contain `/` so we use `__` as a separator and the
+	// sync.sh translates back when copying.
+	if project.Spec.Experimenter.Workstation != "" {
+		var aw agentofficev1alpha1.AgentWorkstation
+		if err := r.Get(ctx, types.NamespacedName{
+			Namespace: kb.Namespace,
+			Name:      project.Spec.Experimenter.Workstation,
+		}, &aw); err == nil {
+			data["agents__"+aw.Name+".md"] = renderAutoresearchAgentPage(&aw)
+		}
+	}
+}
+
+// renderAutoresearchGoals produces the GOALS.md content from the
+// AutoResearchProject spec. The output uses Obsidian-compatible
+// markdown (with a checklist for success criteria so progress is
+// visible at a glance) and includes a Mermaid loop diagram.
+func renderAutoresearchGoals(projectName string, p *agentofficev1alpha1.AutoResearchProject) string {
+	base := "(unset)"
+	if p != nil && p.Spec.BaseModel.HuggingfaceID != "" {
+		base = p.Spec.BaseModel.HuggingfaceID
+	}
+	dataset := "(unset)"
+	if p != nil && p.Spec.TrainingData.HuggingfaceDataset != "" {
+		dataset = p.Spec.TrainingData.HuggingfaceDataset
+	}
+	metric := "eval_loss"
+	if p != nil && p.Spec.Eval.Metric != "" {
+		metric = p.Spec.Eval.Metric
+	}
+	direction := "minimize"
+	if p != nil && p.Spec.Eval.Direction != "" {
+		direction = p.Spec.Eval.Direction
+	}
+
+	return fmt.Sprintf(`# Goals — `+"`"+`%s`+"`"+`
+
+Karpathy-style autonomous research loop. The system should
+autonomously fine-tune a base model and improve a target metric
+over many rounds without human intervention.
+
+## This project
+
+| Field | Value |
+|-------|-------|
+| Base model | `+"`"+`%s`+"`"+` |
+| Dataset | `+"`"+`%s`+"`"+` |
+| Target metric | `+"`"+`%s`+"`"+` (%s) |
+
+## Loop
+
+`+"```mermaid\n"+`flowchart LR
+  A([AutoResearchProject CR]) --> B{Operator reconcile}
+  B -- read log.md --> W[(this wiki)]
+  B -- propose --> AG[experimenter agent]
+  AG -- JSON config --> B
+  B -- commit proposal --> W
+  B -- submit run --> DSP[Data Science Pipelines]
+  DSP --> T[Trainer pod<br/>QLoRA]
+  T -- adapter --> Q[Quay OCI artifact]
+  T -- eval_loss --> B
+  B -- register --> MR[Model Registry]
+  B -- commit result --> W
+  B -- next round --> AG
+`+"```"+`
+
+Every arrow back to **W** lands as an observable artifact in this
+vault: ` + "`proposals/round-N.{yaml,md}`" + ` at submission time,
+` + "`results/round-N.md`" + ` + a new ` + "`log/log.md`" + ` entry
+when the round completes.
+
+## Success criteria
+
+- [ ] First round completes with adapter persisted to Quay
+- [ ] ` + "`%s`" + ` improves over the base-model baseline
+- [ ] Agent-proposed config + reasoning visible in `+"`proposals/`"+`
+- [ ] ModelVersion auto-registered in RHOAI Model Registry
+- [ ] HumanEval (or equivalent) score auto-computed for each kept adapter
+- [ ] Best adapter served via a KServe InferenceService
+
+Edit this file in the wiki if any of these are too narrow or too
+broad — the linter respects user edits.
+`, projectName, base, dataset, metric, direction, metric)
+}
+
+// renderAutoresearchDashboard produces the DASHBOARD.md scaffold.
+// The operator appends rows to the table as rounds complete; the
+// header + columns are stable so Obsidian/MkDocs render
+// consistently.
+func renderAutoresearchDashboard(projectName string, p *agentofficev1alpha1.AutoResearchProject) string {
+	cadence := "30 minutes (default)"
+	if p != nil && p.Spec.LoopConfig.CadenceMinutes > 0 {
+		cadence = fmt.Sprintf("%d minutes", p.Spec.LoopConfig.CadenceMinutes)
+	}
+	maxTotal := "100 (default)"
+	if p != nil && p.Spec.LoopConfig.MaxTotalExperiments > 0 {
+		maxTotal = fmt.Sprintf("%d", p.Spec.LoopConfig.MaxTotalExperiments)
+	}
+
+	return fmt.Sprintf(`# Dashboard — `+"`"+`%s`+"`"+`
+
+A bird's-eye view of every round this project has run. The table
+below is appended by the operator on each successful drain. The
+agent reasoning links lead to ` + "`proposals/round-N.md`" + `, which
+the experimenter writes at submission time.
+
+## Loop settings
+
+| Setting | Value |
+|---------|-------|
+| Cadence | %s between rounds |
+| Max total experiments | %s |
+
+## Rounds
+
+| Round | eval_loss | Decision | Adapter | Agent reasoning |
+|------:|----------:|:--------:|---------|:----------------|
+| _(no rounds yet — once the operator submits round 1, an entry appears here)_ |||||
+`, projectName, cadence, maxTotal)
+}
+
+// renderAutoresearchLogStub returns the empty log.md the operator
+// will append to after each round.
+func renderAutoresearchLogStub() string {
+	return `# Experiment Log
+
+> Reverse-chronological. The operator appends a new bullet at the
+> top of this section every time a round completes. Each bullet
+> links to its full ` + "`results/round-N.md`" + ` page.
+
+_(no entries yet)_
+`
+}
+
+// renderAutoresearchDecisionsStub returns the empty decisions
+// table the operator appends to on keep/revert.
+func renderAutoresearchDecisionsStub() string {
+	return `# Keep / Revert Decisions
+
+| Round | eval_loss | Decision | Reasoning |
+|------:|----------:|:--------:|-----------|
+| _(filled by the operator on each round)_ ||||
+`
+}
+
+// renderAutoresearchAgentPage produces an agents/<name>.md page
+// describing the experimenter agent — its role, tools, system
+// prompt, and the openclaw command the operator uses to invoke it.
+// Lets a human (or another agent) understand exactly what this
+// loop's "experimenter" is configured to do.
+func renderAutoresearchAgentPage(aw *agentofficev1alpha1.AgentWorkstation) string {
+	displayName := aw.Spec.DisplayName
+	if displayName == "" {
+		displayName = aw.Name
+	}
+	emoji := aw.Spec.Emoji
+	if emoji == "" {
+		emoji = "🔬"
+	}
+	gateway := "(dedicated runtime)"
+	if aw.Spec.Runtime != nil && aw.Spec.Runtime.Shared != nil {
+		gateway = aw.Spec.Runtime.Shared.GatewayRef
+	}
+	model := "(unset)"
+	provider := "(unset)"
+	if aw.Spec.Model.ModelName != "" {
+		model = aw.Spec.Model.ModelName
+	}
+	if string(aw.Spec.Model.Provider) != "" {
+		provider = string(aw.Spec.Model.Provider)
+	}
+	tools := "(none)"
+	if aw.Spec.Tools != nil && len(aw.Spec.Tools.Allow) > 0 {
+		tools = "`" + strings.Join(aw.Spec.Tools.Allow, "`, `") + "`"
+	}
+
+	systemPrompt := aw.Spec.SystemPrompt
+	if systemPrompt == "" {
+		systemPrompt = "_(not set on the AgentWorkstation CR)_"
+	}
+
+	return fmt.Sprintf(`---
+agent: %s
+namespace: %s
+gateway: %s
+model: %s
+provider: %s
+---
+
+# %s %s
+
+%s
+
+## Runtime
+
+| Field | Value |
+|-------|-------|
+| AgentWorkstation | `+"`"+`%s/%s`+"`"+` |
+| Gateway | `+"`"+`%s`+"`"+` |
+| Model | `+"`"+`%s`+"`"+` (provider: %s) |
+| Tools | %s |
+
+## How the operator invokes this agent
+
+`+"```"+`
+oc exec -n %s <gateway-pod> -c openclaw -- \
+  openclaw agent --agent %s \
+                 --message "<prompt with wiki log>" \
+                 --json --timeout 540
+`+"```"+`
+
+The operator parses the JSON reply, validates the config bounds,
+and uses it as the next round's QLoRA hyperparameters.
+
+## System prompt
+
+%s
+
+> _Auto-generated from the AgentWorkstation CR. Edit the CR to change._
+`, aw.Name, aw.Namespace, gateway, model, provider,
+		emoji, displayName, aw.Spec.Description,
+		aw.Namespace, aw.Name, gateway, model, provider, tools,
+		aw.Namespace, aw.Name,
+		systemPrompt)
+}
+

@@ -384,6 +384,118 @@ func jsonQuote(s string) string {
 
 // ---- end of v0.0.52 agent-integration tests ----
 
+// ---- v0.0.53: KnowledgeBase autoresearch-bootstrap tests ----
+
+// TestRenderAutoresearchGoals verifies the GOALS.md output uses the
+// project's actual base model + dataset + metric, with sensible
+// fallbacks when fields are empty.
+func TestRenderAutoresearchGoals(t *testing.T) {
+	p := &agentofficev1alpha1.AutoResearchProject{
+		Spec: agentofficev1alpha1.AutoResearchProjectSpec{
+			BaseModel: agentofficev1alpha1.AutoResearchBaseModel{
+				HuggingfaceID: "ibm-granite/granite-4.1-8b",
+			},
+			TrainingData: agentofficev1alpha1.AutoResearchTrainingData{
+				HuggingfaceDataset: "ise-uiuc/Magicoder-OSS-Instruct-75K",
+			},
+			Eval: agentofficev1alpha1.AutoResearchEval{
+				Metric:    "eval_loss",
+				Direction: "minimize",
+			},
+		},
+	}
+	out := renderAutoresearchGoals("autoresearch-granite-8b", p)
+	for _, want := range []string{
+		"# Goals",
+		"autoresearch-granite-8b",
+		"ibm-granite/granite-4.1-8b",
+		"ise-uiuc/Magicoder-OSS-Instruct-75K",
+		"eval_loss",
+		"minimize",
+		"mermaid",       // the loop diagram
+		"Success criteria",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("GOALS.md missing %q", want)
+		}
+	}
+
+	// Nil/empty project still produces something usable (the KB
+	// can exist before the project is created).
+	empty := renderAutoresearchGoals("foo", nil)
+	if !strings.Contains(empty, "(unset)") {
+		t.Errorf("empty project should produce (unset) placeholders, got: %s", empty)
+	}
+}
+
+// TestRenderAutoresearchDashboard verifies the dashboard scaffold
+// + spec values get plumbed through.
+func TestRenderAutoresearchDashboard(t *testing.T) {
+	p := &agentofficev1alpha1.AutoResearchProject{
+		Spec: agentofficev1alpha1.AutoResearchProjectSpec{
+			LoopConfig: agentofficev1alpha1.AutoResearchLoopConfig{
+				CadenceMinutes:      45,
+				MaxTotalExperiments: 200,
+			},
+		},
+	}
+	out := renderAutoresearchDashboard("autoresearch-granite-8b", p)
+	for _, want := range []string{
+		"# Dashboard",
+		"autoresearch-granite-8b",
+		"45 minutes",
+		"200",
+		"| Round | eval_loss",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("DASHBOARD.md missing %q", want)
+		}
+	}
+}
+
+// TestRenderAutoresearchAgentPage verifies the agent-page render
+// includes the system prompt, tools, and the openclaw invocation
+// command the operator would actually run.
+func TestRenderAutoresearchAgentPage(t *testing.T) {
+	aw := &agentofficev1alpha1.AgentWorkstation{
+		ObjectMeta: metav1.ObjectMeta{Name: "granite-8b-experimenter", Namespace: "agent-office"},
+		Spec: agentofficev1alpha1.AgentWorkstationSpec{
+			DisplayName:  "Granite-8B QLoRA Experimenter",
+			Description:  "QLoRA proposer.",
+			Emoji:        "🔬",
+			SystemPrompt: "You are a QLoRA experimenter...",
+			Tools: &agentofficev1alpha1.ToolsSpec{
+				Allow: []string{"memory", "file_read", "file_write"},
+			},
+			Runtime: &agentofficev1alpha1.RuntimeSpec{
+				Shared: &agentofficev1alpha1.SharedRuntime{GatewayRef: "research-gateway"},
+			},
+			Model: agentofficev1alpha1.ModelSpec{
+				ModelName: "gpt-5.5",
+				Provider:  agentofficev1alpha1.ModelProvider("openai-codex"),
+			},
+		},
+	}
+	out := renderAutoresearchAgentPage(aw)
+	for _, want := range []string{
+		"granite-8b-experimenter",
+		"Granite-8B QLoRA Experimenter",
+		"research-gateway",
+		"openclaw agent --agent granite-8b-experimenter",
+		"file_read",
+		"file_write",
+		"gpt-5.5",
+		"openai-codex",
+		"You are a QLoRA experimenter",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("agent page missing %q", want)
+		}
+	}
+}
+
+// ---- end of v0.0.53 KnowledgeBase autoresearch-bootstrap tests ----
+
 // TestResolveTrainerImage_Precedence verifies the three-tier lookup
 // (spec > ConfigMap > const). Catches regressions in the precedence
 // order — e.g. if the ConfigMap ever wins over an explicit spec
