@@ -18,7 +18,7 @@ package: agent-office-operator
 name: alpha
 entries:
   - name: agent-office-operator.v0.0.49
-    replaces: agent-office-operator.v0.0.49
+    replaces: agent-office-operator.v0.0.48
     skipRange: ">=0.0.1 <0.0.49"
 
 ---
