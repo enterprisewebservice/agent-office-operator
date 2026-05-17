@@ -375,3 +375,118 @@ catalog-build: opm ## Build a catalog image.
 .PHONY: catalog-push
 catalog-push: ## Push a catalog image.
 	$(MAKE) docker-push IMG=$(CATALOG_IMG)
+
+##@ Version bump
+
+# bump-version: atomically update every place the operator/trainer version
+# appears, then regenerate the bundle + catalog from the new source-of-truth.
+#
+# Why this target exists: we spent a brutal day discovering that sed-bumping
+# individual YAML files leaves the Makefile VERSION variable behind, which
+# causes `make bundle` to regenerate the bundle CSV at the OLD version,
+# silently invalidating every "release". OLM reads the bundle's embedded CSV
+# (not image tags) to pick channel heads, so the apparent upgrade never lands.
+#
+# Usage:
+#   make bump-version VERSION=0.0.47
+#
+# Optionally bump the trainer image too in the same call:
+#   make bump-version VERSION=0.0.47 TRAINER_VERSION=0.0.13
+#
+# What it touches (alphabetical):
+#   - .tekton/operator-image-on-push.yaml      output-image tag
+#   - .tekton/operator-bundle-on-push.yaml     output-image tag
+#   - .tekton/operator-catalog-on-push.yaml    output-image tag
+#   - .tekton/autoresearch-trainer-on-push.yaml (only if TRAINER_VERSION given)
+#   - Makefile                                 VERSION ?= ...
+#   - bundle/manifests/...clusterserviceversion.yaml  name, version, replaces
+#   - catalog/agent-office-operator/catalog.yaml      channel entry + skipRange + bundle
+#   - config/manager/kustomization.yaml         newTag
+#   - internal/controller/autoresearchproject_controller.go (defaultTrainerImage)
+#   - internal/controller/pipeline.yaml         trainer image ref
+#   - scripts/autoresearch-pipeline/pipeline.yaml trainer image ref (mirror)
+#
+# After running, verify with `git diff` and `make verify-version` before committing.
+# Then push — Konflux rebuilds bundle/catalog/operator all consistent.
+.PHONY: bump-version
+bump-version: ## Bump VERSION across every place it's referenced. Usage: make bump-version VERSION=0.0.47 [TRAINER_VERSION=0.0.13]
+	@if [ -z "$(VERSION)" ]; then echo "ERROR: pass VERSION=x.y.z"; exit 1; fi
+	@OLD_VERSION=$$(grep -E '^VERSION \?=' Makefile | head -1 | awk '{print $$3}'); \
+	NEW_VERSION="$(VERSION)"; \
+	if [ -z "$$OLD_VERSION" ]; then echo "ERROR: cannot find OLD VERSION in Makefile"; exit 1; fi; \
+	echo "bumping OPERATOR $$OLD_VERSION -> $$NEW_VERSION"; \
+	sed -i.bak "s|^VERSION ?= $$OLD_VERSION|VERSION ?= $$NEW_VERSION|" Makefile && rm Makefile.bak; \
+	for f in config/manager/kustomization.yaml \
+	         .tekton/operator-image-on-push.yaml \
+	         .tekton/operator-bundle-on-push.yaml \
+	         .tekton/operator-catalog-on-push.yaml \
+	         internal/controller/autoresearchproject_controller.go; do \
+	  if [ -f $$f ]; then \
+	    sed -i.bak "s|v$$OLD_VERSION|v$$NEW_VERSION|g" $$f && rm $$f.bak; \
+	  fi; \
+	done; \
+	sed -i.bak "s|v$$OLD_VERSION|v$$NEW_VERSION|g; \
+	            s|version: $$OLD_VERSION|version: $$NEW_VERSION|g; \
+	            s|>=0.0.1 <$$OLD_VERSION|>=0.0.1 <$$NEW_VERSION|g; \
+	            s|replaces: agent-office-operator.v[0-9]\\.[0-9]\\.[0-9]\\+|replaces: agent-office-operator.v$$OLD_VERSION|g" \
+	    bundle/manifests/agent-office-operator.clusterserviceversion.yaml && \
+	  rm bundle/manifests/agent-office-operator.clusterserviceversion.yaml.bak; \
+	sed -i.bak "s|v$$OLD_VERSION|v$$NEW_VERSION|g; \
+	            s|>=0.0.1 <$$OLD_VERSION|>=0.0.1 <$$NEW_VERSION|g" \
+	    catalog/agent-office-operator/catalog.yaml && \
+	  rm catalog/agent-office-operator/catalog.yaml.bak
+	@if [ -n "$(TRAINER_VERSION)" ]; then \
+	  OLD_TRAINER=$$(grep -oE 'autoresearch-trainer:v[0-9]+\.[0-9]+\.[0-9]+' internal/controller/pipeline.yaml | head -1 | sed 's/.*://'); \
+	  NEW_TRAINER="v$(TRAINER_VERSION)"; \
+	  if [ -z "$$OLD_TRAINER" ]; then echo "ERROR: cannot find OLD TRAINER version in pipeline.yaml"; exit 1; fi; \
+	  echo "bumping TRAINER $$OLD_TRAINER -> $$NEW_TRAINER"; \
+	  for f in internal/controller/autoresearchproject_controller.go \
+	           internal/controller/pipeline.yaml \
+	           scripts/autoresearch-pipeline/pipeline.yaml \
+	           .tekton/autoresearch-trainer-on-push.yaml; do \
+	    if [ -f $$f ]; then \
+	      sed -i.bak "s|autoresearch-trainer:$$OLD_TRAINER|autoresearch-trainer:$$NEW_TRAINER|g" $$f && rm $$f.bak; \
+	    fi; \
+	  done; \
+	fi
+	@$(MAKE) verify-version
+	@echo ""
+	@echo "==> Version bump complete. Next:"
+	@echo "    1. git diff   (review what changed)"
+	@echo "    2. make catalog-fbc-norebuild  (regen catalog.yaml inline content)"
+	@echo "    3. git add -A && git commit && git push"
+	@echo "    4. Also bump cluster/operator/catalogsource.yaml in agent-office repo"
+
+# verify-version: sanity-check that every place referencing the operator
+# version agrees. If they don't, the build chain will fail in confusing ways
+# (the way it has been all day).
+.PHONY: verify-version
+verify-version: ## Sanity-check version consistency across all files.
+	@MK=$$(grep -E '^VERSION \?=' Makefile | head -1 | awk '{print $$3}'); \
+	echo "Makefile VERSION = $$MK"; \
+	BAD=0; \
+	check() { F=$$1; PATT=$$2; EXP=$$3; \
+	  GOT=$$(grep -E "$$PATT" $$F 2>/dev/null | head -1); \
+	  if echo "$$GOT" | grep -q "$$EXP"; then \
+	    echo "  OK  $$F"; \
+	  else \
+	    echo "  ERR $$F (expected $$EXP, got: $$GOT)"; BAD=1; \
+	  fi; }; \
+	check bundle/manifests/agent-office-operator.clusterserviceversion.yaml "^  version:" "version: $$MK"; \
+	check catalog/agent-office-operator/catalog.yaml "^  - name:" "v$$MK"; \
+	check config/manager/kustomization.yaml "newTag" "v$$MK"; \
+	check .tekton/operator-image-on-push.yaml "operator:v" "v$$MK"; \
+	check .tekton/operator-bundle-on-push.yaml "operator-bundle:v" "v$$MK"; \
+	check .tekton/operator-catalog-on-push.yaml "operator-catalog:v" "v$$MK"; \
+	if [ $$BAD -ne 0 ]; then echo "VERSION MISMATCH — see ERR lines above"; exit 1; else echo "All version references consistent at v$$MK"; fi
+
+# catalog-fbc-norebuild: regenerate catalog.yaml from bundle/ without
+# the broken `make bundle` dependency. Used by bump-version to refresh
+# the inline olm.bundle.object content after a Makefile version change.
+.PHONY: catalog-fbc-norebuild
+catalog-fbc-norebuild: opm ## Regen catalog.yaml inline bundle content from current bundle/ dir (no operator-sdk regen).
+	@VERSION=$$(grep -E '^VERSION \?=' Makefile | head -1 | awk '{print $$3}'); \
+	OLD_VERSION=$$(grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' catalog/agent-office-operator/catalog.yaml | head -1 | sed 's/^v//'); \
+	PREV_VERSION=$$OLD_VERSION; \
+	printf -- "---\n# File-Based Catalog (FBC) declarative config for the Agent Office Operator.\n#\n# Regenerated by 'make catalog-fbc-norebuild' (skips the operator-sdk\n# bundle regen step that historically failed on CRD validation).\n# The bundle block below is rendered by 'opm render bundle/' so all\n# CSV / CRD content is inlined as olm.bundle.object properties.\n\nschema: olm.package\nname: agent-office-operator\ndefaultChannel: alpha\ndescription: |\n  OLM-managed operator for the Governed Agent Platform on OpenShift.\n\n---\nschema: olm.channel\npackage: agent-office-operator\nname: alpha\nentries:\n  - name: agent-office-operator.v$$VERSION\n    replaces: agent-office-operator.v$$PREV_VERSION\n    skipRange: \">=0.0.1 <$$VERSION\"\n\n---\n" > catalog/agent-office-operator/catalog.yaml; \
+	$(OPM) render bundle/ --output=yaml | sed "s|image: \"\"|image: $(BUNDLE_IMG)|" >> catalog/agent-office-operator/catalog.yaml
