@@ -49,7 +49,7 @@ metadata:
     capabilities: Basic Install
     categories: AI/Machine Learning, Developer Tools
     containerImage: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-operator:v0.0.1
-    createdAt: "2026-05-05T07:06:30Z"
+    createdAt: "2026-05-17T03:44:50Z"
     description: OLM-managed operator for the Governed Agent Platform. Owns the AgentWorkstation
       and MemoryModule CRDs and reconciles the per-agent runtime artifacts (Deployment,
       Service, ConfigMap, PVC) on OpenShift.
@@ -57,7 +57,7 @@ metadata:
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
     repository: https://github.com/enterprisewebservice/agent-office-operator
     support: Red Hat Solution Architecture
-  name: agent-office-operator.v0.0.45
+  name: agent-office-operator.v0.0.46
   namespace: placeholder
 spec:
   apiservicedefinitions: {}
@@ -88,52 +88,6 @@ spec:
       displayName: Memory Module
       kind: MemoryModule
       name: memorymodules.agentoffice.ai
-      version: v1alpha1
-    - description: |-
-        Skill is a reusable, declarative agent capability. AgentWorkstations
-        gain access to a Skill via a SkillBinding (RBAC-style). The Skill's
-        `SKILL.md` content is rendered into each bound agent's workspace per
-        the Anthropic Skills Open Standard, and its `requires` capabilities
-        are validated against the bound AgentGateway.
-      displayName: Skill
-      kind: Skill
-      name: skills.agentoffice.ai
-      version: v1alpha1
-    - description: |-
-        SkillBinding grants a Skill to one or more AgentWorkstations
-        RBAC-style. Subjects can be listed directly or matched via label
-        selector. Decouples skill authorship from skill grants — useful when
-        a platform/security team curates skills separately from agent authors.
-      displayName: Skill Binding
-      kind: SkillBinding
-      name: skillbindings.agentoffice.ai
-      version: v1alpha1
-    - description: |-
-        KnowledgeBase is a wiki — a persistent, structured collection of
-        Markdown files and supporting media — backed by a PVC and mounted
-        into a single AgentGateway pod. All logical agents in the bound
-        gateway see the wiki at /home/node/.openclaw/wiki/<kb-name>/ and
-        can read, search, and extend it via skills (e.g. wiki-clip,
-        wiki-search, wiki-write). Models the Karpathy "LLM Knowledge Base"
-        workflow as a Kubernetes-native primitive.
-      displayName: Knowledge Base
-      kind: KnowledgeBase
-      name: knowledgebases.agentoffice.ai
-      version: v1alpha1
-    - description: |-
-        AutoResearchProject is a Karpathy-style autonomous ML
-        experimentation loop, packaged as a declarative resource. Each
-        cycle, an experimenter agent proposes a QLoRA fine-tuning
-        configuration; the operator submits a Kubernetes Job running the
-        AutoResearch trainer container against the configured base model
-        + dataset; eval_loss drives a keep/revert decision; findings land
-        in the referenced KnowledgeBase + the project's status. Hardware-
-        aware via per-GPU power caps (init container nvidia-smi -pl) and
-        pod-anti-affinity to keep one trainer per node — designed for
-        consumer-GPU clusters where breaker safety matters.
-      displayName: AutoResearch Project
-      kind: AutoResearchProject
-      name: autoresearchprojects.agentoffice.ai
       version: v1alpha1
   description: |
     The Agent Office Operator manages governed coding agents on OpenShift.
@@ -192,15 +146,21 @@ spec:
           verbs:
           - create
         - apiGroups:
+          - ""
+          resources:
+          - pods/log
+          verbs:
+          - get
+        - apiGroups:
           - agentoffice.ai
           resources:
           - agentgateways
           - agentworkstations
-          - memorymodules
-          - skills
-          - skillbindings
-          - knowledgebases
           - autoresearchprojects
+          - knowledgebases
+          - memorymodules
+          - skillbindings
+          - skills
           verbs:
           - create
           - delete
@@ -214,11 +174,11 @@ spec:
           resources:
           - agentgateways/finalizers
           - agentworkstations/finalizers
-          - memorymodules/finalizers
-          - skills/finalizers
-          - skillbindings/finalizers
-          - knowledgebases/finalizers
           - autoresearchprojects/finalizers
+          - knowledgebases/finalizers
+          - memorymodules/finalizers
+          - skillbindings/finalizers
+          - skills/finalizers
           verbs:
           - update
         - apiGroups:
@@ -226,19 +186,19 @@ spec:
           resources:
           - agentgateways/status
           - agentworkstations/status
-          - memorymodules/status
-          - skills/status
-          - skillbindings/status
-          - knowledgebases/status
           - autoresearchprojects/status
+          - knowledgebases/status
+          - memorymodules/status
+          - skillbindings/status
+          - skills/status
           verbs:
           - get
           - patch
           - update
         - apiGroups:
-          - batch
+          - apps
           resources:
-          - jobs
+          - deployments
           verbs:
           - create
           - delete
@@ -248,24 +208,9 @@ spec:
           - update
           - watch
         - apiGroups:
-          - ""
+          - batch
           resources:
-          - pods
-          verbs:
-          - get
-          - list
-          - watch
-        - apiGroups:
-          - ""
-          resources:
-          - pods/log
-          verbs:
-          - get
-          - update
-        - apiGroups:
-          - apps
-          resources:
-          - deployments
+          - jobs
           verbs:
           - create
           - delete
@@ -334,7 +279,7 @@ spec:
                       fieldPath: metadata.annotations['olm.targetNamespaces']
                 - name: CLUSTER_APPS_DOMAIN
                   value: apps.salamander.aimlworkbench.com
-                image: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-operator:v0.0.45
+                image: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-operator:v0.0.46
                 imagePullPolicy: Always
                 livenessProbe:
                   httpGet:
@@ -437,5 +382,4 @@ spec:
   provider:
     name: Red Hat Solution Architecture
     url: https://github.com/enterprisewebservice
-  replaces: agent-office-operator.v0.0.44
-  version: 0.0.45
+  version: 0.0.46

@@ -3,7 +3,15 @@
 # To re-generate a bundle for another specific version without changing the standard setup, you can:
 # - use the VERSION as arg of the bundle target (e.g make bundle VERSION=0.0.2)
 # - use environment variables to overwrite this value (e.g export VERSION=0.0.2)
-VERSION ?= 0.0.19
+# Source of truth for the operator semantic version. Every `make
+# bundle` regenerates the CSV from this — sed-bumping the CSV file
+# alone is insufficient because operator-sdk overwrites it on each
+# build. Konflux's bundle pipeline runs `make bundle` so this is
+# what ends up baked into the bundle image's CSV and the catalog's
+# embedded olm.bundle.object content (which is what OLM reads when
+# computing channel heads). Keep in sync with the image tag in
+# .tekton/operator-image-on-push.yaml etc.
+VERSION ?= 0.0.46
 
 # CHANNELS define the bundle channels used in the bundle.
 # Add a new line here if you would like to change its default config. (E.g CHANNELS = "candidate,fast,stable")
