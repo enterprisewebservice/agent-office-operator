@@ -12,6 +12,11 @@
 # on a CPU-saturated control-plane node. With stackrox scaled to 0
 # the cluster has CPU headroom now; this comment forces a fresh
 # PipelineRun that should schedule cleanly.
+#
+# Retrigger marker 2026-05-17T02:30Z: same problem hit the
+# v0.0.44 catalog build (p9sjd) — Tekton pinned it to a
+# CPU-saturated node again. cancel-in-progress=true on this
+# pipeline kills the stuck build when the new push lands.
 
 schema: olm.package
 name: agent-office-operator
