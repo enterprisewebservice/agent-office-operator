@@ -403,18 +403,37 @@ func deriveModelRegistryTarget(ctx context.Context, c client.Client, p *agentoff
 	}
 
 	// Look up the Service the ModelRegistry instance exposes for
-	// REST. RHOAI's operator names it "<instance>-rest" in the
-	// rhoai-model-registries namespace.
-	var svc corev1.Service
-	if err := c.Get(ctx, types.NamespacedName{
-		Namespace: defaultRegistryNS,
-		Name:      instance + "-rest",
-	}, &svc); err != nil {
-		return "", regName, fmt.Sprintf("Service %s/%s-rest not found — "+
-			"is the RHOAI Model Registry component installed?",
-			defaultRegistryNS, instance)
+	// REST. RHOAI's model-registry-operator names the REST Service
+	// after the instance directly — NOT "<instance>-rest" as v0.0.51
+	// assumed. Verified empirically against an autoresearch-registry
+	// instance created via the v1beta1 ModelRegistry CR: the Service
+	// is `autoresearch-registry` on port 8080.
+	//
+	// Also: the v0.0.51 assumption that the port is 8443 was based
+	// on the model-catalog Service shape; the MR REST proxy actually
+	// listens on 8080 inside the cluster. We try the instance name
+	// first; if that misses we fall back to the legacy "-rest"
+	// suffix so clusters provisioned by older RHOAI operators still
+	// work without a manual Service alias.
+	candidates := []struct {
+		name string
+		port int
+	}{
+		{instance, 8080},          // current shape (RHOAI 3.3.1 v1beta1)
+		{instance + "-rest", 8443}, // legacy shape
 	}
-	return fmt.Sprintf("https://%s.%s.svc.cluster.local:8443", svc.Name, svc.Namespace), regName, ""
+	for _, cand := range candidates {
+		var svc corev1.Service
+		if err := c.Get(ctx, types.NamespacedName{
+			Namespace: defaultRegistryNS,
+			Name:      cand.name,
+		}, &svc); err == nil {
+			return fmt.Sprintf("https://%s.%s.svc.cluster.local:%d", svc.Name, svc.Namespace, cand.port), regName, ""
+		}
+	}
+	return "", regName, fmt.Sprintf("Service %s/%s (and %s-rest) both missing — "+
+		"is a ModelRegistry instance created in this cluster?",
+		defaultRegistryNS, instance, instance)
 }
 
 // submitDSPRun creates a kfp Run for one experiment cycle. The

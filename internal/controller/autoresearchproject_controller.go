@@ -260,7 +260,7 @@ func (r *AutoResearchProjectReconciler) Reconcile(ctx context.Context, req ctrl.
 	project.Status.Round = round
 	project.Status.Phase = "Running"
 
-	// v0.0.51: refresh Ready=True with a CURRENT message on every
+	// v0.0.52: refresh Ready=True with a CURRENT message on every
 	// successful submit. Previously a once-stuck failure message
 	// (e.g. v0.0.49's "submit DSP run failed: unknown template
 	// format") could persist on the Ready condition long after the
@@ -401,14 +401,37 @@ func validationQLoRAConfig(round int) QLoRAConfig {
 // consulted, since the whole point of validation mode is to
 // run a tiny known-shape experiment.
 func (r *AutoResearchProjectReconciler) requestProposal(ctx context.Context, p *agentofficev1alpha1.AutoResearchProject, round int) (QLoRAConfig, string, error) {
+	log := logf.FromContext(ctx)
+
 	if p.Spec.ValidationMode {
 		return validationQLoRAConfig(round), "validation (spec.validationMode=true)", nil
 	}
-	// Placeholder for v0.0.1 — the deterministic starter config
-	// IS the proposal until the agent-skill wiring lands in
-	// v0.0.2. This keeps the reconciler-end of the loop
-	// testable independently of the gateway / wiki path.
-	return starterQLoRAConfig(round), "starter (v0.0.1 placeholder)", nil
+
+	// v0.0.52: try to get a real proposal from the experimenter agent.
+	// Failure falls back to the starter config so the loop never
+	// wedges — AgentIntegrationOK condition surfaces what went wrong.
+	cfg, source, err := r.proposeViaAgent(ctx, p, round)
+	if err == nil {
+		p.Status.Conditions = mergeARPConditions(p.Status.Conditions,
+			agentofficev1alpha1.AutoResearchProjectCondition{
+				Type:               "AgentIntegrationOK",
+				Status:             "True",
+				Reason:             "AgentReplied",
+				Message:            fmt.Sprintf("experimenter %s proposed round %d", p.Spec.Experimenter.Workstation, round),
+				LastTransitionTime: metav1.Now(),
+			})
+		return cfg, source, nil
+	}
+	log.Info("agent proposal failed; falling back to starter config", "err", err.Error())
+	p.Status.Conditions = mergeARPConditions(p.Status.Conditions,
+		agentofficev1alpha1.AutoResearchProjectCondition{
+			Type:               "AgentIntegrationOK",
+			Status:             "False",
+			Reason:             "AgentFallback",
+			Message:            truncateMsg(fmt.Sprintf("falling back to starter config: %v", err), 256),
+			LastTransitionTime: metav1.Now(),
+		})
+	return starterQLoRAConfig(round), "starter (agent fallback)", nil
 }
 
 // submitTrainerJob creates a Kubernetes Job that runs the
@@ -570,6 +593,7 @@ func trainerAntiAffinity(p *agentofficev1alpha1.AutoResearchProject) *corev1.Aff
 // gate and queue the next experiment immediately when capacity
 // frees mid-cycle.
 func (r *AutoResearchProjectReconciler) drainOpenJobs(ctx context.Context, p *agentofficev1alpha1.AutoResearchProject) (bool, error) {
+	log := logf.FromContext(ctx)
 	if len(p.Status.OpenRuns) == 0 {
 		return false, nil
 	}
@@ -604,7 +628,7 @@ func (r *AutoResearchProjectReconciler) drainOpenJobs(ctx context.Context, p *ag
 			}
 			kept = isImprovement(p, evalLoss)
 
-			// v0.0.51: verify the adapter URI is actually
+			// v0.0.52: verify the adapter URI is actually
 			// pullable from the registry before trusting the
 			// trainer's "I pushed it" claim. Silent persistence
 			// skips (round 17 in v0.0.47/v0.0.12 — trainer warned
@@ -647,6 +671,32 @@ func (r *AutoResearchProjectReconciler) drainOpenJobs(ctx context.Context, p *ag
 							"empty adapter_uri — the push step in run.py likely failed " +
 							"silently (check the round's pod logs for a [autoresearch] " +
 							"WARN line)",
+						LastTransitionTime: metav1.Now(),
+					})
+			}
+
+			// v0.0.52: write the result to the wiki repo so the
+			// agent (and humans) can read it on the next cycle.
+			// Best-effort — wiki commit failures shouldn't fail
+			// the round's status update.
+			round := extractRoundFromRunID(displayID, p.Name)
+			if werr := r.wikiPushResult(ctx, p, int(round), evalLoss, adapterURI, kept); werr != nil {
+				log.Info("wiki result commit failed (continuing)", "round", round, "err", werr.Error())
+				p.Status.Conditions = mergeARPConditions(p.Status.Conditions,
+					agentofficev1alpha1.AutoResearchProjectCondition{
+						Type:               "WikiSyncOK",
+						Status:             "False",
+						Reason:             "WriteFailed",
+						Message:            truncateMsg(werr.Error(), 256),
+						LastTransitionTime: metav1.Now(),
+					})
+			} else {
+				p.Status.Conditions = mergeARPConditions(p.Status.Conditions,
+					agentofficev1alpha1.AutoResearchProjectCondition{
+						Type:               "WikiSyncOK",
+						Status:             "True",
+						Reason:             "Committed",
+						Message:            fmt.Sprintf("results/round-%d.md + log/log.md committed to wiki", round),
 						LastTransitionTime: metav1.Now(),
 					})
 			}

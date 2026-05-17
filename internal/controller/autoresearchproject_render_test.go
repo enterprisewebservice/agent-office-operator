@@ -28,6 +28,7 @@ package controller
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -281,6 +282,107 @@ func TestVerifyAdapterArtifact_BearerFlow_404(t *testing.T) {
 		t.Errorf("expected Missing on 404, got %s", status)
 	}
 }
+
+// ---- v0.0.52: agent-integration tests ----
+
+// TestParseAgentProposal verifies the various reply shapes we expect
+// from the experimenter agent — straight JSON, JSON inside a markdown
+// fence, JSON embedded in prose — all parse to a usable QLoRAConfig.
+// Crucially the round number is always overridden by the operator so
+// a hallucinating agent can't desync the loop counter.
+func TestParseAgentProposal(t *testing.T) {
+	const goldenJSON = `{"lora_rank":8,"lora_alpha":16,"lora_dropout":0.05,` +
+		`"target_modules":["q_proj","v_proj"],"learning_rate":0.0002,` +
+		`"num_training_steps":200,"per_device_batch_size":4,` +
+		`"gradient_accumulation_steps":4,"max_seq_length":1024,` +
+		`"warmup_steps":20,"weight_decay":0.01,"offload_strategy":"cpu",` +
+		`"notes":"baseline-ish"}`
+
+	cases := []struct {
+		name, raw string
+	}{
+		{name: "raw JSON only", raw: goldenJSON},
+		{name: "openclaw --json wrapper", raw: `{"reply":` + jsonQuote(goldenJSON) + `,"session_id":"abc"}`},
+		{name: "fenced markdown", raw: "```json\n" + goldenJSON + "\n```"},
+		{name: "prose then JSON", raw: "I'm proposing the following config:\n\n" + goldenJSON + "\n\nbecause baseline."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, _, err := parseAgentProposal(tc.raw, 42)
+			if err != nil {
+				t.Fatalf("parseAgentProposal: %v", err)
+			}
+			if cfg.Round != 42 {
+				t.Errorf("operator should override round; got %d", cfg.Round)
+			}
+			if cfg.LoraRank != 8 || cfg.NumTrainingSteps != 200 {
+				t.Errorf("fields didn't round-trip: %+v", cfg)
+			}
+		})
+	}
+}
+
+// TestParseAgentProposal_RejectsGarbage ensures we don't silently
+// pass a junk reply through. The caller's fallback path is the
+// starter config — that only kicks in if we return error.
+func TestParseAgentProposal_RejectsGarbage(t *testing.T) {
+	cases := []string{"", "I don't know", "{}", `{"lora_rank":-1}`}
+	for _, raw := range cases {
+		if _, _, err := parseAgentProposal(raw, 1); err == nil {
+			t.Errorf("expected error for %q, got nil", raw)
+		}
+	}
+}
+
+// TestValidateQLoRAConfig ensures the operator clamps out-of-range
+// proposals. An agent that hallucinates a 0 learning_rate or a
+// 100000-step run shouldn't get to burn a real training cycle.
+func TestValidateQLoRAConfig(t *testing.T) {
+	good := QLoRAConfig{LoraRank: 8, LoraAlpha: 16, LearningRate: 2e-4, NumTrainingSteps: 200, TargetModules: []string{"q_proj"}}
+	if err := validateQLoRAConfig(&good); err != nil {
+		t.Errorf("good config rejected: %v", err)
+	}
+	bads := []QLoRAConfig{
+		{LoraRank: 0, LoraAlpha: 16, LearningRate: 2e-4, NumTrainingSteps: 200, TargetModules: []string{"q_proj"}},
+		{LoraRank: 8, LoraAlpha: 16, LearningRate: 0, NumTrainingSteps: 200, TargetModules: []string{"q_proj"}},
+		{LoraRank: 8, LoraAlpha: 16, LearningRate: 2e-4, NumTrainingSteps: 99999, TargetModules: []string{"q_proj"}},
+		{LoraRank: 8, LoraAlpha: 16, LearningRate: 2e-4, NumTrainingSteps: 200, TargetModules: nil},
+	}
+	for i, b := range bads {
+		if err := validateQLoRAConfig(&b); err == nil {
+			t.Errorf("case %d: bad config accepted: %+v", i, b)
+		}
+	}
+}
+
+// TestExtractJSONObject verifies the brace-balancing extractor
+// finds the right object even when there's surrounding prose.
+func TestExtractJSONObject(t *testing.T) {
+	body := `Sure! Here's my proposal:
+
+Thinking about it, I want to be a bit conservative.
+
+{"setup": {"name": "ignore"}, "decoy": 1}
+{"lora_rank": 4, "notes": "real one"}
+
+Hope that helps!`
+	got, ok := extractJSONObject(body, "lora_rank")
+	if !ok {
+		t.Fatal("expected to find marker")
+	}
+	if !strings.Contains(got, `"lora_rank": 4`) {
+		t.Errorf("wrong object extracted: %q", got)
+	}
+}
+
+// jsonQuote escapes a string as a JSON string literal for embedding
+// in test data (quoting + backslash-escaping handled by encoding/json).
+func jsonQuote(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
+// ---- end of v0.0.52 agent-integration tests ----
 
 // TestResolveTrainerImage_Precedence verifies the three-tier lookup
 // (spec > ConfigMap > const). Catches regressions in the precedence
