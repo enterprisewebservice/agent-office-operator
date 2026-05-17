@@ -1,0 +1,24 @@
+# v0.0.55: expose the operator's Backstage catalog endpoint so RHDH
+# can pull /backstage/catalog.yaml. ClusterIP — accessible to RHDH
+# in-cluster via the standard <svc>.<ns>.svc.cluster.local URL.
+# The endpoint serves a YAML representation of every ModelRegistry
+# CR's contents (every base model + every fine-tuned ModelVersion)
+# as Backstage Resource entities.
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-office-backstage-catalog
+  namespace: system
+  labels:
+    app.kubernetes.io/name: agent-office-operator
+    app.kubernetes.io/component: backstage-catalog
+    control-plane: controller-manager
+spec:
+  selector:
+    control-plane: controller-manager
+    app.kubernetes.io/name: agent-office-operator
+  ports:
+    - name: http
+      port: 80
+      targetPort: backstage-cat
+      protocol: TCP

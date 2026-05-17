@@ -19,9 +19,11 @@ package main
 import (
 	"crypto/tls"
 	"flag"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -302,6 +304,30 @@ func main() {
 		setupLog.Error(err, "unable to set up ready check")
 		os.Exit(1)
 	}
+
+	// v0.0.55: Backstage catalog endpoint. Runs alongside the manager,
+	// serving a YAML representation of every ModelRegistry CR's
+	// contents at /backstage/catalog.yaml. RHDH's catalog ingestion
+	// polls this URL; the karpathy-research-agent template's
+	// `baseModel` EntityPicker uses the resulting Resource entities
+	// as its dropdown source. See internal/controller/backstage_catalog.go.
+	go func() {
+		mux := http.NewServeMux()
+		mux.Handle("/backstage/catalog.yaml", controller.NewBackstageCatalogHandler(mgr.GetClient()))
+		mux.Handle("/backstage/catalog", controller.NewBackstageCatalogHandler(mgr.GetClient()))
+		mux.HandleFunc("/healthz/backstage", func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte("ok"))
+		})
+		srv := &http.Server{
+			Addr:              ":9443",
+			Handler:           mux,
+			ReadHeaderTimeout: 10 * time.Second,
+		}
+		setupLog.Info("starting Backstage catalog HTTP server", "addr", srv.Addr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			setupLog.Error(err, "Backstage catalog server exited")
+		}
+	}()
 
 	setupLog.Info("starting manager")
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {

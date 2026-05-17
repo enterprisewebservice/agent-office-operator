@@ -92,7 +92,15 @@ spec:
           # rejects "Open agent gateway" cross-origin loads.
           - name: CLUSTER_APPS_DOMAIN
             value: "apps.salamander.aimlworkbench.com"
-        ports: []
+        ports:
+          # v0.0.55: Backstage catalog endpoint. Serves a Backstage-
+          # compatible YAML representation of every ModelRegistry CR
+          # cluster-wide at /backstage/catalog.yaml. RHDH's catalog
+          # ingestion polls this URL; the karpathy-research-agent
+          # template's baseModel EntityPicker reads from it.
+          - containerPort: 9443
+            name: backstage-cat
+            protocol: TCP
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:

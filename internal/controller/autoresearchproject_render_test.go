@@ -496,6 +496,164 @@ func TestRenderAutoresearchAgentPage(t *testing.T) {
 
 // ---- end of v0.0.53 KnowledgeBase autoresearch-bootstrap tests ----
 
+// ---- v0.0.55: BackstageCatalog entity-emit tests ----
+
+// TestMvToBackstageResource_BaseModel verifies a base-model
+// ModelVersion is converted to a Backstage Resource with the right
+// title, annotations, and tags.
+func TestMvToBackstageResource_BaseModel(t *testing.T) {
+	rm := map[string]any{
+		"id":          "1",
+		"name":        "ibm-granite/granite-4.1-8b",
+		"description": "IBM Granite 4.1-8B Instruct.",
+	}
+	mv := map[string]any{
+		"id":                 "2",
+		"name":               "main",
+		"registeredModelId":  "1",
+		"customProperties": map[string]any{
+			"uri": map[string]any{
+				"string_value":  "huggingface://ibm-granite/granite-4.1-8b",
+				"metadataType": "MetadataStringValue",
+			},
+			"kind": map[string]any{
+				"string_value":  "base-model",
+				"metadataType": "MetadataStringValue",
+			},
+		},
+	}
+	got := mvToBackstageResource("autoresearch-registry", rm, mv)
+	if got.Kind != "Resource" {
+		t.Errorf("wanted kind=Resource, got %s", got.Kind)
+	}
+	if !strings.Contains(got.Name, "granite-4-1-8b") {
+		t.Errorf("name should contain sanitized granite id: %q", got.Name)
+	}
+	if got.Title != "ibm-granite/granite-4.1-8b @ main" {
+		t.Errorf("unexpected title: %q", got.Title)
+	}
+	if got.Annotations["agentoffice.ai/model-uri"] != "huggingface://ibm-granite/granite-4.1-8b" {
+		t.Errorf("missing uri annotation: %#v", got.Annotations)
+	}
+	hasBaseTag := false
+	for _, tag := range got.Tags {
+		if tag == "base-model" {
+			hasBaseTag = true
+		}
+	}
+	if !hasBaseTag {
+		t.Errorf("missing base-model tag: %v", got.Tags)
+	}
+}
+
+// TestMvToBackstageResource_FineTuned verifies a fine-tuned-adapter
+// ModelVersion surfaces eval_loss + kept annotations.
+func TestMvToBackstageResource_FineTuned(t *testing.T) {
+	rm := map[string]any{
+		"id":          "3",
+		"name":        "autoresearch-granite-8b",
+		"description": "Fine-tunes of granite-4.1-8b.",
+	}
+	mv := map[string]any{
+		"id":                "5",
+		"name":              "round-37",
+		"registeredModelId": "3",
+		"customProperties": map[string]any{
+			"adapter_uri": map[string]any{
+				"string_value":  "quay-quay.../adapters:round-37",
+				"metadataType": "MetadataStringValue",
+			},
+			"eval_loss": map[string]any{
+				"string_value":  "0.496074",
+				"metadataType": "MetadataStringValue",
+			},
+			"kept": map[string]any{
+				"string_value":  "true",
+				"metadataType": "MetadataStringValue",
+			},
+			"kind": map[string]any{
+				"string_value":  "fine-tuned-adapter",
+				"metadataType": "MetadataStringValue",
+			},
+		},
+	}
+	got := mvToBackstageResource("autoresearch-registry", rm, mv)
+	if got.Annotations["agentoffice.ai/eval-loss"] != "0.496074" {
+		t.Errorf("missing eval-loss annotation: %#v", got.Annotations)
+	}
+	if got.Annotations["agentoffice.ai/kept"] != "true" {
+		t.Errorf("missing kept annotation: %#v", got.Annotations)
+	}
+}
+
+// TestSanitizeName covers the edge cases that bit Backstage's strict
+// DNS-label validation in past projects (uppercase, slashes, dots,
+// trailing dashes, all-bad-chars).
+func TestSanitizeName(t *testing.T) {
+	cases := map[string]string{
+		"ibm-granite/granite-4.1-8b":         "ibm-granite-granite-4-1-8b",
+		"AutoResearch/Granite-8B":            "autoresearch-granite-8b",
+		"foo.bar.baz":                        "foo-bar-baz",
+		"!!@@##":                             "model",
+		"-leading-and-trailing-dashes-":      "leading-and-trailing-dashes",
+	}
+	for in, want := range cases {
+		if got := sanitizeName(in); got != want {
+			t.Errorf("sanitizeName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestRenderBackstageYAML_Empty makes sure we emit a valid empty
+// catalog (with a comment) rather than something Backstage rejects.
+func TestRenderBackstageYAML_Empty(t *testing.T) {
+	out := renderBackstageYAML(nil)
+	if !strings.Contains(out, "no ModelVersion entries found") {
+		t.Errorf("missing 'no entries' comment in empty output:\n%s", out)
+	}
+	if strings.Contains(out, "---") {
+		t.Errorf("empty catalog shouldn't have any document separators")
+	}
+}
+
+// TestRenderBackstageYAML_Roundtrip verifies a couple entities render
+// to a YAML doc whose required fields are present + deterministic.
+func TestRenderBackstageYAML_Roundtrip(t *testing.T) {
+	entities := []backstageEntity{
+		{
+			Kind:        "Resource",
+			Name:        "granite-4-1-8b-main",
+			Title:       "ibm-granite/granite-4.1-8b @ main",
+			Description: "IBM Granite 4.1-8B",
+			Tags:        []string{"model", "base-model"},
+			Annotations: map[string]string{
+				"agentoffice.ai/model-uri":     "huggingface://ibm-granite/granite-4.1-8b",
+				"agentoffice.ai/model-version": "main",
+			},
+			SpecType:  "ml-model",
+			Owner:     "user:default/deanpeterson",
+			Lifecycle: "production",
+		},
+	}
+	out := renderBackstageYAML(entities)
+	for _, want := range []string{
+		"apiVersion: backstage.io/v1alpha1",
+		"kind: Resource",
+		"name: granite-4-1-8b-main",
+		`title: "ibm-granite/granite-4.1-8b @ main"`,
+		"type: ml-model",
+		"owner: user:default/deanpeterson",
+		"agentoffice.ai/model-uri",
+		"---",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("rendered YAML missing %q\nfull output:\n%s", want, out)
+		}
+	}
+}
+
+// ---- end of v0.0.55 BackstageCatalog tests ----
+
 // TestResolveTrainerImage_Precedence verifies the three-tier lookup
 // (spec > ConfigMap > const). Catches regressions in the precedence
 // order — e.g. if the ConfigMap ever wins over an explicit spec

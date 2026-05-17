@@ -1,8 +1,9 @@
 resources:
 - manager.yaml
+- backstage_catalog_service.yaml
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 images:
 - name: controller
   newName: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-operator
-  newTag: v0.0.54
+  newTag: v0.0.55
