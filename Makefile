@@ -537,7 +537,7 @@ catalog-fbc-norebuild: opm ## Regen catalog.yaml inline bundle content from curr
 #      trainer (e.g. v0.0.12 keeping silent-skip persistence behavior
 #      after v0.0.13 fixed it).
 .PHONY: preflight
-preflight: verify-version ## Run all structural sanity checks before commit.
+preflight: verify-version preflight-unit-tests ## Run all structural sanity checks AND fast unit tests before commit.
 	@BAD=0; \
 	if ! grep -q '^schema: olm.channel' catalog/agent-office-operator/catalog.yaml; then \
 	  echo "  ERR catalog/agent-office-operator/catalog.yaml missing 'schema: olm.channel' block"; \
@@ -582,6 +582,26 @@ preflight: verify-version ## Run all structural sanity checks before commit.
 	  fi; \
 	fi; \
 	if [ $$BAD -ne 0 ]; then echo "PREFLIGHT FAIL — see ERR lines above"; exit 1; else echo "All preflight checks passed"; fi
+
+# preflight-unit-tests: run ONLY the fast, no-cluster-needed unit tests
+# that exercise the operator's render + helper functions. The full
+# `make test` target depends on envtest + controller-gen which is slow
+# and CI-only; preflight needs to stay snappy enough to run on every
+# commit. Tests in this set are explicitly listed via -run regex so a
+# future heavier test added to internal/controller doesn't bloat the
+# pre-commit time.
+#
+# WHY THIS EXISTS: v0.0.49 shipped a renderer that produced
+# `image: '{{TRAINER_IMAGE}}'` literally (1-replace hit a comment
+# before the image: line). One full Konflux cycle to discover.
+# TestRender_NoPlaceholderSurvives catches it in <400ms locally.
+# Every new render-path bug should add its own assert here.
+.PHONY: preflight-unit-tests
+preflight-unit-tests: ## Run the fast unit tests preflight depends on.
+	@echo "  -- go test (render + resolveTrainerImage tests)..."
+	@go test ./internal/controller/ -run 'TestRender_|TestResolveTrainerImage_' -count=1 >/dev/null \
+	  && echo "  OK  render + helper unit tests" \
+	  || { echo "  ERR unit tests failed; re-run with: go test ./internal/controller/ -v -run 'TestRender_|TestResolveTrainerImage_'"; exit 1; }
 
 # install-hooks: drop a pre-commit hook that refuses to commit when
 # preflight fails. Symlink (not copy) so future edits to the script
