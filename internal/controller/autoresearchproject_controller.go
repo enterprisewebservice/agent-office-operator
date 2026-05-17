@@ -587,7 +587,7 @@ func (r *AutoResearchProjectReconciler) drainOpenJobs(ctx context.Context, p *ag
 			}
 			kept = isImprovement(p, evalLoss)
 
-			// v0.0.49: verify the adapter URI is actually
+			// v0.0.50: verify the adapter URI is actually
 			// pullable from the registry before trusting the
 			// trainer's "I pushed it" claim. Silent persistence
 			// skips (round 17 in v0.0.47/v0.0.12 — trainer warned

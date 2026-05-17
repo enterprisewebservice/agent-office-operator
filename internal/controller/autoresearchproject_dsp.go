@@ -473,13 +473,33 @@ func (r *AutoResearchProjectReconciler) submitDSPRun(ctx context.Context, p *age
 // YAML — that's a developer error (someone edited pipeline.yaml
 // and accidentally inlined the image again), not a runtime
 // condition the operator should silently tolerate.
+//
+// v0.0.50 fix: switched from strings.Replace(..., 1) to ReplaceAll
+// because v0.0.49 mentioned {{TRAINER_IMAGE}} TWICE in pipeline.yaml
+// (once in a documentation comment, once on the actual image: line).
+// The 1-count replace hit the comment first, leaving the image: line
+// with the literal placeholder string. DSP accepted the upload
+// (kfp doesn't validate image format), but every trainer pod
+// went into ImagePullBackOff trying to pull image "{{TRAINER_IMAGE}}".
+// ReplaceAll handles both occurrences correctly — the rendered
+// comment ends up with the resolved image URL too, which is
+// harmless (comments are stripped by kfp's parser).
 func (r *AutoResearchProjectReconciler) renderPipelineYAML(ctx context.Context, p *agentofficev1alpha1.AutoResearchProject) ([]byte, error) {
 	if !strings.Contains(string(pipelineYAML), trainerImagePlaceholder) {
 		return nil, fmt.Errorf("embedded pipeline.yaml missing %s placeholder — "+
-			"someone reverted the templating in pipeline.yaml line 93", trainerImagePlaceholder)
+			"someone reverted the templating in pipeline.yaml", trainerImagePlaceholder)
 	}
 	image := r.resolveTrainerImage(ctx, p)
-	rendered := strings.Replace(string(pipelineYAML), trainerImagePlaceholder, image, 1)
+	rendered := strings.ReplaceAll(string(pipelineYAML), trainerImagePlaceholder, image)
+	// Belt and braces: assert no placeholder survived. If we ever
+	// switch to a more complex template format and miss a token
+	// the operator should refuse to upload rather than ship a
+	// pipeline that ImagePullBackOffs every pod.
+	if strings.Contains(rendered, trainerImagePlaceholder) {
+		return nil, fmt.Errorf("renderPipelineYAML: %s placeholder survived substitution — "+
+			"this means the template has a form ReplaceAll can't handle; refusing to upload",
+			trainerImagePlaceholder)
+	}
 	return []byte(rendered), nil
 }
 

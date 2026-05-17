@@ -11,7 +11,7 @@
 # embedded olm.bundle.object content (which is what OLM reads when
 # computing channel heads). Keep in sync with the image tag in
 # .tekton/operator-image-on-push.yaml etc.
-VERSION ?= 0.0.49
+VERSION ?= 0.0.50
 
 # CHANNELS define the bundle channels used in the bundle.
 # Add a new line here if you would like to change its default config. (E.g CHANNELS = "candidate,fast,stable")
@@ -559,6 +559,14 @@ preflight: verify-version ## Run all structural sanity checks before commit.
 	if grep -q "image: '{{TRAINER_IMAGE}}'" internal/controller/pipeline.yaml \
 	   && grep -q "image: '{{TRAINER_IMAGE}}'" scripts/autoresearch-pipeline/pipeline.yaml; then \
 	  echo "  OK  pipeline.yaml uses {{TRAINER_IMAGE}} placeholder (operator templates at upload)"; \
+	  IMG_LINES=$$(grep -c "image: '{{TRAINER_IMAGE}}'" internal/controller/pipeline.yaml); \
+	  if [ "$$IMG_LINES" != "1" ]; then \
+	    echo "  ERR pipeline.yaml has $$IMG_LINES image: '{{TRAINER_IMAGE}}' lines (expected exactly 1)"; \
+	    echo "      multi-image pipelines need ReplaceAll-safe substitution"; \
+	    BAD=1; \
+	  else \
+	    echo "  OK  exactly one image: '{{TRAINER_IMAGE}}' line"; \
+	  fi; \
 	else \
 	  IMG_PIPE=$$(grep -oE 'autoresearch-trainer:v[0-9]+\.[0-9]+\.[0-9]+' internal/controller/pipeline.yaml | head -1); \
 	  IMG_SCRIPT=$$(grep -oE 'autoresearch-trainer:v[0-9]+\.[0-9]+\.[0-9]+' scripts/autoresearch-pipeline/pipeline.yaml | head -1); \
