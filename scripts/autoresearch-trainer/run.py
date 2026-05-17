@@ -78,28 +78,36 @@ def _push_adapter_to_quay(adapter_path: str, destination: str) -> str:
     """oras push <adapter_path>/ to the given OCI destination.
     Returns the full OCI URI on success. Raises on failure.
 
-    Uses the docker config at /var/run/secrets/quay-push/config.json
-    if present (mounted by the operator's pipeline pod spec). Falls
-    back to the standard ~/.docker/config.json otherwise.
+    Credentials discovery order:
+      1. /var/run/secrets/quay-push/.dockerconfigjson — Kubernetes
+         Secret of type kubernetes.io/dockerconfigjson mounted into
+         the pod. This is what the operator will arrange once the
+         pipeline pod spec gains a volume mount for quay-push-secret.
+      2. /var/run/secrets/quay-push/config.json — fallback for
+         pre-renamed mounts.
+      3. ~/.docker/config.json — the default oras lookup.
+
+    The first existing file becomes oras's --registry-config.
     """
     import subprocess
-    env = os.environ.copy()
-    pushsecret_dir = "/var/run/secrets/quay-push"
-    if os.path.isdir(pushsecret_dir):
-        env["DOCKER_CONFIG"] = pushsecret_dir
-    # oras push <dest> --artifact-type application/vnd.peft.lora.v1+tar <files...>
-    # We push the directory contents (oras handles tarring the dir
-    # listing). Layer media type identifies our format so consumers
-    # know it's a PEFT/LoRA adapter, not a generic blob.
-    cmd = [
-        "oras", "push", destination,
-        "--artifact-type", "application/vnd.peft.lora.v1",
-        # Push the whole adapter directory as one layer. oras will
-        # walk the dir and pack it into the OCI artifact.
-        f"{adapter_path}:application/vnd.peft.lora.dir+tar",
+    cmd = ["oras", "push", destination,
+           "--artifact-type", "application/vnd.peft.lora.v1"]
+    auth_candidates = [
+        "/var/run/secrets/quay-push/.dockerconfigjson",
+        "/var/run/secrets/quay-push/config.json",
     ]
+    for c in auth_candidates:
+        if os.path.exists(c):
+            cmd.extend(["--registry-config", c])
+            emit_progress(f"oras using auth file: {c}")
+            break
+    else:
+        emit_progress("oras using default ~/.docker/config.json (no quay-push-secret mounted)")
+    # Push the whole adapter directory as one layer. oras will
+    # walk the dir and pack it into the OCI artifact.
+    cmd.append(f"{adapter_path}:application/vnd.peft.lora.dir+tar")
     emit_progress(f"oras push: {' '.join(cmd)}")
-    result = subprocess.run(cmd, env=env, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(
             f"oras push failed (rc={result.returncode}): "
