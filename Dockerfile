@@ -1,5 +1,9 @@
-# Build the manager binary
-FROM golang:1.24 AS builder
+# Build the manager binary.
+# v0.0.52: bumped to golang:1.25 because go.mod requires >= 1.25.0.
+# Adding go-git brought in golang.org/x/sys v0.43 (and friends) which
+# pull go-directive minimums up. The Konflux build pipeline picks
+# this FROM line up directly — keep in sync with go.mod's go directive.
+FROM golang:1.25 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 

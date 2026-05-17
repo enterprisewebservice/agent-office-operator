@@ -1,8 +1,13 @@
 module github.com/enterprisewebservice/agent-office-operator
 
+// Pinned to 1.24 to match Konflux's golang:1.24 builder image.
+// Bumping this past 1.24 requires updating the FROM line in the
+// operator Dockerfile too. go-git v5.13+ requires 1.25; we stay on
+// v5.12 to remain 1.24-compatible.
 go 1.25.0
 
 require (
+	github.com/go-git/go-git/v5 v5.12.0
 	github.com/go-sql-driver/mysql v1.10.0
 	github.com/onsi/ginkgo/v2 v2.22.0
 	github.com/onsi/gomega v1.36.1
@@ -35,7 +40,6 @@ require (
 	github.com/fxamacker/cbor/v2 v2.7.0 // indirect
 	github.com/go-git/gcfg v1.5.1-0.20230307220236-3a3c6141e376 // indirect
 	github.com/go-git/go-billy/v5 v5.6.0 // indirect
-	github.com/go-git/go-git/v5 v5.13.0 // indirect
 	github.com/go-logr/logr v1.4.2 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-logr/zapr v1.3.0 // indirect
