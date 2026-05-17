@@ -11,7 +11,7 @@
 # embedded olm.bundle.object content (which is what OLM reads when
 # computing channel heads). Keep in sync with the image tag in
 # .tekton/operator-image-on-push.yaml etc.
-VERSION ?= 0.0.50
+VERSION ?= 0.0.51
 
 # CHANNELS define the bundle channels used in the bundle.
 # Add a new line here if you would like to change its default config. (E.g CHANNELS = "candidate,fast,stable")
@@ -598,10 +598,10 @@ preflight: verify-version preflight-unit-tests ## Run all structural sanity chec
 # Every new render-path bug should add its own assert here.
 .PHONY: preflight-unit-tests
 preflight-unit-tests: ## Run the fast unit tests preflight depends on.
-	@echo "  -- go test (render + resolveTrainerImage tests)..."
-	@go test ./internal/controller/ -run 'TestRender_|TestResolveTrainerImage_' -count=1 >/dev/null \
-	  && echo "  OK  render + helper unit tests" \
-	  || { echo "  ERR unit tests failed; re-run with: go test ./internal/controller/ -v -run 'TestRender_|TestResolveTrainerImage_'"; exit 1; }
+	@echo "  -- go test (render + resolve + verifyAdapterArtifact tests)..."
+	@go test ./internal/controller/ -run 'TestRender_|TestResolveTrainerImage_|TestParseBearerChallenge|TestVerifyAdapterArtifact_' -count=1 >/dev/null \
+	  && echo "  OK  render + verify + helper unit tests" \
+	  || { echo "  ERR unit tests failed; re-run with: go test ./internal/controller/ -v -run 'TestRender_|TestResolveTrainerImage_|TestParseBearerChallenge|TestVerifyAdapterArtifact_'"; exit 1; }
 
 # install-hooks: drop a pre-commit hook that refuses to commit when
 # preflight fails. Symlink (not copy) so future edits to the script

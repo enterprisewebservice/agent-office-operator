@@ -15,6 +15,9 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -366,14 +369,24 @@ func deriveQuayPushDestination(p *agentofficev1alpha1.AutoResearchProject, round
 	return fmt.Sprintf("%s/%s:%s", registry, repo, tag)
 }
 
-// deriveModelRegistryTarget returns the (URL, RegisteredModel name)
-// pair the trainer should register its ModelVersion against.
-// Auto-discovers the cluster's default ModelRegistry instance via
-// the in-cluster service when no override is given.
+// deriveModelRegistryTarget returns the (URL, RegisteredModel name,
+// reason) triple the trainer should register its ModelVersion against.
 //
-// Returns ("", "") when no Model Registry is reachable / configured
-// — trainer's "skip registration when URL empty" path then no-ops.
-func deriveModelRegistryTarget(ctx context.Context, c client.Client, p *agentofficev1alpha1.AutoResearchProject) (url, name string) {
+// `reason` is empty when the lookup found a usable target. When empty
+// URL is returned, `reason` describes WHY in human-readable form so
+// the caller can surface it on Status.Conditions[ModelRegistryAvailable]
+// instead of silently skipping registration each round.
+//
+// Common reasons:
+//   - "rhoai-model-registries namespace has no <instance>-rest Service"
+//   - "spec.adapterStorage.modelRegistry.registryInstance points at non-existent instance"
+//
+// Why this matters: v0.0.50 silently skipped MR registration on this
+// cluster because the namespace only has `model-catalog` (a different
+// component) and no `default-modelregistry-rest`. The trainer log
+// said "model registry registration skipped" but nobody noticed.
+// v0.0.51 surfaces this via a status condition.
+func deriveModelRegistryTarget(ctx context.Context, c client.Client, p *agentofficev1alpha1.AutoResearchProject) (mrURL, name, reason string) {
 	defaultInstance := "default-modelregistry"
 	defaultRegistryNS := "rhoai-model-registries"
 
@@ -397,12 +410,11 @@ func deriveModelRegistryTarget(ctx context.Context, c client.Client, p *agentoff
 		Namespace: defaultRegistryNS,
 		Name:      instance + "-rest",
 	}, &svc); err != nil {
-		// Fallback: no service → skip registration this round.
-		// Don't fail the whole training — adapter still pushes
-		// to Quay, just no MR record. The next reconcile retries.
-		return "", regName
+		return "", regName, fmt.Sprintf("Service %s/%s-rest not found — "+
+			"is the RHOAI Model Registry component installed?",
+			defaultRegistryNS, instance)
 	}
-	return fmt.Sprintf("https://%s.%s.svc.cluster.local:8443", svc.Name, svc.Namespace), regName
+	return fmt.Sprintf("https://%s.%s.svc.cluster.local:8443", svc.Name, svc.Namespace), regName, ""
 }
 
 // submitDSPRun creates a kfp Run for one experiment cycle. The
@@ -440,7 +452,24 @@ func (r *AutoResearchProjectReconciler) submitDSPRun(ctx context.Context, p *age
 	// fields. Workshop attendees don't have to specify any of
 	// this; team leads can override per project.
 	quayDest := deriveQuayPushDestination(p, round)
-	mrURL, mrName := deriveModelRegistryTarget(ctx, r.Client, p)
+	mrURL, mrName, mrReason := deriveModelRegistryTarget(ctx, r.Client, p)
+	// Surface MR availability on Status so silent skips are visible.
+	// Done here (per-submit) rather than per-reconcile to avoid the
+	// extra Service GET on every reconcile pass.
+	mrCond := agentofficev1alpha1.AutoResearchProjectCondition{
+		Type:               "ModelRegistryAvailable",
+		LastTransitionTime: metav1.Now(),
+	}
+	if mrURL != "" {
+		mrCond.Status = "True"
+		mrCond.Reason = "Discovered"
+		mrCond.Message = fmt.Sprintf("registering ModelVersion in %s as %q", mrURL, mrName)
+	} else {
+		mrCond.Status = "False"
+		mrCond.Reason = "ServiceMissing"
+		mrCond.Message = mrReason
+	}
+	p.Status.Conditions = mergeARPConditions(p.Status.Conditions, mrCond)
 
 	params := map[string]any{
 		"base_model":              p.Spec.BaseModel.HuggingfaceID,
@@ -551,26 +580,42 @@ func (r *AutoResearchProjectReconciler) verifyAdapterArtifact(ctx context.Contex
 	if perr != nil {
 		return "Unknown", fmt.Sprintf("malformed adapter URI %q: %v", uri, perr)
 	}
-	authHeader := r.readQuayBasicAuth(ctx, p.Namespace, registry)
+	basicAuthHeader := r.readQuayBasicAuth(ctx, p.Namespace, registry)
 	headURL := fmt.Sprintf("https://%s/v2/%s/manifests/%s", registry, repo, tag)
 
-	req, _ := newHTTPRequestWithContext(ctx, "HEAD", headURL, nil)
-	if authHeader != "" {
-		req.Header.Set("Authorization", authHeader)
-	}
-	// Accept the modern OCI + Docker v2 manifest media types so the
-	// registry returns a 200 instead of an old "manifest unknown"
-	// fallback when the content is OCI-specific (our adapter
-	// artifact is application/vnd.peft.lora.v1).
-	req.Header.Set("Accept", "application/vnd.oci.image.manifest.v1+json, "+
-		"application/vnd.oci.image.index.v1+json, "+
-		"application/vnd.docker.distribution.manifest.v2+json")
-
-	resp, err := insecureHTTPClient().Do(req)
+	// First attempt: no auth header. Quay (and any Docker v2 registry)
+	// responds with 401 + WWW-Authenticate when it wants a bearer
+	// token. We DON'T send Basic up front because /v2/<repo>/manifests
+	// rejects Basic on Quay (the v2 endpoint speaks bearer-only) —
+	// sending Basic actually triggers a 401 "Invalid bearer token
+	// format" path that's harder to recover from than starting clean.
+	resp, err := r.doManifestHEAD(ctx, headURL, "")
 	if err != nil {
 		return "Unknown", fmt.Sprintf("HEAD %s failed: %v", headURL, err)
 	}
-	defer resp.Body.Close()
+	resp.Body.Close()
+
+	// Bearer-token challenge flow: parse the WWW-Authenticate header,
+	// exchange Basic credentials at the auth realm for a scoped bearer
+	// token, then retry the HEAD with the bearer.
+	if resp.StatusCode == 401 && basicAuthHeader != "" {
+		realm, service, scope := parseBearerChallenge(resp.Header.Get("Www-Authenticate"))
+		if realm != "" {
+			token, terr := r.exchangeForBearerToken(ctx, realm, service, scope, basicAuthHeader)
+			if terr != nil {
+				return "Unknown", fmt.Sprintf("registry challenged with bearer realm %s but "+
+					"token exchange failed: %v", realm, terr)
+			}
+			if token != "" {
+				resp, err = r.doManifestHEAD(ctx, headURL, "Bearer "+token)
+				if err != nil {
+					return "Unknown", fmt.Sprintf("bearer-authed HEAD %s failed: %v", headURL, err)
+				}
+				resp.Body.Close()
+			}
+		}
+	}
+
 	switch resp.StatusCode {
 	case 200:
 		return "OK", fmt.Sprintf("manifest present at %s", uri)
@@ -583,6 +628,109 @@ func (r *AutoResearchProjectReconciler) verifyAdapterArtifact(ctx context.Contex
 	default:
 		return "Unknown", fmt.Sprintf("registry returned HTTP %d for %s", resp.StatusCode, uri)
 	}
+}
+
+// doManifestHEAD issues a single HEAD with the modern OCI + Docker v2
+// Accept headers. authHeader is sent as-is when non-empty (callers pass
+// either "Basic <b64>" or "Bearer <token>").
+func (r *AutoResearchProjectReconciler) doManifestHEAD(ctx context.Context, url, authHeader string) (*http.Response, error) {
+	req, err := newHTTPRequestWithContext(ctx, "HEAD", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if authHeader != "" {
+		req.Header.Set("Authorization", authHeader)
+	}
+	req.Header.Set("Accept", "application/vnd.oci.image.manifest.v1+json, "+
+		"application/vnd.oci.image.index.v1+json, "+
+		"application/vnd.docker.distribution.manifest.v2+json")
+	return insecureHTTPClient().Do(req)
+}
+
+// parseBearerChallenge extracts the realm, service, and scope from a
+// Docker registry v2 WWW-Authenticate header. The header shape:
+//
+//	Bearer realm="https://.../v2/auth",service="quay...",scope="repository:foo/bar:pull"
+//
+// Returns empty strings if the header isn't a Bearer challenge or is
+// otherwise unparseable — caller treats that as "give up, surface
+// Unknown".
+func parseBearerChallenge(header string) (realm, service, scope string) {
+	header = strings.TrimSpace(header)
+	if !strings.HasPrefix(strings.ToLower(header), "bearer ") {
+		return "", "", ""
+	}
+	body := header[len("Bearer "):]
+	// The header is a comma-separated list of key=quoted-value pairs.
+	// A simple split-on-comma is good enough for the well-formed
+	// outputs Quay + Harbor + GHCR all produce; nothing fancier
+	// needed.
+	for _, part := range strings.Split(body, ",") {
+		kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		val := strings.Trim(kv[1], `"`)
+		switch strings.ToLower(kv[0]) {
+		case "realm":
+			realm = val
+		case "service":
+			service = val
+		case "scope":
+			scope = val
+		}
+	}
+	return realm, service, scope
+}
+
+// exchangeForBearerToken posts our Basic credentials to the auth realm
+// the registry advertised in its WWW-Authenticate challenge, and
+// returns the bearer token to use on the retry. The realm endpoint
+// accepts service + scope as query parameters per the Docker v2
+// distribution spec.
+func (r *AutoResearchProjectReconciler) exchangeForBearerToken(ctx context.Context, realm, service, scope, basicAuthHeader string) (string, error) {
+	q := url.Values{}
+	if service != "" {
+		q.Set("service", service)
+	}
+	if scope != "" {
+		q.Set("scope", scope)
+	}
+	full := realm
+	if len(q) > 0 {
+		full = realm + "?" + q.Encode()
+	}
+	req, err := newHTTPRequestWithContext(ctx, "GET", full, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", basicAuthHeader)
+
+	resp, err := insecureHTTPClient().Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("realm %s returned HTTP %d", realm, resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	var out struct {
+		Token       string `json:"token"`
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return "", fmt.Errorf("decode token response: %w", err)
+	}
+	// Quay populates `.token`; some registries populate `.access_token`.
+	// Spec says either is valid; prefer whichever is non-empty.
+	if out.Token != "" {
+		return out.Token, nil
+	}
+	return out.AccessToken, nil
 }
 
 // splitOCIURI parses "registry/repo:tag" into its three parts.

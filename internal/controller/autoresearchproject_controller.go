@@ -260,6 +260,23 @@ func (r *AutoResearchProjectReconciler) Reconcile(ctx context.Context, req ctrl.
 	project.Status.Round = round
 	project.Status.Phase = "Running"
 
+	// v0.0.51: refresh Ready=True with a CURRENT message on every
+	// successful submit. Previously a once-stuck failure message
+	// (e.g. v0.0.49's "submit DSP run failed: unknown template
+	// format") could persist on the Ready condition long after the
+	// problem was fixed because markPhaseAndSave wasn't called on
+	// the happy path. Updating here guarantees the message reflects
+	// the most-recent reconcile.
+	project.Status.Conditions = mergeARPConditions(project.Status.Conditions,
+		agentofficev1alpha1.AutoResearchProjectCondition{
+			Type:   "Ready",
+			Status: "True",
+			Reason: "Running",
+			Message: fmt.Sprintf("submitted round %d (runID=%s, dspRunID=%s)",
+				round, runID, dspRun.RunID),
+			LastTransitionTime: now,
+		})
+
 	// Prepend a placeholder record for the in-flight run. We'll
 	// fill in EvalLoss + Kept when the Job completes.
 	record := agentofficev1alpha1.AutoResearchExperimentRecord{
@@ -587,7 +604,7 @@ func (r *AutoResearchProjectReconciler) drainOpenJobs(ctx context.Context, p *ag
 			}
 			kept = isImprovement(p, evalLoss)
 
-			// v0.0.50: verify the adapter URI is actually
+			// v0.0.51: verify the adapter URI is actually
 			// pullable from the registry before trusting the
 			// trainer's "I pushed it" claim. Silent persistence
 			// skips (round 17 in v0.0.47/v0.0.12 — trainer warned

@@ -27,6 +27,10 @@ package controller
 
 import (
 	"context"
+	"encoding/base64"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -128,6 +132,153 @@ func TestRender_ParsesAsYAML(t *testing.T) {
 	if ir["pipelineInfo"] == nil {
 		t.Fatalf("rendered pipeline.yaml parsed but has no pipelineInfo — "+
 			"substitution may have corrupted structure. Output:\n%s", string(out))
+	}
+}
+
+// TestParseBearerChallenge verifies the WWW-Authenticate parser
+// handles the exact shape Quay returns on its v2 endpoints.
+func TestParseBearerChallenge(t *testing.T) {
+	cases := []struct {
+		name, header, wantRealm, wantService, wantScope string
+	}{
+		{
+			name:        "quay v2 manifests pull challenge",
+			header:      `Bearer realm="https://quay.example.com/v2/auth",service="quay.example.com",scope="repository:dean/foo:pull"`,
+			wantRealm:   "https://quay.example.com/v2/auth",
+			wantService: "quay.example.com",
+			wantScope:   "repository:dean/foo:pull",
+		},
+		{
+			name:        "no scope (e.g. /v2/ root challenge)",
+			header:      `Bearer realm="https://quay.example.com/v2/auth",service="quay.example.com"`,
+			wantRealm:   "https://quay.example.com/v2/auth",
+			wantService: "quay.example.com",
+			wantScope:   "",
+		},
+		{
+			name:   "Basic challenge (not bearer) returns empty",
+			header: `Basic realm="my-registry"`,
+		},
+		{
+			name:   "garbage returns empty",
+			header: "BANANA",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r, s, sc := parseBearerChallenge(tc.header)
+			if r != tc.wantRealm || s != tc.wantService || sc != tc.wantScope {
+				t.Errorf("got (%q,%q,%q), want (%q,%q,%q)",
+					r, s, sc, tc.wantRealm, tc.wantService, tc.wantScope)
+			}
+		})
+	}
+}
+
+// TestVerifyAdapterArtifact_BearerFlow simulates Quay's
+// challenge-then-token flow with an httptest.Server and asserts
+// verifyAdapterArtifact actually flips Unknown→OK when the bearer
+// exchange succeeds. This is the regression test for v0.0.50's
+// "AdapterPushOK=Unknown forever even though the manifest is right
+// there" symptom.
+func TestVerifyAdapterArtifact_BearerFlow(t *testing.T) {
+	const (
+		repo        = "dean/agent-office-adapter"
+		tag         = "round-1"
+		bearerToken = "TEST-BEARER-TOKEN"
+		basicUser   = "robot"
+		basicPass   = "secret"
+	)
+	wantBasicHeader := "Basic " + base64.StdEncoding.EncodeToString([]byte(basicUser+":"+basicPass))
+
+	// Fake registry: first HEAD comes back 401 + WWW-Authenticate;
+	// /v2/auth checks Basic and returns a token; subsequent HEAD with
+	// matching bearer returns 200.
+	var srv *httptest.Server
+	srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		switch {
+		case strings.HasSuffix(req.URL.Path, "/v2/auth"):
+			if req.Header.Get("Authorization") != wantBasicHeader {
+				w.WriteHeader(401)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"token":%q}`, bearerToken)
+		case req.Method == "HEAD" && strings.Contains(req.URL.Path, "/v2/"+repo+"/manifests/"):
+			if req.Header.Get("Authorization") == "Bearer "+bearerToken {
+				w.WriteHeader(200)
+				return
+			}
+			w.Header().Set("WWW-Authenticate",
+				fmt.Sprintf(`Bearer realm="%s/v2/auth",service="%s",scope="repository:%s:pull"`,
+					srv.URL, strings.TrimPrefix(srv.URL, "https://"), repo))
+			w.WriteHeader(401)
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+	hostport := strings.TrimPrefix(srv.URL, "https://")
+
+	// Build a quay-push-secret dockerconfigjson the operator's
+	// readQuayBasicAuth can decode for this registry host.
+	auth := base64.StdEncoding.EncodeToString([]byte(basicUser + ":" + basicPass))
+	cfg := fmt.Sprintf(`{"auths":{%q:{"auth":%q}}}`, hostport, auth)
+	sec := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "quay-push-secret", Namespace: "ns"},
+		Type:       corev1.SecretTypeDockerConfigJson,
+		Data:       map[string][]byte{".dockerconfigjson": []byte(cfg)},
+	}
+	r := newReconcilerForRenderTest(t, sec)
+	p := &agentofficev1alpha1.AutoResearchProject{
+		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "ns"},
+	}
+
+	uri := fmt.Sprintf("%s/%s:%s", hostport, repo, tag)
+	status, detail := r.verifyAdapterArtifact(context.Background(), p, uri)
+	if status != "OK" {
+		t.Fatalf("expected status=OK after bearer flow, got %s (%s)", status, detail)
+	}
+}
+
+// TestVerifyAdapterArtifact_BearerFlow_404 verifies a 404 from the
+// registry (even after a successful bearer exchange) is faithfully
+// reported as Missing — i.e., the trainer reported it pushed but the
+// manifest isn't actually there.
+func TestVerifyAdapterArtifact_BearerFlow_404(t *testing.T) {
+	const bearerToken = "T"
+	var srv *httptest.Server
+	srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		switch {
+		case strings.HasSuffix(req.URL.Path, "/v2/auth"):
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"token":%q}`, bearerToken)
+		case req.Method == "HEAD" && strings.Contains(req.URL.Path, "/manifests/"):
+			if req.Header.Get("Authorization") == "Bearer "+bearerToken {
+				w.WriteHeader(404)
+				return
+			}
+			w.Header().Set("WWW-Authenticate",
+				fmt.Sprintf(`Bearer realm="%s/v2/auth",service="x",scope="repository:y:pull"`, srv.URL))
+			w.WriteHeader(401)
+		}
+	}))
+	defer srv.Close()
+	hostport := strings.TrimPrefix(srv.URL, "https://")
+	cfg := fmt.Sprintf(`{"auths":{%q:{"auth":"%s"}}}`,
+		hostport, base64.StdEncoding.EncodeToString([]byte("u:p")))
+	sec := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "quay-push-secret", Namespace: "ns"},
+		Type:       corev1.SecretTypeDockerConfigJson,
+		Data:       map[string][]byte{".dockerconfigjson": []byte(cfg)},
+	}
+	r := newReconcilerForRenderTest(t, sec)
+	p := &agentofficev1alpha1.AutoResearchProject{
+		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "ns"},
+	}
+	status, _ := r.verifyAdapterArtifact(context.Background(), p, hostport+"/y:z")
+	if status != "Missing" {
+		t.Errorf("expected Missing on 404, got %s", status)
 	}
 }
 
