@@ -105,17 +105,69 @@ func (h *BackstageCatalogHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 	_, _ = io.WriteString(w, out)
 }
 
-// modelCatalogServiceURL is the in-cluster URL of RHOAI's Model
-// Catalog REST API. v0.0.56 surfaces these as Backstage Resource
-// entities too so the karpathy template's baseModel dropdown shows
-// both registered ModelVersions AND the Red Hat-curated catalog.
-const modelCatalogServiceURL = "https://model-catalog.rhoai-model-registries.svc.cluster.local:8443"
+// modelCatalogRouteResolver returns the model-catalog Route URL.
+// v0.0.58: the in-cluster Service URL (model-catalog.<ns>.svc:8443)
+// is blocked by RHOAI's bundled NetworkPolicy
+// `model-catalog-https-route`, which only permits ingress from
+// namespaces labeled `network.openshift.io/policy-group: ingress`
+// (i.e., the OpenShift Router). Cross-namespace direct Service calls
+// time out. Resolving through the Route routes traffic via the
+// Ingress controller, which the NetworkPolicy *does* allow, AND
+// works on any cluster because we read `spec.host` from the Route
+// CR instead of hardcoding a hostname. RHOAI doesn't ship a Service
+// alias outside the NP, so the Route is the supported path.
+//
+// The Route is matched by `spec.to.name == "model-catalog"` in the
+// `rhoai-model-registries` namespace (the canonical ns for the
+// RHOAI Model Catalog component — it's the same one v0.0.55 already
+// targets for ModelRegistry CRs). RBAC: routes.route.openshift.io
+// get/list, added in this version's bundle CSV permissions.
+var modelCatalogNamespace = "rhoai-model-registries"
+var modelCatalogServiceName = "model-catalog"
 
 // saTokenPath is the standard projected SA token path the operator
 // uses to authenticate to in-cluster REST services. Declared as a
 // var rather than a const so unit tests can point it at a fixture
 // without monkey-patching os.ReadFile.
 var saTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+
+// routeListGVK locates OpenShift Route CRs (route.openshift.io/v1).
+// Used to resolve the model-catalog Route's hostname dynamically per
+// cluster (rather than hardcoding `model-catalog.<apps-domain>`).
+var routeListGVK = schema.GroupVersionKind{
+	Group:   "route.openshift.io",
+	Version: "v1",
+	Kind:    "RouteList",
+}
+
+// +kubebuilder:rbac:groups=route.openshift.io,resources=routes,verbs=get;list;watch
+
+// resolveModelCatalogBaseURL returns the URL prefix for the
+// model-catalog REST API on this cluster. Looks up the Route by
+// `spec.to.name == model-catalog` in `rhoai-model-registries` and
+// returns `https://<spec.host>` so the rest of the catalog code
+// can append paths verbatim.
+func (h *BackstageCatalogHandler) resolveModelCatalogBaseURL(ctx context.Context) (string, error) {
+	routeList := &unstructured.UnstructuredList{}
+	routeList.SetGroupVersionKind(routeListGVK)
+	if err := h.Client.List(ctx, routeList, client.InNamespace(modelCatalogNamespace)); err != nil {
+		return "", fmt.Errorf("list Routes in %s: %w", modelCatalogNamespace, err)
+	}
+	for _, r := range routeList.Items {
+		toName, _, _ := unstructured.NestedString(r.Object, "spec", "to", "name")
+		if toName != modelCatalogServiceName {
+			continue
+		}
+		host, _, _ := unstructured.NestedString(r.Object, "spec", "host")
+		if host == "" {
+			return "", fmt.Errorf("Route %s/%s has empty spec.host",
+				r.GetNamespace(), r.GetName())
+		}
+		return "https://" + host, nil
+	}
+	return "", fmt.Errorf("no Route to Service %q found in namespace %q",
+		modelCatalogServiceName, modelCatalogNamespace)
+}
 
 // collect walks every ModelRegistry CR + the Model Catalog REST API
 // and gathers their models. Returns one entity per (RegisteredModel,
@@ -196,6 +248,23 @@ func (h *BackstageCatalogHandler) collect(ctx context.Context) ([]backstageEntit
 // operator pod might get 401/403 until appropriate RBAC is granted.
 // In that case we log and skip rather than fail the whole endpoint.
 func (h *BackstageCatalogHandler) fetchModelCatalogEntities(ctx context.Context) ([]backstageEntity, error) {
+	// v0.0.58: resolve the catalog URL via the Route CR. Bundled
+	// NetworkPolicy blocks direct Service:8443 calls, so the Route
+	// is the only path in.
+	baseURL, rerr := h.resolveModelCatalogBaseURL(ctx)
+	if rerr != nil {
+		// Catalog not installed on this cluster is a common no-op;
+		// don't error. Only surface the placeholder when we *did*
+		// find the Route but couldn't talk to it (handled below).
+		return nil, nil
+	}
+	return h.fetchModelCatalogEntitiesFromURL(ctx, baseURL)
+}
+
+// fetchModelCatalogEntitiesFromURL is the inner helper that does the
+// actual HTTP call given an already-resolved baseURL. Separated so
+// tests can inject an httptest URL without needing a fake Route CR.
+func (h *BackstageCatalogHandler) fetchModelCatalogEntitiesFromURL(ctx context.Context, baseURL string) ([]backstageEntity, error) {
 	token, terr := os.ReadFile(saTokenPath)
 	if terr != nil {
 		// Not running in-cluster or token not mounted — return empty,
@@ -203,7 +272,7 @@ func (h *BackstageCatalogHandler) fetchModelCatalogEntities(ctx context.Context)
 		return nil, nil
 	}
 
-	url := modelCatalogServiceURL + "/api/model_catalog/v1alpha1/models?pageSize=200"
+	url := baseURL + "/api/model_catalog/v1alpha1/models?pageSize=200"
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
@@ -213,10 +282,9 @@ func (h *BackstageCatalogHandler) fetchModelCatalogEntities(ctx context.Context)
 
 	resp, err := h.HTTPClient.Do(req)
 	if err != nil {
-		// Catalog not installed (DNS fail) is the common case on
-		// clusters without the Model Catalog component. Don't error;
-		// just emit nothing.
-		return nil, nil
+		// Route exists but transport failed (TLS hiccup, etc.). Surface
+		// it so the placeholder fires and we can see it in DH.
+		return nil, fmt.Errorf("model-catalog GET %s: %w", url, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == 401 || resp.StatusCode == 403 {

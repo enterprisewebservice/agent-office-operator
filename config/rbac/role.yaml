@@ -108,6 +108,14 @@ rules:
   - update
   - watch
 - apiGroups:
+  - modelregistry.opendatahub.io
+  resources:
+  - modelregistries
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - route.openshift.io
   resources:
   - routes

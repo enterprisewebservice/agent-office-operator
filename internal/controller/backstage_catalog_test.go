@@ -117,16 +117,10 @@ func TestCatalogModelToBackstageResource_Empty(t *testing.T) {
 }
 
 // TestFetchModelCatalogEntities_NoToken covers the local-dev /
-// unit-test path where the SA token isn't mounted — we should
-// return (nil, nil) so the catalog endpoint still serves the
-// Registry portion without erroring.
+// unit-test path where the SA token isn't mounted — the inner
+// helper must return (nil, nil) so the catalog endpoint still
+// serves the Registry portion without erroring.
 func TestFetchModelCatalogEntities_NoToken(t *testing.T) {
-	// We can't easily fake the SA token path without monkey-patching
-	// the constant, so just ensure the function returns gracefully
-	// when called outside a pod. This may PASS on a CI runner that
-	// happens to have a serviceaccount mount; in that case the
-	// network call to model-catalog.svc will fail and we still
-	// expect (nil, nil) from the DNS error branch.
 	h := &BackstageCatalogHandler{
 		HTTPClient: &http.Client{
 			Timeout: 1 * time.Second,
@@ -135,15 +129,17 @@ func TestFetchModelCatalogEntities_NoToken(t *testing.T) {
 			},
 		},
 	}
-	ents, err := h.fetchModelCatalogEntities(context.Background())
+	// Point at a URL that should never resolve — but with no SA
+	// token, we never get that far.
+	ents, err := h.fetchModelCatalogEntitiesFromURL(
+		context.Background(),
+		"https://nonexistent.invalid.local",
+	)
 	if err != nil {
-		// Acceptable only if the env had a token AND the catalog
-		// returned a non-401/403 HTTP error — log and skip rather
-		// than fail.
-		t.Logf("fetchModelCatalogEntities returned err (acceptable outside cluster): %v", err)
+		t.Logf("returned err (acceptable on dev hosts with a real SA token): %v", err)
 	}
-	if ents != nil && len(ents) > 0 {
-		t.Logf("unexpectedly got %d catalog entries — running with cluster access?", len(ents))
+	if len(ents) > 0 {
+		t.Errorf("expected 0 entities with no token, got %d", len(ents))
 	}
 }
 
@@ -192,7 +188,10 @@ func TestFetchModelCatalogEntities_HTTPMock(t *testing.T) {
 	restore := withFakeSAToken(t, "test-bearer-token")
 	defer restore()
 
-	ents, err := h.fetchModelCatalogEntities(context.Background())
+	// Call the inner helper directly so we don't need a fake Route CR
+	// — the outer fetchModelCatalogEntities resolves the URL via a
+	// Route lookup on h.Client, which is nil in this test.
+	ents, err := h.fetchModelCatalogEntitiesFromURL(context.Background(), server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
