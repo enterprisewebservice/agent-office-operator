@@ -260,7 +260,7 @@ func (r *AutoResearchProjectReconciler) Reconcile(ctx context.Context, req ctrl.
 	project.Status.Round = round
 	project.Status.Phase = "Running"
 
-	// v0.0.56: refresh Ready=True with a CURRENT message on every
+	// v0.0.57: refresh Ready=True with a CURRENT message on every
 	// successful submit. Previously a once-stuck failure message
 	// (e.g. v0.0.49's "submit DSP run failed: unknown template
 	// format") could persist on the Ready condition long after the
@@ -407,7 +407,7 @@ func (r *AutoResearchProjectReconciler) requestProposal(ctx context.Context, p *
 		return validationQLoRAConfig(round), "validation (spec.validationMode=true)", nil
 	}
 
-	// v0.0.56: try to get a real proposal from the experimenter agent.
+	// v0.0.57: try to get a real proposal from the experimenter agent.
 	// Failure falls back to the starter config so the loop never
 	// wedges — AgentIntegrationOK condition surfaces what went wrong.
 	cfg, source, err := r.proposeViaAgent(ctx, p, round)
@@ -628,7 +628,7 @@ func (r *AutoResearchProjectReconciler) drainOpenJobs(ctx context.Context, p *ag
 			}
 			kept = isImprovement(p, evalLoss)
 
-			// v0.0.56: verify the adapter URI is actually
+			// v0.0.57: verify the adapter URI is actually
 			// pullable from the registry before trusting the
 			// trainer's "I pushed it" claim. Silent persistence
 			// skips (round 17 in v0.0.47/v0.0.12 — trainer warned
@@ -675,7 +675,7 @@ func (r *AutoResearchProjectReconciler) drainOpenJobs(ctx context.Context, p *ag
 					})
 			}
 
-			// v0.0.56: write the result to the wiki repo so the
+			// v0.0.57: write the result to the wiki repo so the
 			// agent (and humans) can read it on the next cycle.
 			// Best-effort — wiki commit failures shouldn't fail
 			// the round's status update.

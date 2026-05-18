@@ -57,7 +57,7 @@ metadata:
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
     repository: https://github.com/enterprisewebservice/agent-office-operator
     support: Red Hat Solution Architecture
-  name: agent-office-operator.v0.0.56
+  name: agent-office-operator.v0.0.57
   namespace: placeholder
 spec:
   apiservicedefinitions: {}
@@ -279,7 +279,7 @@ spec:
                       fieldPath: metadata.annotations['olm.targetNamespaces']
                 - name: CLUSTER_APPS_DOMAIN
                   value: apps.salamander.aimlworkbench.com
-                image: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-operator:v0.0.56
+                image: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-operator:v0.0.57
                 imagePullPolicy: Always
                 livenessProbe:
                   httpGet:
@@ -288,6 +288,22 @@ spec:
                   initialDelaySeconds: 15
                   periodSeconds: 20
                 name: manager
+                ports:
+                # Named ports so the operator's Services (Backstage
+                # catalog HTTP at :9443, metrics-auth at :8443) can
+                # reference them by name instead of brittle numeric
+                # targetPorts. Baked into the CSV so they survive
+                # OLM-managed deployment regeneration on every
+                # upgrade — direct deployment patches get reverted.
+                - containerPort: 9443
+                  name: backstage-cat
+                  protocol: TCP
+                - containerPort: 8443
+                  name: metrics
+                  protocol: TCP
+                - containerPort: 8081
+                  name: probe
+                  protocol: TCP
                 readinessProbe:
                   httpGet:
                     path: /readyz
@@ -382,4 +398,4 @@ spec:
   provider:
     name: Red Hat Solution Architecture
     url: https://github.com/enterprisewebservice
-  version: 0.0.56
+  version: 0.0.57
