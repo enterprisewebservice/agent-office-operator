@@ -61,8 +61,10 @@ func TestCatalogModelToBackstageResource(t *testing.T) {
 	if !strings.HasPrefix(got.Name, "catalog-") {
 		t.Errorf("entity name must be prefixed `catalog-` to avoid Registry collisions; got %q", got.Name)
 	}
-	if got.Title != "granite-3.1-8b-lab-v1" {
-		t.Errorf("title = %q, want %q", got.Title, "granite-3.1-8b-lab-v1")
+	// v0.0.59: title is source-prefixed so the EntityPicker dropdown
+	// shows users which source each model came from.
+	if got.Title != "[Catalog] granite-3.1-8b-lab-v1" {
+		t.Errorf("title = %q, want %q", got.Title, "[Catalog] granite-3.1-8b-lab-v1")
 	}
 	if got.SpecType != "ml-model" {
 		t.Errorf("specType = %q, want ml-model", got.SpecType)

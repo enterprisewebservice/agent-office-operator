@@ -401,8 +401,11 @@ func catalogModelToBackstageResource(m map[string]any) backstageEntity {
 		// Prefix with `catalog-` so it can't collide with a Registry
 		// entity that happens to share a sanitized name. The
 		// EntityPicker uses these as opaque refs anyway.
-		Name:        sanitizeName("catalog-" + name),
-		Title:       name,
+		Name: sanitizeName("catalog-" + name),
+		// v0.0.59: prefix the visible title so the dropdown shows
+		// where each model came from. Symmetric with Registry's
+		// "[Registry] foo @ v1" prefix in mvToBackstageResource.
+		Title:       "[Catalog] " + name,
 		Description: desc,
 		Tags:        tags,
 		Annotations: annos,
@@ -568,13 +571,19 @@ func mvToBackstageResource(registryInstance string, rm, mv map[string]any) backs
 		}
 	}
 
-	tags := []string{"model", kind}
+	// v0.0.59: tag every Registry entity with `model-registry` so the
+	// template's EntityPicker can filter on metadata.tags. Catalog
+	// entries already carry `model-catalog` from
+	// catalogModelToBackstageResource — this makes the two sources
+	// symmetric so the dropdown's Source filter can switch on the tag.
+	tags := []string{"model", "model-registry", kind}
 	if registryInstance != "" {
 		tags = append(tags, "registry-"+sanitizeName(registryInstance))
 	}
 
 	annos := map[string]string{
-		"agentoffice.ai/model-registry":  registryInstance,
+		"agentoffice.ai/model-source":     "model-registry",
+		"agentoffice.ai/model-registry":   registryInstance,
 		"agentoffice.ai/registered-model": rmName,
 		"agentoffice.ai/model-version":    mvName,
 	}
@@ -595,6 +604,11 @@ func mvToBackstageResource(registryInstance string, rm, mv map[string]any) backs
 	if mvName != "" && mvName != rmName {
 		title = rmName + " @ " + mvName
 	}
+	// v0.0.59: prefix the displayed title so users can tell at a
+	// glance which source a dropdown entry comes from. The
+	// EntityPicker shows metadata.title; without this prefix the two
+	// sources looked identical.
+	title = "[Registry] " + title
 
 	return backstageEntity{
 		Kind:        "Resource",

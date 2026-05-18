@@ -529,20 +529,31 @@ func TestMvToBackstageResource_BaseModel(t *testing.T) {
 	if !strings.Contains(got.Name, "granite-4-1-8b") {
 		t.Errorf("name should contain sanitized granite id: %q", got.Name)
 	}
-	if got.Title != "ibm-granite/granite-4.1-8b @ main" {
+	// v0.0.59: titles are source-prefixed so users can tell Registry
+	// vs Catalog at a glance in the EntityPicker dropdown.
+	if got.Title != "[Registry] ibm-granite/granite-4.1-8b @ main" {
 		t.Errorf("unexpected title: %q", got.Title)
 	}
 	if got.Annotations["agentoffice.ai/model-uri"] != "huggingface://ibm-granite/granite-4.1-8b" {
 		t.Errorf("missing uri annotation: %#v", got.Annotations)
 	}
-	hasBaseTag := false
+	if got.Annotations["agentoffice.ai/model-source"] != "model-registry" {
+		t.Errorf("missing model-source annotation: %#v", got.Annotations)
+	}
+	hasBaseTag, hasSourceTag := false, false
 	for _, tag := range got.Tags {
 		if tag == "base-model" {
 			hasBaseTag = true
 		}
+		if tag == "model-registry" {
+			hasSourceTag = true
+		}
 	}
 	if !hasBaseTag {
 		t.Errorf("missing base-model tag: %v", got.Tags)
+	}
+	if !hasSourceTag {
+		t.Errorf("missing model-registry tag (needed by template's Source filter): %v", got.Tags)
 	}
 }
 
