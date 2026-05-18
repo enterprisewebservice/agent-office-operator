@@ -41,6 +41,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -104,9 +105,22 @@ func (h *BackstageCatalogHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 	_, _ = io.WriteString(w, out)
 }
 
-// collect walks every ModelRegistry CR and gathers ModelVersions.
-// Returns one entity per ModelVersion (since each version is a
-// concretely-pullable model, base or fine-tuned).
+// modelCatalogServiceURL is the in-cluster URL of RHOAI's Model
+// Catalog REST API. v0.0.56 surfaces these as Backstage Resource
+// entities too so the karpathy template's baseModel dropdown shows
+// both registered ModelVersions AND the Red Hat-curated catalog.
+const modelCatalogServiceURL = "https://model-catalog.rhoai-model-registries.svc.cluster.local:8443"
+
+// saTokenPath is the standard projected SA token path the operator
+// uses to authenticate to in-cluster REST services. Declared as a
+// var rather than a const so unit tests can point it at a fixture
+// without monkey-patching os.ReadFile.
+var saTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+
+// collect walks every ModelRegistry CR + the Model Catalog REST API
+// and gathers their models. Returns one entity per (RegisteredModel,
+// ModelVersion) pair AND one per Model Catalog entry. Both sources
+// are best-effort: a failure in one doesn't blank the other.
 func (h *BackstageCatalogHandler) collect(ctx context.Context) ([]backstageEntity, error) {
 	mrList := &unstructured.UnstructuredList{}
 	mrList.SetGroupVersionKind(modelRegistryGVR)
@@ -142,7 +156,192 @@ func (h *BackstageCatalogHandler) collect(ctx context.Context) ([]backstageEntit
 		}
 		out = append(out, entities...)
 	}
+
+	// v0.0.56: also enumerate the Model Catalog. Best-effort —
+	// if the catalog isn't reachable, isn't installed, or denies
+	// our SA token, we log and continue with just the Registry
+	// entities (don't blank the whole dropdown over one bad source).
+	catalogEntities, catErr := h.fetchModelCatalogEntities(ctx)
+	if catErr != nil {
+		// Surface as a single placeholder entity so the operator log
+		// + Backstage catalog both reflect the broken source.
+		out = append(out, backstageEntity{
+			Kind:        "Resource",
+			Name:        "model-catalog-unreachable",
+			Title:       "RHOAI Model Catalog (unreachable)",
+			Description: fmt.Sprintf("collection failed: %v", catErr),
+			Tags:        []string{"model-catalog", "error"},
+			SpecType:    "ml-model-catalog",
+			Lifecycle:   "experimental",
+			Owner:       "user:default/deanpeterson",
+		})
+	} else {
+		out = append(out, catalogEntities...)
+	}
+
 	return out, nil
+}
+
+// fetchModelCatalogEntities queries RHOAI's Model Catalog REST API
+// and emits one Backstage Resource entity per catalog model. The
+// catalog has its own schema (different from ModelRegistry's), so
+// this helper does the conversion separately rather than trying to
+// share mvToBackstageResource.
+//
+// Auth: in-cluster Bearer token from the operator's SA. The catalog
+// uses kube-rbac-proxy in front; the operator SA needs at least
+// `get` on whatever resource the proxy guards (typically the
+// catalog's own service or a marker permission). v0.0.55's separate
+// ClusterRoleBinding for modelregistries doesn't cover this — the
+// operator pod might get 401/403 until appropriate RBAC is granted.
+// In that case we log and skip rather than fail the whole endpoint.
+func (h *BackstageCatalogHandler) fetchModelCatalogEntities(ctx context.Context) ([]backstageEntity, error) {
+	token, terr := os.ReadFile(saTokenPath)
+	if terr != nil {
+		// Not running in-cluster or token not mounted — return empty,
+		// not an error. Lets unit tests and local dev still work.
+		return nil, nil
+	}
+
+	url := modelCatalogServiceURL + "/api/model_catalog/v1alpha1/models?pageSize=200"
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(token)))
+
+	resp, err := h.HTTPClient.Do(req)
+	if err != nil {
+		// Catalog not installed (DNS fail) is the common case on
+		// clusters without the Model Catalog component. Don't error;
+		// just emit nothing.
+		return nil, nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == 401 || resp.StatusCode == 403 {
+		// Auth gap. Surface as an error so the user knows to grant
+		// RBAC; the caller renders this as a "(unreachable)"
+		// placeholder Resource so it's visible in the dropdown.
+		return nil, fmt.Errorf("model-catalog auth denied (HTTP %d) — "+
+			"the operator's SA likely needs additional RBAC on the "+
+			"model-catalog service", resp.StatusCode)
+	}
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("model-catalog returned HTTP %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	var listResp struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(body, &listResp); err != nil {
+		return nil, fmt.Errorf("decode catalog response: %w", err)
+	}
+
+	out := make([]backstageEntity, 0, len(listResp.Items))
+	for _, m := range listResp.Items {
+		ent := catalogModelToBackstageResource(m)
+		if ent.Name != "" {
+			out = append(out, ent)
+		}
+	}
+	return out, nil
+}
+
+// catalogModelToBackstageResource converts one Model Catalog item to
+// a Backstage Resource entity. The catalog schema is different from
+// ModelRegistry's (no registered_model + model_version split — each
+// item IS a model), so the metadata mapping is its own logic.
+//
+// Key fields we surface:
+//   - name + source_id     → unique Backstage entity name
+//   - description / readme → entity description
+//   - tasks, license       → tags
+//   - provider             → annotation
+//
+// We don't currently look up a download URI from the catalog; the
+// trainer's `from_pretrained()` is expected to resolve the HF id
+// derived from the catalog name (most catalog entries match HF id
+// for Granite/Llama/etc.). When the operator's pipeline learns to
+// pull catalog artifacts directly, we'll surface that URI here too.
+func catalogModelToBackstageResource(m map[string]any) backstageEntity {
+	name, _ := m["name"].(string)
+	if name == "" {
+		return backstageEntity{}
+	}
+	sourceID, _ := m["source_id"].(string)
+	desc, _ := m["description"].(string)
+	provider, _ := m["provider"].(string)
+	license, _ := m["license"].(string)
+	licenseLink, _ := m["licenseLink"].(string)
+	logo, _ := m["logo"].(string)
+
+	// `tasks` is a list of strings; pick the first as the headline.
+	primaryTask := ""
+	if rawTasks, ok := m["tasks"].([]any); ok && len(rawTasks) > 0 {
+		if t, ok := rawTasks[0].(string); ok {
+			primaryTask = t
+		}
+	}
+	// `language` likewise.
+	primaryLang := ""
+	if rawLangs, ok := m["language"].([]any); ok && len(rawLangs) > 0 {
+		if l, ok := rawLangs[0].(string); ok {
+			primaryLang = l
+		}
+	}
+
+	tags := []string{"model", "model-catalog"}
+	if sourceID != "" {
+		tags = append(tags, "source-"+sanitizeName(sourceID))
+	}
+	if primaryTask != "" {
+		tags = append(tags, sanitizeName(primaryTask))
+	}
+
+	annos := map[string]string{
+		"agentoffice.ai/model-source":    "model-catalog",
+		"agentoffice.ai/catalog-name":    name,
+		"agentoffice.ai/catalog-source":  sourceID,
+		// model-uri: catalog model names usually match the HF id (e.g.
+		// "granite-3.1-8b-lab-v1"). Surface as a candidate URI; the
+		// template's catalog:fetch resolution + the trainer will use
+		// it as the base_model HF id.
+		"agentoffice.ai/model-uri": "huggingface://" + name,
+	}
+	if provider != "" {
+		annos["agentoffice.ai/provider"] = provider
+	}
+	if license != "" {
+		annos["agentoffice.ai/license"] = license
+	}
+	if licenseLink != "" {
+		annos["agentoffice.ai/license-link"] = licenseLink
+	}
+	if logo != "" {
+		annos["agentoffice.ai/logo"] = logo
+	}
+	if primaryLang != "" {
+		annos["agentoffice.ai/language"] = primaryLang
+	}
+
+	return backstageEntity{
+		Kind: "Resource",
+		// Prefix with `catalog-` so it can't collide with a Registry
+		// entity that happens to share a sanitized name. The
+		// EntityPicker uses these as opaque refs anyway.
+		Name:        sanitizeName("catalog-" + name),
+		Title:       name,
+		Description: desc,
+		Tags:        tags,
+		Annotations: annos,
+		SpecType:    "ml-model",
+		Owner:       "user:default/deanpeterson",
+		Lifecycle:   "production",
+	}
 }
 
 // fetchEntitiesFor queries one ModelRegistry's REST API for its
