@@ -57,7 +57,7 @@ metadata:
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
     repository: https://github.com/enterprisewebservice/agent-office-operator
     support: Red Hat Solution Architecture
-  name: agent-office-operator.v0.0.59
+  name: agent-office-operator.v0.0.60
   namespace: placeholder
 spec:
   apiservicedefinitions: {}
@@ -88,6 +88,41 @@ spec:
       displayName: Memory Module
       kind: MemoryModule
       name: memorymodules.agentoffice.ai
+      version: v1alpha1
+    - description: |-
+        Skill is shared SKILL_<name>.md content that AgentWorkstations can
+        bind via SkillBinding. Same library/per-agent split as MemoryModule
+        but scoped to Anthropic Skills Open Standard content.
+      displayName: Skill
+      kind: Skill
+      name: skills.agentoffice.ai
+      version: v1alpha1
+    - description: |-
+        SkillBinding attaches one or more Skill resources to an
+        AgentWorkstation, rendering SKILL_<name>.md into that agent's
+        per-agent ConfigMap. The binding tracks the source-of-truth hash
+        so updates to a Skill propagate to every bound workstation.
+      displayName: Skill Binding
+      kind: SkillBinding
+      name: skillbindings.agentoffice.ai
+      version: v1alpha1
+    - description: |-
+        KnowledgeBase is the cluster-side representation of a research
+        agent's curated wiki. The operator bootstraps a paired git repo,
+        syncs it via a sidecar, and exposes the resulting Markdown tree
+        to Obsidian or any other vault-aware reader.
+      displayName: Knowledge Base
+      kind: KnowledgeBase
+      name: knowledgebases.agentoffice.ai
+      version: v1alpha1
+    - description: |-
+        AutoResearchProject is a Karpathy-style autonomous QLoRA
+        fine-tuning loop. The operator owns its DSP pipeline, MLMD
+        experiment, scheduled rounds, and the agent that proposes new
+        training configs based on prior round eval results.
+      displayName: Auto Research Project
+      kind: AutoResearchProject
+      name: autoresearchprojects.agentoffice.ai
       version: v1alpha1
   description: |
     The Agent Office Operator manages governed coding agents on OpenShift.
@@ -279,7 +314,7 @@ spec:
                       fieldPath: metadata.annotations['olm.targetNamespaces']
                 - name: CLUSTER_APPS_DOMAIN
                   value: apps.salamander.aimlworkbench.com
-                image: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-operator:v0.0.59
+                image: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-operator:v0.0.60
                 imagePullPolicy: Always
                 livenessProbe:
                   httpGet:
@@ -398,4 +433,4 @@ spec:
   provider:
     name: Red Hat Solution Architecture
     url: https://github.com/enterprisewebservice
-  version: 0.0.59
+  version: 0.0.60
