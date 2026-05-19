@@ -135,12 +135,21 @@ func (r *AutoResearchProjectReconciler) proposeViaAgent(
 	return cfg, fmt.Sprintf("agent %s", agentName), nil
 }
 
-// findGatewayPodForAgent walks AgentWorkstation → AgentGateway → Pod
-// to land on the openclaw container that hosts the agent's logical
-// runtime. Only shared-runtime AgentWorkstations are supported here;
-// dedicated-runtime agents would have their own Deployment and need
-// a different exec target (deferred — autoresearch agents are
-// expected to be shared-runtime).
+// findGatewayPodForAgent locates the openclaw container we need to
+// exec into for an agent turn. Handles both runtime modes the AW
+// API supports:
+//
+//   * runtime.shared.gatewayRef set  → look up the AgentGateway's
+//     Deployment pod (labeled agentoffice.ai/gateway=<name>).
+//   * runtime.dedicated (or runtime nil — same default)
+//                                    → look up the AW's own
+//     Deployment pod (labeled agentoffice.ai/agent=<name>, set by
+//     agentworkstation_resources.agentLabels()).
+//
+// Either way, every Codex-backed agent in the agent-office
+// namespace mounts the same `codex-subscription-credentials`
+// Secret at ~/.codex/auth.json — so the exec target's container
+// has the OAuth token regardless of which runtime model we picked.
 func (r *AutoResearchProjectReconciler) findGatewayPodForAgent(
 	ctx context.Context,
 	namespace, agentName string,
@@ -149,27 +158,33 @@ func (r *AutoResearchProjectReconciler) findGatewayPodForAgent(
 	if err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: agentName}, &aw); err != nil {
 		return nil, fmt.Errorf("get AgentWorkstation %s/%s: %w", namespace, agentName, err)
 	}
-	if aw.Spec.Runtime == nil || aw.Spec.Runtime.Shared == nil {
-		return nil, fmt.Errorf("AgentWorkstation %s has no spec.runtime.shared — dedicated-runtime agents not yet supported for proposeViaAgent", agentName)
-	}
-	gwName := aw.Spec.Runtime.Shared.GatewayRef
-	if gwName == "" {
-		return nil, fmt.Errorf("AgentWorkstation %s has no shared.gatewayRef", agentName)
+
+	// Compute the label selector for the right pod set, depending
+	// on which runtime the user picked in the template.
+	var (
+		selector map[string]string
+		descr    string
+	)
+	if aw.Spec.Runtime != nil && aw.Spec.Runtime.Shared != nil {
+		gwName := aw.Spec.Runtime.Shared.GatewayRef
+		if gwName == "" {
+			return nil, fmt.Errorf("AgentWorkstation %s has spec.runtime.shared but no gatewayRef", agentName)
+		}
+		selector = map[string]string{"agentoffice.ai/gateway": gwName}
+		descr = fmt.Sprintf("AgentGateway %s/%s", namespace, gwName)
+	} else {
+		// Default (nil runtime OR explicit runtime.dedicated): the AW
+		// has its own Deployment + Pod, labeled by agentLabels().
+		selector = map[string]string{"agentoffice.ai/agent": agentName}
+		descr = fmt.Sprintf("AgentWorkstation %s/%s (dedicated)", namespace, agentName)
 	}
 
-	// Find a Ready pod for the AgentGateway. The gateway controller
-	// (agentgateway_resources.go renderGatewayPodTemplate) labels its
-	// Deployment's pod template with `agentoffice.ai/gateway: <name>`,
-	// NOT `app: <name>`. Using "app" matched zero pods and made every
-	// proposeViaAgent call fall back to the starter config — fixed in
-	// v0.0.61 by matching the same label key the gateway controller's
-	// own pod-listing code uses (see agentgateway_controller.go).
 	pods := &corev1.PodList{}
 	if err := r.List(ctx, pods,
 		client.InNamespace(namespace),
-		client.MatchingLabels{"agentoffice.ai/gateway": gwName},
+		client.MatchingLabels(selector),
 	); err != nil {
-		return nil, fmt.Errorf("list gateway pods: %w", err)
+		return nil, fmt.Errorf("list pods for %s: %w", descr, err)
 	}
 	for i := range pods.Items {
 		p := &pods.Items[i]
@@ -177,7 +192,7 @@ func (r *AutoResearchProjectReconciler) findGatewayPodForAgent(
 			return p, nil
 		}
 	}
-	return nil, fmt.Errorf("no Ready pod found for AgentGateway %s/%s (found %d candidates)", namespace, gwName, len(pods.Items))
+	return nil, fmt.Errorf("no Ready pod found for %s (found %d candidates)", descr, len(pods.Items))
 }
 
 func podReady(p *corev1.Pod) bool {
