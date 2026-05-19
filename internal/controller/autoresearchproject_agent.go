@@ -157,12 +157,17 @@ func (r *AutoResearchProjectReconciler) findGatewayPodForAgent(
 		return nil, fmt.Errorf("AgentWorkstation %s has no shared.gatewayRef", agentName)
 	}
 
-	// Find a Ready pod for the AgentGateway. Convention: pod labeled
-	// `app=<gatewayName>` per the gateway controller's Deployment.
+	// Find a Ready pod for the AgentGateway. The gateway controller
+	// (agentgateway_resources.go renderGatewayPodTemplate) labels its
+	// Deployment's pod template with `agentoffice.ai/gateway: <name>`,
+	// NOT `app: <name>`. Using "app" matched zero pods and made every
+	// proposeViaAgent call fall back to the starter config — fixed in
+	// v0.0.61 by matching the same label key the gateway controller's
+	// own pod-listing code uses (see agentgateway_controller.go).
 	pods := &corev1.PodList{}
 	if err := r.List(ctx, pods,
 		client.InNamespace(namespace),
-		client.MatchingLabels{"app": gwName},
+		client.MatchingLabels{"agentoffice.ai/gateway": gwName},
 	); err != nil {
 		return nil, fmt.Errorf("list gateway pods: %w", err)
 	}
