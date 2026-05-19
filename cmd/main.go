@@ -313,8 +313,15 @@ func main() {
 	// as its dropdown source. See internal/controller/backstage_catalog.go.
 	go func() {
 		mux := http.NewServeMux()
-		mux.Handle("/backstage/catalog.yaml", controller.NewBackstageCatalogHandler(mgr.GetClient()))
-		mux.Handle("/backstage/catalog", controller.NewBackstageCatalogHandler(mgr.GetClient()))
+		bs := controller.NewBackstageCatalogHandler(mgr.GetClient())
+		mux.Handle("/backstage/catalog.yaml", bs)
+		mux.Handle("/backstage/catalog", bs)
+		// v0.0.63: /codex-auth/status — read by the codex-reauth-ui
+		// frontend plugin's entity card + scaffolder pre-flight via
+		// Backstage's proxy plugin. Returns JSON {ok, lastRefresh,
+		// reason} computed from the codex-subscription-credentials
+		// Secret's auth.json `last_refresh` field.
+		mux.Handle("/codex-auth/status", bs)
 		mux.HandleFunc("/healthz/backstage", func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte("ok"))
 		})
