@@ -37,6 +37,7 @@ package controller
 import (
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -61,6 +62,7 @@ var modelRegistryGVR = schema.GroupVersionKind{
 }
 
 // +kubebuilder:rbac:groups=modelregistry.opendatahub.io,resources=modelregistries,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get,resourceNames=codex-subscription-credentials,namespace=agent-office
 
 // BackstageCatalogHandler implements net/http.Handler. The operator
 // wires it into the manager's HTTP server in main.go.
@@ -82,15 +84,27 @@ func NewBackstageCatalogHandler(c client.Client) *BackstageCatalogHandler {
 	}
 }
 
-// ServeHTTP is the entry point. Lists all ModelRegistry instances
-// cluster-wide, queries each, and writes Backstage entities to the
-// response.
+// ServeHTTP is the entry point. Multiplexes:
+//   GET /backstage/catalog.yaml — ModelRegistry/Catalog entities
+//   GET /codex-auth/status      — { ok, lastRefresh, reason } for
+//                                 the cluster's codex-subscription-
+//                                 credentials Secret. Used by the
+//                                 codex-reauth-ui frontend plugin
+//                                 to drive the entity-page pill +
+//                                 the karpathy template pre-flight.
 func (h *BackstageCatalogHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/backstage/catalog.yaml" && r.URL.Path != "/backstage/catalog" {
+	switch r.URL.Path {
+	case "/backstage/catalog.yaml", "/backstage/catalog":
+		h.serveCatalog(w, r)
+	case "/codex-auth/status":
+		h.serveCodexAuthStatus(w, r)
+	default:
 		http.NotFound(w, r)
-		return
 	}
+}
 
+// serveCatalog returns the ModelRegistry + ModelCatalog feed.
+func (h *BackstageCatalogHandler) serveCatalog(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	entities, err := h.collect(ctx)
 	if err != nil {
@@ -103,6 +117,143 @@ func (h *BackstageCatalogHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 	w.Header().Set("Cache-Control", "max-age=30")
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.WriteString(w, out)
+}
+
+// codexAuthStatusMaxAgeDays bounds how recent the auth.json's
+// `last_refresh` field must be for us to consider the token fresh.
+// Codex/ChatGPT refresh tokens last ~30 days of non-use server-side;
+// 14 is conservative enough to nudge users before they actually
+// expire, without being so tight that an active token shows red.
+const codexAuthStatusMaxAgeDays = 14
+const codexSecretNamespace = "agent-office"
+const codexSecretName = "codex-subscription-credentials"
+
+// codexAuthStatusResponse matches the shape the codex-reauth-ui
+// frontend plugin expects.
+type codexAuthStatusResponse struct {
+	OK          bool   `json:"ok"`
+	LastRefresh string `json:"lastRefresh,omitempty"`
+	Reason      string `json:"reason,omitempty"`
+}
+
+// serveCodexAuthStatus reads the codex-subscription-credentials
+// Secret and computes freshness based on the auth.json's
+// `last_refresh` timestamp. Heuristic — doesn't actually call
+// OpenAI (which would hit Cloudflare anyway). When the auto-
+// refresh CronJob (step 6) lands, every successful refresh bumps
+// last_refresh so this endpoint flips back to OK automatically.
+//
+// Errors fail OPEN: if we can't read the secret for any reason
+// (no codex usage on this cluster, RBAC issue, etc.) we return
+// 200 with ok=true and reason explaining why we couldn't tell.
+// The frontend treats that as "Unknown" and renders nothing
+// alarming.
+func (h *BackstageCatalogHandler) serveCodexAuthStatus(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "max-age=30")
+
+	secret := &unstructured.Unstructured{}
+	secret.SetGroupVersionKind(schema.GroupVersionKind{
+		Version: "v1",
+		Kind:    "Secret",
+	})
+	if err := h.Client.Get(ctx, client.ObjectKey{
+		Namespace: codexSecretNamespace,
+		Name:      codexSecretName,
+	}, secret); err != nil {
+		writeJSON(w, codexAuthStatusResponse{
+			OK:     true, // fail-open: unknown ≠ expired
+			Reason: fmt.Sprintf("secret %s/%s not readable: %v", codexSecretNamespace, codexSecretName, err),
+		})
+		return
+	}
+
+	dataObj, _, _ := unstructured.NestedMap(secret.Object, "data")
+	if dataObj == nil {
+		writeJSON(w, codexAuthStatusResponse{
+			OK:     true,
+			Reason: "secret has no data field",
+		})
+		return
+	}
+	encoded, _ := dataObj["auth.json"].(string)
+	if encoded == "" {
+		writeJSON(w, codexAuthStatusResponse{
+			OK:     true,
+			Reason: "secret has no auth.json key",
+		})
+		return
+	}
+	raw, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		writeJSON(w, codexAuthStatusResponse{
+			OK:     true,
+			Reason: fmt.Sprintf("auth.json base64 decode failed: %v", err),
+		})
+		return
+	}
+
+	var parsed struct {
+		LastRefresh string `json:"last_refresh"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		writeJSON(w, codexAuthStatusResponse{
+			OK:     true,
+			Reason: fmt.Sprintf("auth.json parse failed: %v", err),
+		})
+		return
+	}
+
+	if parsed.LastRefresh == "" {
+		writeJSON(w, codexAuthStatusResponse{
+			OK:     true,
+			Reason: "auth.json has no last_refresh field (treating as unknown)",
+		})
+		return
+	}
+
+	t, err := time.Parse(time.RFC3339, parsed.LastRefresh)
+	if err != nil {
+		// Codex CLI uses a slightly different format with fractional
+		// seconds + Z. Try a couple variants before giving up.
+		alt, altErr := time.Parse("2006-01-02T15:04:05.999999Z", parsed.LastRefresh)
+		if altErr != nil {
+			writeJSON(w, codexAuthStatusResponse{
+				OK:          true,
+				LastRefresh: parsed.LastRefresh,
+				Reason:      fmt.Sprintf("could not parse last_refresh %q: %v", parsed.LastRefresh, err),
+			})
+			return
+		}
+		t = alt
+	}
+
+	age := time.Since(t)
+	maxAge := time.Duration(codexAuthStatusMaxAgeDays) * 24 * time.Hour
+	if age > maxAge {
+		writeJSON(w, codexAuthStatusResponse{
+			OK:          false,
+			LastRefresh: parsed.LastRefresh,
+			Reason: fmt.Sprintf(
+				"last_refresh is %d days old (cap %d). Re-authenticate to be safe.",
+				int(age.Hours()/24), codexAuthStatusMaxAgeDays),
+		})
+		return
+	}
+
+	writeJSON(w, codexAuthStatusResponse{
+		OK:          true,
+		LastRefresh: parsed.LastRefresh,
+	})
+}
+
+// writeJSON marshals a payload to the response. Helper to keep the
+// handlers above readable.
+func writeJSON(w http.ResponseWriter, payload any) {
+	body, _ := json.Marshal(payload)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
 }
 
 // modelCatalogRouteResolver returns the model-catalog Route URL.
