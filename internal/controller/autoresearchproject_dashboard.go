@@ -83,7 +83,8 @@ func renderDashboard(
 	b.WriteString("## Project state\n\n")
 	b.WriteString("| Metric | Value |\n")
 	b.WriteString("|--------|-------|\n")
-	b.WriteString(fmt.Sprintf("| Current round | %d (in flight: %d) |\n", currentRound, len(history)+1-currentRound))
+	b.WriteString(fmt.Sprintf("| Current round | %d (just proposed) |\n", currentRound))
+	b.WriteString(fmt.Sprintf("| Usable observations | %d |\n", len(history)))
 	if best := bestObservation(history); best != nil {
 		b.WriteString(fmt.Sprintf("| Best eval_loss | **%g** |\n", best.EvalLoss))
 		b.WriteString(fmt.Sprintf("| Best lora_rank | %v |\n", best.Params["lora_rank"]))
@@ -97,7 +98,12 @@ func renderDashboard(
 		stagStr = "**STAGNATING** — " + stagStr
 	}
 	b.WriteString(fmt.Sprintf("| Stagnation | %s |\n", stagStr))
-	b.WriteString(fmt.Sprintf("| Last update | %s |\n", time.Now().UTC().Format("2026-01-02 15:04 UTC")))
+	// Go's reference time is "Mon Jan 2 15:04:05 MST 2006" — must
+	// use 2006 (not 2026 or anything else) for the year. v0.4.0
+	// shipped with "2026-01-02 ..." which rendered as "20206-05-20"
+	// because Go interpreted the literal 2026 prefix as digits to
+	// pad. Fixed in v0.4.1.
+	b.WriteString(fmt.Sprintf("| Last update | %s |\n", time.Now().UTC().Format("2006-01-02 15:04 UTC")))
 	b.WriteString("\n")
 
 	// ── Trajectory ─────────────────────────────────────────

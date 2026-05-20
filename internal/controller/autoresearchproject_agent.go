@@ -575,7 +575,7 @@ func (r *AutoResearchProjectReconciler) wikiPushResult(
 		return fmt.Errorf("read log/log.md: %w", err)
 	}
 	entry := fmt.Sprintf("- **Round %d** (%s) — eval_loss=%f, %s, adapter=`%s`\n",
-		round, time.Now().UTC().Format("2026-01-02 15:04 UTC"), evalLoss, keptStr, adapterURI)
+		round, time.Now().UTC().Format("2006-01-02 15:04 UTC"), evalLoss, keptStr, adapterURI)
 	header := "# Experiment Log\n\n> Reverse-chronological. Newest entries at the top.\n\n"
 	newContent := header + entry
 	if e := strings.TrimSpace(string(existing)); strings.HasPrefix(e, "# Experiment Log") {
