@@ -39,19 +39,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
-	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/config"
-	"github.com/go-git/go-git/v5/plumbing"
-	gitobject "github.com/go-git/go-git/v5/plumbing/object"
-	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -61,6 +52,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	agentofficev1alpha1 "github.com/enterprisewebservice/agent-office-operator/api/v1alpha1"
+	"github.com/enterprisewebservice/agent-office-operator/internal/wiki"
 )
 
 // agentExecTimeout caps how long the operator will wait on
@@ -495,10 +487,17 @@ func validateQLoRAConfig(c *QLoRAConfig) error {
 
 // ------------- Wiki git operations ------------------------------------
 
-// wikiPushProposal clones the KB git repo (or fast-forwards an existing
-// shallow clone), writes proposals/round-N.yaml + a Markdown summary,
-// commits + pushes. Idempotent on the round number — re-runs replace
-// the prior round-N file rather than appending.
+// wikiPushProposal writes proposals/round-N.yaml + a Markdown
+// summary into the KB's wiki repo via a single atomic transaction
+// (clone → write → commit → push). Idempotent on the round number —
+// re-runs replace the prior round-N file rather than appending.
+//
+// v0.1.0 (Phase 0 of the autoresearch flywheel refactor): rewritten
+// to use internal/wiki.Transaction. The old `openWikiRepo +
+// commitAndPush` helper pair carried a malformed refspec
+// (`refs/heads/+HEAD:refs/heads/HEAD`) that silently no-op'd every
+// wiki push for the entire lifetime of the operator. See
+// internal/wiki/transaction.go for the post-mortem.
 func (r *AutoResearchProjectReconciler) wikiPushProposal(
 	ctx context.Context,
 	p *agentofficev1alpha1.AutoResearchProject,
@@ -506,41 +505,36 @@ func (r *AutoResearchProjectReconciler) wikiPushProposal(
 	cfg QLoRAConfig,
 	reasoning string,
 ) error {
-	repo, dir, auth, err := r.openWikiRepo(ctx, p)
+	tx, err := r.beginWikiTx(ctx, p)
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(dir)
+	defer tx.Close()
 
 	cfgYAML, err := yaml.Marshal(cfg)
 	if err != nil {
 		return fmt.Errorf("marshal proposal: %w", err)
 	}
-	proposalPath := filepath.Join(dir, "proposals", fmt.Sprintf("round-%d.yaml", round))
-	if err := os.MkdirAll(filepath.Dir(proposalPath), 0o755); err != nil {
-		return fmt.Errorf("mkdir proposals: %w", err)
+	if err := tx.Write(fmt.Sprintf("proposals/round-%d.yaml", round), cfgYAML); err != nil {
+		return err
 	}
-	if err := os.WriteFile(proposalPath, cfgYAML, 0o644); err != nil {
-		return fmt.Errorf("write proposal: %w", err)
+	md := fmt.Sprintf("# Round %d — proposal\n\n**Agent reasoning:**\n\n%s\n\n**Config (also in `round-%d.yaml`):**\n\n```yaml\n%s```\n",
+		round, reasoning, round, string(cfgYAML))
+	if err := tx.Write(fmt.Sprintf("proposals/round-%d.md", round), []byte(md)); err != nil {
+		return err
 	}
-
-	// Markdown counterpart for Obsidian readability.
-	mdPath := filepath.Join(dir, "proposals", fmt.Sprintf("round-%d.md", round))
-	md := fmt.Sprintf("# Round %d — proposal\n\n**Agent reasoning:**\n\n%s\n\n**Config (also in `round-%d.yaml`):**\n\n```yaml\n%s```\n", round, reasoning, round, string(cfgYAML))
-	if err := os.WriteFile(mdPath, []byte(md), 0o644); err != nil {
-		return fmt.Errorf("write proposal md: %w", err)
-	}
-
-	return commitAndPush(ctx, repo, auth, fmt.Sprintf("propose: round %d", round),
-		"proposals/round-"+intStr(round)+".yaml",
-		"proposals/round-"+intStr(round)+".md",
-	)
+	return tx.CommitAndPush(ctx, fmt.Sprintf("propose: round %d", round))
 }
 
-// wikiPushResult writes results/round-N.md + appends to log/log.md
+// wikiPushResult writes results/round-N.md + updates log/log.md
 // with the eval_loss, adapter URI, kept/reverted decision, and a
 // short narrative. Called from the drain loop when a round becomes
 // terminal.
+//
+// v0.1.0: rewritten on top of wiki.Transaction (see wikiPushProposal
+// post-mortem). The log.md merge logic preserves the existing
+// entries-newest-at-top ordering using tx.Read for the current
+// content.
 func (r *AutoResearchProjectReconciler) wikiPushResult(
 	ctx context.Context,
 	p *agentofficev1alpha1.AutoResearchProject,
@@ -549,11 +543,11 @@ func (r *AutoResearchProjectReconciler) wikiPushResult(
 	adapterURI string,
 	kept bool,
 ) error {
-	repo, dir, auth, err := r.openWikiRepo(ctx, p)
+	tx, err := r.beginWikiTx(ctx, p)
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(dir)
+	defer tx.Close()
 
 	keptStr := "reverted"
 	if kept {
@@ -570,18 +564,16 @@ func (r *AutoResearchProjectReconciler) wikiPushResult(
 `+"`"+`oras pull %s`+"`"+` to fetch the LoRA weights locally.
 `,
 		round, evalLoss, keptStr, adapterURI, adapterURI)
-
-	resPath := filepath.Join(dir, "results", fmt.Sprintf("round-%d.md", round))
-	if err := os.MkdirAll(filepath.Dir(resPath), 0o755); err != nil {
-		return fmt.Errorf("mkdir results: %w", err)
-	}
-	if err := os.WriteFile(resPath, []byte(resultMD), 0o644); err != nil {
-		return fmt.Errorf("write result: %w", err)
+	if err := tx.Write(fmt.Sprintf("results/round-%d.md", round), []byte(resultMD)); err != nil {
+		return err
 	}
 
-	// Append to log/log.md (one-line summary, newest at TOP).
-	logPath := filepath.Join(dir, "log", "log.md")
-	existing, _ := os.ReadFile(logPath)
+	// Update log/log.md: read existing, build new with the new
+	// entry at the top, write back.
+	existing, err := tx.Read("log/log.md")
+	if err != nil {
+		return fmt.Errorf("read log/log.md: %w", err)
+	}
 	entry := fmt.Sprintf("- **Round %d** (%s) — eval_loss=%f, %s, adapter=`%s`\n",
 		round, time.Now().UTC().Format("2026-01-02 15:04 UTC"), evalLoss, keptStr, adapterURI)
 	header := "# Experiment Log\n\n> Reverse-chronological. Newest entries at the top.\n\n"
@@ -602,160 +594,59 @@ func (r *AutoResearchProjectReconciler) wikiPushResult(
 	} else if e != "" {
 		newContent = header + entry + e + "\n"
 	}
-	if err := os.WriteFile(logPath, []byte(newContent), 0o644); err != nil {
-		return fmt.Errorf("write log: %w", err)
+	if err := tx.Write("log/log.md", []byte(newContent)); err != nil {
+		return err
 	}
 
-	return commitAndPush(ctx, repo, auth, fmt.Sprintf("result: round %d (eval_loss=%.4f, %s)", round, evalLoss, keptStr),
-		"results/round-"+intStr(round)+".md",
-		"log/log.md",
-	)
+	return tx.CommitAndPush(ctx, fmt.Sprintf("result: round %d (eval_loss=%.4f, %s)", round, evalLoss, keptStr))
 }
 
-// openWikiRepo shallow-clones the KB's git repo to a fresh temp dir.
-// Returns (repo, dir, auth, err). Caller is responsible for
-// os.RemoveAll(dir). Auth is the http-basic creds derived from the
-// KB's gitMirror.credentialsSecretRef.
-func (r *AutoResearchProjectReconciler) openWikiRepo(
+// beginWikiTx is the controller's adapter onto wiki.Transaction:
+// looks up the project's KnowledgeBase + opens a transaction using
+// GitHubAppBasicAuth as the token minter. Centralized here so the
+// per-CR ARP, the future strategist, and any other wiki-writing
+// path go through the same auth resolution.
+func (r *AutoResearchProjectReconciler) beginWikiTx(
 	ctx context.Context,
 	p *agentofficev1alpha1.AutoResearchProject,
-) (*git.Repository, string, *githttp.BasicAuth, error) {
+) (*wiki.Transaction, error) {
 	if p.Spec.KnowledgeBase == "" {
-		return nil, "", nil, fmt.Errorf("spec.knowledgeBase is empty — no wiki to push to")
+		return nil, fmt.Errorf("spec.knowledgeBase is empty — no wiki to push to")
 	}
 	var kb agentofficev1alpha1.KnowledgeBase
-	if err := r.Get(ctx, types.NamespacedName{Namespace: p.Namespace, Name: p.Spec.KnowledgeBase}, &kb); err != nil {
-		return nil, "", nil, fmt.Errorf("get KnowledgeBase %s/%s: %w", p.Namespace, p.Spec.KnowledgeBase, err)
+	if err := r.Get(ctx, types.NamespacedName{
+		Namespace: p.Namespace,
+		Name:      p.Spec.KnowledgeBase,
+	}, &kb); err != nil {
+		return nil, fmt.Errorf("get KnowledgeBase %s/%s: %w",
+			p.Namespace, p.Spec.KnowledgeBase, err)
 	}
-	if kb.Spec.GitMirror.URL == "" {
-		return nil, "", nil, fmt.Errorf("KnowledgeBase %s has no spec.gitMirror.url", kb.Name)
-	}
-
-	// Resolve git auth. Two paths in priority order:
-	//
-	//  1. Per-agent PAT — kb.Spec.GitMirror.CredentialsSecretRef
-	//     references a Secret holding a GIT_TOKEN key. This is the
-	//     legacy path; new agents shouldn't use it (the template's
-	//     wikiGitToken form input was removed in v0.0.67). Existing
-	//     agents that still have a populated per-agent Secret
-	//     continue working — no migration required.
-	//
-	//  2. Cluster-shared GitHub App — agent-office/agent-office-
-	//     github-app Secret holds the App's private key, App ID,
-	//     and installation ID. We sign a JWT, exchange for a
-	//     ~1-hour installation token, return it as go-git BasicAuth.
-	//     This is the path for any agent without a per-agent Secret
-	//     (or whose Secret has an empty GIT_TOKEN — the form-input
-	//     bug we hit in May 2026 that produced GIT_TOKEN: null).
-	auth, authSource, err := r.resolveWikiAuth(ctx, p, &kb)
+	tx, err := wiki.Begin(ctx, r.Client, &kb, GitHubAppBasicAuth)
 	if err != nil {
-		return nil, "", nil, err
+		return nil, err
 	}
-	_ = authSource // currently unused; surfaced in conditions in a follow-up commit.
-
-	dir, err := os.MkdirTemp("", "autoresearch-wiki-*")
-	if err != nil {
-		return nil, "", nil, fmt.Errorf("mktemp: %w", err)
-	}
-
-	branch := kb.Spec.GitMirror.Branch
-	if branch == "" {
-		branch = "main"
-	}
-
-	repo, err := git.PlainCloneContext(ctx, dir, false, &git.CloneOptions{
-		URL:           kb.Spec.GitMirror.URL,
-		Auth:          auth,
-		ReferenceName: refName(branch),
-		Depth:         1,
-		SingleBranch:  true,
-	})
-	if err != nil {
-		os.RemoveAll(dir)
-		return nil, "", nil, fmt.Errorf("clone %s: %w", kb.Spec.GitMirror.URL, err)
-	}
-	return repo, dir, auth, nil
+	return tx, nil
 }
 
-// commitAndPush stages the named paths (relative to the repo root),
-// commits with the given message, and pushes the currently-checked-
-// out branch to its same name on origin.
-//
-// History note (v0.0.70): for every release prior to this one, the
-// RefSpec was the typo `refs/heads/+HEAD:refs/heads/HEAD` — the `+`
-// (force-push flag) was buried mid-path producing a source ref name
-// that didn't exist locally. go-git silently no-op'd the push and
-// returned nil. The wiki repos for every AutoResearchProject only
-// ever received the initial commit + the bootstrap commit; no
-// proposals/round-N or results/round-N has ever landed remote.
-// The combination of broken refspec + "best-effort" error handling
-// at the caller masked this completely.
-//
-// Correct refspec: `+refs/heads/<branch>:refs/heads/<branch>`. We
-// resolve <branch> from HEAD so we don't have to thread it through
-// every caller.
-func commitAndPush(ctx context.Context, repo *git.Repository, auth *githttp.BasicAuth, msg string, paths ...string) error {
-	w, err := repo.Worktree()
-	if err != nil {
-		return fmt.Errorf("worktree: %w", err)
-	}
-	for _, p := range paths {
-		if _, err := w.Add(p); err != nil {
-			return fmt.Errorf("stage %s: %w", p, err)
-		}
-	}
-	now := time.Now()
-	if _, err := w.Commit(msg, &git.CommitOptions{
-		Author: &gitobject.Signature{
-			Name:  "autoresearch-operator",
-			Email: "autoresearch@agent-office.local",
-			When:  now,
-		},
-	}); err != nil {
-		return fmt.Errorf("commit: %w", err)
-	}
-
-	// Resolve the local checked-out branch name from HEAD. The
-	// clone in openWikiRepo uses SingleBranch + ReferenceName so
-	// HEAD reliably points at refs/heads/<branch>.
-	head, err := repo.Head()
-	if err != nil {
-		return fmt.Errorf("read HEAD: %w", err)
-	}
-	if !head.Name().IsBranch() {
-		return fmt.Errorf("HEAD is not a branch (got %q)", head.Name())
-	}
-	branchRef := head.Name().String() // e.g. "refs/heads/main"
-
-	refSpec := config.RefSpec("+" + branchRef + ":" + branchRef)
-	if err := repo.PushContext(ctx, &git.PushOptions{
-		RemoteName: "origin",
-		Auth:       auth,
-		RefSpecs:   []config.RefSpec{refSpec},
-	}); err != nil && err != git.NoErrAlreadyUpToDate {
-		return fmt.Errorf("push %s: %w", refSpec, err)
-	}
-	return nil
-}
-
-// readWikiLogSnapshot fetches the current log.md content from the KB
-// repo so the operator can include it in the prompt. Best-effort —
-// failure here just means the agent doesn't see prior context.
+// readWikiLogSnapshot fetches the current log.md content from the
+// KB repo so the operator can include it in the prompt. Routes
+// through wiki.Transaction (open in read-only mode — no Write/
+// Commit/Push calls — so the temp dir is cleaned by Close).
 func (r *AutoResearchProjectReconciler) readWikiLogSnapshot(
 	ctx context.Context,
 	p *agentofficev1alpha1.AutoResearchProject,
 ) (string, error) {
-	_, dir, _, err := r.openWikiRepo(ctx, p)
+	tx, err := r.beginWikiTx(ctx, p)
 	if err != nil {
 		return "", err
 	}
-	defer os.RemoveAll(dir)
-	raw, err := os.ReadFile(filepath.Join(dir, "log", "log.md"))
+	defer tx.Close()
+	raw, err := tx.Read("log/log.md")
 	if err != nil {
-		if os.IsNotExist(err) {
-			return "(no log entries yet)", nil
-		}
 		return "", err
+	}
+	if raw == nil {
+		return "(no log entries yet)", nil
 	}
 	return string(raw), nil
 }
@@ -825,68 +716,23 @@ func shQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// refName wraps a branch name into the plumbing.ReferenceName type
-// go-git's CloneOptions accepts.
-func refName(branch string) plumbing.ReferenceName {
-	return plumbing.ReferenceName("refs/heads/" + branch)
-}
-
-func intStr(n int) string { return fmt.Sprintf("%d", n) }
-
 // truncateMsg is shared with autoresearchproject_controller.go's
 // truncateMsg (already defined there); kept here as a wrapper for
 // clarity. Returns the body verbatim if shorter than max.
 // (No new symbol — re-uses package-level truncateMsg.)
 var _ = truncateMsg
 
-// ErrAgentUnreachable is the sentinel error proposeViaAgent returns
-// when finding the gateway pod fails. Used by the caller to decide
-// whether to set AgentIntegrationOK=False on Status vs treat as a
-// transient retry.
-var ErrAgentUnreachable = fmt.Errorf("agent unreachable")
-
-// notFoundOnlyAsAgentUnreachable wraps an apierrors.IsNotFound error
-// as ErrAgentUnreachable so the caller's condition logic can be a
-// single check.
-func notFoundOnlyAsAgentUnreachable(err error) error {
-	if apierrors.IsNotFound(err) {
-		return fmt.Errorf("%w: %v", ErrAgentUnreachable, err)
-	}
-	return err
-}
-
-// commitedFilesRE is a defensive guard: when we ask git to stage
-// "proposals/round-37.yaml" we want to also catch the .md counterpart
-// without listing them twice. Used by the (currently unused) future
-// glob-stage path; kept here as documentation.
-var commitedFilesRE = regexp.MustCompile(`^(proposals|results|log)/`)
-
-var _ = commitedFilesRE
-
-// resolveWikiAuth returns the cluster-shared GitHub App installation
-// token wrapped as go-git BasicAuth. The per-agent PAT branch was
-// removed in v0.0.70 — every agent uses the same App identity
-// (`agent-office-bot`), and the App's "All repositories" install
-// scope covers gitops + wiki repos that get created later by the
-// Backstage template. The per-agent KnowledgeBase Secret still
-// exists, but it's now a cache the operator keeps refreshed with
-// a fresh installation token for the git-sync sidecar, not a
-// distinct auth path.
+// Removed in Phase 0 (v0.1.0) of the autoresearch refactor:
 //
-// A 1-hour installation token is minted fresh on each call. That
-// avoids token-expiry races at the cost of one HTTP round trip
-// per wiki operation — fine because wiki pushes are rare events
-// (one per round).
-func (r *AutoResearchProjectReconciler) resolveWikiAuth(
-	ctx context.Context,
-	p *agentofficev1alpha1.AutoResearchProject,
-	kb *agentofficev1alpha1.KnowledgeBase,
-) (*githttp.BasicAuth, string, error) {
-	auth, err := GitHubAppBasicAuth(ctx, r.Client)
-	if err != nil {
-		return nil, "", fmt.Errorf(
-			"resolve wiki auth (KnowledgeBase %s/%s): %w",
-			kb.Namespace, kb.Name, err)
-	}
-	return auth, "github-app " + GitHubAppSecretName, nil
-}
+//   - resolveWikiAuth (no longer needed; internal/wiki uses
+//     GitHubAppBasicAuth directly as the TokenMinter callback).
+//   - openWikiRepo, commitAndPush (replaced by wiki.Transaction).
+//   - refName, intStr (helpers only used by the removed code).
+//   - commitedFilesRE (vestigial — explicit `tx.Write(path,...)`
+//     calls already give us per-file commits without globbing).
+//   - ErrAgentUnreachable, notFoundOnlyAsAgentUnreachable (unused
+//     in the v0.1.0 propose path; the caller handles errors
+//     directly without sentinel-error inspection).
+//
+// See internal/wiki/transaction.go for the replacement and the
+// refspec post-mortem.

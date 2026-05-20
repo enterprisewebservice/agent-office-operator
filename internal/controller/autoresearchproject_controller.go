@@ -712,18 +712,23 @@ func (r *AutoResearchProjectReconciler) drainOpenJobs(ctx context.Context, p *ag
 					})
 			}
 
-			// v0.0.67: write the result to the wiki repo so the
-			// agent (and humans) can read it on the next cycle.
-			// Best-effort — wiki commit failures shouldn't fail
-			// the round's status update.
+			// v0.1.0: write the result to the wiki via the atomic
+			// wiki.Transaction helper. Failures here are surfaced
+			// loudly (no "continuing" log.Info — that pattern is
+			// exactly what hid the silent refspec bug for the
+			// operator's entire history). The round's other status
+			// is independent of the wiki commit, so we record the
+			// failure on WikiSyncOK and let the rest of the reconcile
+			// proceed — but the failure IS visible.
 			round := extractRoundFromRunID(displayID, p.Name)
 			if werr := r.wikiPushResult(ctx, p, int(round), evalLoss, adapterURI, kept); werr != nil {
-				log.Info("wiki result commit failed (continuing)", "round", round, "err", werr.Error())
+				log.Error(werr, "wiki result commit failed",
+					"round", round, "runID", displayID)
 				p.Status.Conditions = mergeARPConditions(p.Status.Conditions,
 					agentofficev1alpha1.AutoResearchProjectCondition{
 						Type:               "WikiSyncOK",
 						Status:             "False",
-						Reason:             "WriteFailed",
+						Reason:             "ResultPushFailed",
 						Message:            truncateMsg(werr.Error(), 256),
 						LastTransitionTime: metav1.Now(),
 					})
@@ -732,7 +737,7 @@ func (r *AutoResearchProjectReconciler) drainOpenJobs(ctx context.Context, p *ag
 					agentofficev1alpha1.AutoResearchProjectCondition{
 						Type:               "WikiSyncOK",
 						Status:             "True",
-						Reason:             "Committed",
+						Reason:             "ResultPushed",
 						Message:            fmt.Sprintf("results/round-%d.md + log/log.md committed to wiki", round),
 						LastTransitionTime: metav1.Now(),
 					})
