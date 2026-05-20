@@ -49,7 +49,7 @@ metadata:
     capabilities: Basic Install
     categories: AI/Machine Learning, Developer Tools
     containerImage: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-operator:v0.0.1
-    createdAt: "2026-05-17T03:44:50Z"
+    createdAt: "2026-05-20T15:52:27Z"
     description: OLM-managed operator for the Governed Agent Platform. Owns the AgentWorkstation
       and MemoryModule CRDs and reconciles the per-agent runtime artifacts (Deployment,
       Service, ConfigMap, PVC) on OpenShift.
@@ -57,7 +57,7 @@ metadata:
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
     repository: https://github.com/enterprisewebservice/agent-office-operator
     support: Red Hat Solution Architecture
-  name: agent-office-operator.v0.0.67
+  name: agent-office-operator.v0.0.68
   namespace: placeholder
 spec:
   apiservicedefinitions: {}
@@ -82,29 +82,13 @@ spec:
       name: agentworkstations.agentoffice.ai
       version: v1alpha1
     - description: |-
-        MemoryModule is shared .md content that one or more AgentWorkstations
-        pull into their per-agent rendered ConfigMap (AGENTS.md, USER.md,
-        SKILL_<name>.md, etc.). Single source of truth for cross-agent memory.
-      displayName: Memory Module
-      kind: MemoryModule
-      name: memorymodules.agentoffice.ai
-      version: v1alpha1
-    - description: |-
-        Skill is shared SKILL_<name>.md content that AgentWorkstations can
-        bind via SkillBinding. Same library/per-agent split as MemoryModule
-        but scoped to Anthropic Skills Open Standard content.
-      displayName: Skill
-      kind: Skill
-      name: skills.agentoffice.ai
-      version: v1alpha1
-    - description: |-
-        SkillBinding attaches one or more Skill resources to an
-        AgentWorkstation, rendering SKILL_<name>.md into that agent's
-        per-agent ConfigMap. The binding tracks the source-of-truth hash
-        so updates to a Skill propagate to every bound workstation.
-      displayName: Skill Binding
-      kind: SkillBinding
-      name: skillbindings.agentoffice.ai
+        AutoResearchProject is a Karpathy-style autonomous QLoRA
+        fine-tuning loop. The operator owns its DSP pipeline, MLMD
+        experiment, scheduled rounds, and the agent that proposes new
+        training configs based on prior round eval results.
+      displayName: Auto Research Project
+      kind: AutoResearchProject
+      name: autoresearchprojects.agentoffice.ai
       version: v1alpha1
     - description: |-
         KnowledgeBase is the cluster-side representation of a research
@@ -116,13 +100,29 @@ spec:
       name: knowledgebases.agentoffice.ai
       version: v1alpha1
     - description: |-
-        AutoResearchProject is a Karpathy-style autonomous QLoRA
-        fine-tuning loop. The operator owns its DSP pipeline, MLMD
-        experiment, scheduled rounds, and the agent that proposes new
-        training configs based on prior round eval results.
-      displayName: Auto Research Project
-      kind: AutoResearchProject
-      name: autoresearchprojects.agentoffice.ai
+        MemoryModule is shared .md content that one or more AgentWorkstations
+        pull into their per-agent rendered ConfigMap (AGENTS.md, USER.md,
+        SKILL_<name>.md, etc.). Single source of truth for cross-agent memory.
+      displayName: Memory Module
+      kind: MemoryModule
+      name: memorymodules.agentoffice.ai
+      version: v1alpha1
+    - description: |-
+        SkillBinding attaches one or more Skill resources to an
+        AgentWorkstation, rendering SKILL_<name>.md into that agent's
+        per-agent ConfigMap. The binding tracks the source-of-truth hash
+        so updates to a Skill propagate to every bound workstation.
+      displayName: Skill Binding
+      kind: SkillBinding
+      name: skillbindings.agentoffice.ai
+      version: v1alpha1
+    - description: |-
+        Skill is shared SKILL_<name>.md content that AgentWorkstations can
+        bind via SkillBinding. Same library/per-agent split as MemoryModule
+        but scoped to Anthropic Skills Open Standard content.
+      displayName: Skill
+      kind: Skill
+      name: skills.agentoffice.ai
       version: v1alpha1
   description: |
     The Agent Office Operator manages governed coding agents on OpenShift.
@@ -184,6 +184,14 @@ spec:
           - ""
           resources:
           - pods/log
+          verbs:
+          - get
+        - apiGroups:
+          - ""
+          resourceNames:
+          - agent-office-github-app
+          resources:
+          - secrets
           verbs:
           - get
         - apiGroups:
@@ -255,6 +263,14 @@ spec:
           - update
           - watch
         - apiGroups:
+          - modelregistry.opendatahub.io
+          resources:
+          - modelregistries
+          verbs:
+          - get
+          - list
+          - watch
+        - apiGroups:
           - route.openshift.io
           resources:
           - routes
@@ -314,7 +330,7 @@ spec:
                       fieldPath: metadata.annotations['olm.targetNamespaces']
                 - name: CLUSTER_APPS_DOMAIN
                   value: apps.salamander.aimlworkbench.com
-                image: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-operator:v0.0.67
+                image: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-operator:v0.0.68
                 imagePullPolicy: Always
                 livenessProbe:
                   httpGet:
@@ -324,20 +340,8 @@ spec:
                   periodSeconds: 20
                 name: manager
                 ports:
-                # Named ports so the operator's Services (Backstage
-                # catalog HTTP at :9443, metrics-auth at :8443) can
-                # reference them by name instead of brittle numeric
-                # targetPorts. Baked into the CSV so they survive
-                # OLM-managed deployment regeneration on every
-                # upgrade — direct deployment patches get reverted.
                 - containerPort: 9443
                   name: backstage-cat
-                  protocol: TCP
-                - containerPort: 8443
-                  name: metrics
-                  protocol: TCP
-                - containerPort: 8081
-                  name: probe
                   protocol: TCP
                 readinessProbe:
                   httpGet:
@@ -433,4 +437,4 @@ spec:
   provider:
     name: Red Hat Solution Architecture
     url: https://github.com/enterprisewebservice
-  version: 0.0.67
+  version: 0.0.68

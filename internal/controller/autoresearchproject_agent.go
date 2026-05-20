@@ -97,16 +97,30 @@ func (r *AutoResearchProjectReconciler) proposeViaAgent(
 		return QLoRAConfig{}, "", fmt.Errorf("find gateway pod: %w", err)
 	}
 
-	// 2. Read the current wiki log to give the agent prior context.
-	//    The agent's prompt asks it to read log/log.md inside its own
-	//    workspace; we send a snapshot here so it can reason even if
-	//    its own filesystem read fails for any reason.
+	// 2. Seed the agent's workspace with the live wiki log so its
+	//    `file_read log/log.md` tool call resolves. The wiki PVC and
+	//    workspace PVC are both mounted in the gateway container —
+	//    a single exec copy is enough to bridge them. We do this
+	//    every turn so the agent always sees the freshest log even
+	//    after the operator appends a new round entry.
+	if err := r.seedWorkspaceLog(ctx, gwPod, p, agentName); err != nil {
+		// Non-fatal: the operator also embeds the log snapshot in
+		// the prompt body below, so the agent can still reason
+		// even if the seed copy fails.
+		log.Info("seed workspace log failed (continuing; log is still in prompt)", "err", err.Error())
+	}
+
+	// 3. Read the current wiki log to give the agent prior context.
+	//    The system prompt also tells the agent to file_read log.md
+	//    (now possible thanks to step 2), but we embed a snapshot
+	//    here too as belt-and-suspenders + so the model can plan
+	//    without first burning a tool call.
 	logSnapshot, _ := r.readWikiLogSnapshot(ctx, p)
 
-	// 3. Build the prompt.
+	// 4. Build the prompt.
 	prompt := buildExperimenterPrompt(p, round, logSnapshot)
 
-	// 4. Exec `openclaw agent --agent <name> --message <prompt> --json`.
+	// 5. Exec `openclaw agent --agent <name> --message <prompt> --json`.
 	tctx, cancel := context.WithTimeout(ctx, agentExecTimeout)
 	defer cancel()
 	out, err := r.execInGatewayPod(tctx, gwPod, []string{
@@ -120,13 +134,13 @@ func (r *AutoResearchProjectReconciler) proposeViaAgent(
 		return QLoRAConfig{}, "", fmt.Errorf("openclaw agent exec: %w (stdout/stderr: %s)", err, truncateMsg(out, 400))
 	}
 
-	// 5. Parse the agent's reply back into a QLoRAConfig.
+	// 6. Parse the agent's reply back into a QLoRAConfig.
 	cfg, reasoning, perr := parseAgentProposal(out, round)
 	if perr != nil {
 		return QLoRAConfig{}, "", fmt.Errorf("parse agent reply: %w (reply: %s)", perr, truncateMsg(out, 400))
 	}
 
-	// 6. Best-effort: commit the proposal to the wiki repo so the
+	// 7. Best-effort: commit the proposal to the wiki repo so the
 	//    agent's reasoning lands in Obsidian even if training fails.
 	if werr := r.wikiPushProposal(ctx, p, round, cfg, reasoning); werr != nil {
 		log.Info("wiki proposal commit failed (continuing with proposed config)", "err", werr.Error())
@@ -690,6 +704,71 @@ func (r *AutoResearchProjectReconciler) readWikiLogSnapshot(
 		return "", err
 	}
 	return string(raw), nil
+}
+
+// seedWorkspaceLog copies the live wiki log file into the agent's
+// workspace just before the agent runs, so the agent's `file_read
+// log/log.md` call (per its system prompt) resolves successfully.
+//
+// The gateway pod has BOTH PVCs mounted under /home/node/.openclaw:
+//
+//   workspace PVC    /home/node/.openclaw/                 (with workspaces/<agent>/)
+//   wiki PVC         /home/node/.openclaw/wiki/<kb-name>/  (the live, git-synced wiki)
+//
+// The agent's file_read tool resolves paths relative to its own
+// workspace at /home/node/.openclaw/workspaces/<agent>/. So
+// "log/log.md" → workspaces/<agent>/log/log.md which doesn't exist.
+//
+// We exec a single `sh -c 'mkdir -p && cp'` in the openclaw
+// container before each turn. The copy is intentionally per-turn
+// (not a one-time seed) because the wiki log grows as rounds
+// complete and we want the agent to always see the freshest state.
+//
+// Best-effort: any failure is logged by the caller and the run
+// continues — the operator also embeds the log snapshot in the
+// prompt body so the agent has the context even without the file.
+func (r *AutoResearchProjectReconciler) seedWorkspaceLog(
+	ctx context.Context,
+	gwPod *corev1.Pod,
+	p *agentofficev1alpha1.AutoResearchProject,
+	agentName string,
+) error {
+	if p.Spec.KnowledgeBase == "" {
+		return fmt.Errorf("spec.knowledgeBase is empty")
+	}
+	// The wiki PVC is mounted with the KnowledgeBase resource name
+	// as the directory under /home/node/.openclaw/wiki/. See
+	// agentgateway_resources.go where the mount is constructed.
+	kbDir := p.Spec.KnowledgeBase
+	src := fmt.Sprintf("/home/node/.openclaw/wiki/%s/log/log.md", kbDir)
+	wsDir := fmt.Sprintf("/home/node/.openclaw/workspaces/%s", agentName)
+	dst := wsDir + "/log/log.md"
+	// `cp -f` so a stale file from a previous turn gets overwritten
+	// with the current wiki content. If the wiki file doesn't yet
+	// exist (very first round), the agent will get ENOENT on its
+	// read tool — but that's fine because the prompt body also
+	// contains "(no log entries yet)". The system prompt's fallback
+	// instruction for "log is empty" still kicks in.
+	script := fmt.Sprintf(
+		"mkdir -p %s/log && if [ -f %s ]; then cp -f %s %s; fi",
+		shQuote(wsDir), shQuote(src), shQuote(src), shQuote(dst),
+	)
+	tctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	out, err := r.execInGatewayPod(tctx, gwPod, []string{"sh", "-c", script})
+	if err != nil {
+		return fmt.Errorf("exec seed copy: %w (out: %s)", err, truncateMsg(out, 200))
+	}
+	return nil
+}
+
+// shQuote wraps an arg in single quotes for safe inclusion in an
+// `sh -c` script. Path components inside the gateway pod are
+// controlled by the operator (KB name, agent name) so injection is
+// not a real concern — this is purely for whitespace + special-char
+// safety if someone names a KB with a hyphen-quirk in the future.
+func shQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // refName wraps a branch name into the plumbing.ReferenceName type

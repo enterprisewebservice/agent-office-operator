@@ -5,6 +5,10 @@ resources:
 - bases/agentoffice.ai_memorymodules.yaml
 - bases/agentoffice.ai_agentworkstations.yaml
 - bases/agentoffice.ai_agentgateways.yaml
+- bases/agentoffice.ai_skills.yaml
+- bases/agentoffice.ai_skillbindings.yaml
+- bases/agentoffice.ai_knowledgebases.yaml
+- bases/agentoffice.ai_autoresearchprojects.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

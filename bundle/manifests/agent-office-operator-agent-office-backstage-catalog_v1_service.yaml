@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    app.kubernetes.io/component: backstage-catalog
+    app.kubernetes.io/name: agent-office-operator
+    control-plane: controller-manager
+  name: agent-office-operator-agent-office-backstage-catalog
+spec:
+  ports:
+  - name: http
+    port: 80
+    protocol: TCP
+    targetPort: backstage-cat
+  selector:
+    app.kubernetes.io/name: agent-office-operator
+    control-plane: controller-manager
+status:
+  loadBalancer: {}

@@ -40,6 +40,14 @@ rules:
   verbs:
   - get
 - apiGroups:
+  - ""
+  resourceNames:
+  - agent-office-github-app
+  resources:
+  - secrets
+  verbs:
+  - get
+- apiGroups:
   - agentoffice.ai
   resources:
   - agentgateways
