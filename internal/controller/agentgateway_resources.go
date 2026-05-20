@@ -62,7 +62,8 @@ func gatewayEnvFrom(gw *agentofficev1alpha1.AgentGateway, tokenSecretName string
 	return out
 }
 
-func ptrBool(b bool) *bool { return &b }
+func ptrBool(b bool) *bool    { return &b }
+func ptrInt32(i int32) *int32 { return &i }
 
 // gatewayVolumeMounts returns the openclaw container's volume
 // mounts. Always includes the workspace PVC + /dev/shm. When
@@ -74,18 +75,98 @@ func ptrBool(b bool) *bool { return &b }
 // each KnowledgeBase is mounted at
 // /home/node/.openclaw/wiki/<kb-name>/ so all logical agents in
 // the gateway pod see the same wiki content.
+// gatewayInitMounts returns the volume mounts the init-config
+// initContainer needs. Always includes the openclaw config CM +
+// the workspace PVC. When Codex creds are wired, also mounts the
+// read-only Secret projection and the writable .codex/ emptyDir
+// so the init step can seed auth.json into the latter.
+func gatewayInitMounts(gw *agentofficev1alpha1.AgentGateway) []corev1.VolumeMount {
+	mounts := []corev1.VolumeMount{
+		{Name: "config", MountPath: "/config", ReadOnly: true},
+		{Name: "workspace", MountPath: "/workspace"},
+	}
+	if gw.Spec.CodexCredentialsSecretRef != "" {
+		mounts = append(mounts,
+			corev1.VolumeMount{Name: "codex-auth-src", MountPath: "/var/lib/codex-auth", ReadOnly: true},
+			corev1.VolumeMount{Name: "codex-home", MountPath: "/codex-home"},
+		)
+	}
+	return mounts
+}
+
+// codexAuthSyncContainer returns a tiny sidecar that watches
+// /var/lib/codex-auth/auth.json (kept fresh by kubelet on Secret
+// updates, which happen when ESO syncs new Vault data) and
+// re-copies it into /home/node/.codex/auth.json so codex-acp and
+// openclaw see the latest token. Without this, ESO can update
+// the Secret all it wants but the gateway pod's emptyDir copy
+// stays stale until the pod restarts.
+func codexAuthSyncContainer() corev1.Container {
+	return corev1.Container{
+		Name:  "codex-auth-sync",
+		Image: "registry.access.redhat.com/ubi9/ubi-minimal:latest",
+		Command: []string{"/bin/sh", "-c", `
+			set -u
+			prev=""
+			while true; do
+				if [ -f /var/lib/codex-auth/auth.json ]; then
+					cur=$(sha256sum /var/lib/codex-auth/auth.json | cut -d' ' -f1)
+					if [ "$cur" != "$prev" ]; then
+						cp /var/lib/codex-auth/auth.json /home/node/.codex/auth.json
+						chmod 0600 /home/node/.codex/auth.json
+						echo "codex-auth-sync: refreshed auth.json (sha256=$cur)"
+						prev="$cur"
+					fi
+				fi
+				sleep 30
+			done
+		`},
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: "codex-auth-src", MountPath: "/var/lib/codex-auth", ReadOnly: true},
+			{Name: "codex-home", MountPath: "/home/node/.codex"},
+		},
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("10m"),
+				corev1.ResourceMemory: resource.MustParse("16Mi"),
+			},
+			Limits: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("50m"),
+				corev1.ResourceMemory: resource.MustParse("64Mi"),
+			},
+		},
+	}
+}
+
 func gatewayVolumeMounts(gw *agentofficev1alpha1.AgentGateway, attachedKBs []agentofficev1alpha1.KnowledgeBase) []corev1.VolumeMount {
 	mounts := []corev1.VolumeMount{
 		{Name: "workspace", MountPath: "/home/node/.openclaw"},
 		{Name: "dshm", MountPath: "/dev/shm"},
 	}
 	if gw.Spec.CodexCredentialsSecretRef != "" {
-		mounts = append(mounts, corev1.VolumeMount{
-			Name:      "codex-auth",
-			MountPath: "/home/node/.codex/auth.json",
-			SubPath:   "auth.json",
-			ReadOnly:  true,
-		})
+		// Two-volume layout (v0.0.65+): the K8s Secret is mounted
+		// READ-ONLY at /var/lib/codex-auth/ (kubelet refreshes it
+		// in place when ESO updates the Vault-sourced data), and
+		// /home/node/.codex/ is a WRITABLE emptyDir owned by the
+		// pod's fsGroup. The init-config initContainer + the
+		// codex-auth-sync sidecar keep auth.json in sync between
+		// the two. We split them because the codex-acp binary
+		// (@zed-industries/codex-acp, invoked by openclaw) needs
+		// to write into .codex/ — adjust PATH, persist a
+		// config.toml — and SubPath-mounted Secret directories are
+		// root-owned + read-only, which made codex-acp exit before
+		// initialize with "Permission denied (os error 13)".
+		mounts = append(mounts,
+			corev1.VolumeMount{
+				Name:      "codex-auth-src",
+				MountPath: "/var/lib/codex-auth",
+				ReadOnly:  true,
+			},
+			corev1.VolumeMount{
+				Name:      "codex-home",
+				MountPath: "/home/node/.codex",
+			},
+		)
 	}
 	for _, kb := range attachedKBs {
 		mounts = append(mounts, corev1.VolumeMount{
@@ -117,16 +198,31 @@ func gatewayVolumes(gw *agentofficev1alpha1.AgentGateway, dshmSize resource.Quan
 			}}},
 	}
 	if gw.Spec.CodexCredentialsSecretRef != "" {
+		// codex-auth-src: read-only projection of the K8s Secret.
+		// kubelet keeps this fresh as ESO updates the Secret —
+		// the underlying file changes in place, our sidecar
+		// detects the change and re-copies into codex-home.
 		vols = append(vols, corev1.Volume{
-			Name: "codex-auth",
+			Name: "codex-auth-src",
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
 					SecretName: gw.Spec.CodexCredentialsSecretRef,
 					Items: []corev1.KeyToPath{
 						{Key: "auth.json", Path: "auth.json"},
 					},
-					Optional: ptrBool(true),
+					DefaultMode: ptrInt32(0o444),
+					Optional:    ptrBool(true),
 				},
+			},
+		})
+		// codex-home: writable emptyDir for /home/node/.codex/.
+		// OpenShift's restricted SCC injects fsGroup automatically
+		// and emptyDirs honor fsGroup, so the pod user can read,
+		// write, and create files (config.toml, etc.) here.
+		vols = append(vols, corev1.Volume{
+			Name: "codex-home",
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
 			},
 		})
 	}
@@ -367,17 +463,25 @@ func (r *AgentGatewayReconciler) reconcileGatewayDeployment(ctx context.Context,
 					// across restarts. Per-agent additions live in
 					// the file (managed by AW reconcile via exec) and
 					// would be lost if init unconditionally
-					// overwrote.
+					// overwrote. Also: if Codex creds are wired,
+					// copy auth.json from the read-only Secret mount
+					// into the writable .codex/ emptyDir so codex-acp
+					// can boot. Subsequent ESO refreshes are
+					// propagated by the codex-auth-sync sidecar.
 					Command: []string{"/bin/sh", "-c", `
+						set -eu
 						if [ ! -f /workspace/openclaw.json ]; then
 							cp /config/openclaw.json /workspace/openclaw.json
 						fi
 						mkdir -p /workspace/agents
+
+						if [ -f /var/lib/codex-auth/auth.json ]; then
+							cp /var/lib/codex-auth/auth.json /codex-home/auth.json
+							chmod 0600 /codex-home/auth.json
+							echo "codex auth.json seeded into .codex/ (init)"
+						fi
 					`},
-					VolumeMounts: []corev1.VolumeMount{
-						{Name: "config", MountPath: "/config", ReadOnly: true},
-						{Name: "workspace", MountPath: "/workspace"},
-					},
+					VolumeMounts: gatewayInitMounts(gw),
 				}},
 				Containers: gatewayContainers(image, gw, tokenSecretName, attachedKBs),
 				Volumes:    gatewayVolumes(gw, dshmSize, attachedKBs),
@@ -407,6 +511,12 @@ func gatewayContainers(image string, gw *agentofficev1alpha1.AgentGateway, token
 		EnvFrom:      gatewayEnvFrom(gw, tokenSecretName),
 		VolumeMounts: gatewayVolumeMounts(gw, attachedKBs),
 	}}
+	// codex-auth-sync sidecar: propagates Vault → Secret → emptyDir
+	// updates so the user's re-auth dialog flow rotates the token
+	// without a pod restart. Only added when Codex creds are wired.
+	if gw.Spec.CodexCredentialsSecretRef != "" {
+		out = append(out, codexAuthSyncContainer())
+	}
 	for _, kb := range attachedKBs {
 		if kb.Spec.GitMirror != nil {
 			out = append(out, gitSyncContainer(kb))
