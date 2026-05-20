@@ -222,6 +222,17 @@ func (r *AutoResearchProjectReconciler) Reconcile(ctx context.Context, req ctrl.
 	//    retry rather than training a fallback config —
 	//    "always train SOMETHING" was the anti-pattern that
 	//    let v0.0.x burn rounds on the starter config.
+	//
+	//    v0.3.0 (Phase 2b): if the strategist is due (cadence or
+	//    stagnation), run it BEFORE the searcher so its updated
+	//    HYPOTHESES.md is what the searcher reads. Strategist
+	//    is fire-and-forget from the controller's perspective —
+	//    its turn either updates HYPOTHESES.md or it doesn't;
+	//    the searcher works either way.
+	if err := r.maybeRunStrategist(ctx, &project); err != nil {
+		log.Info("strategist gate evaluation failed; proceeding with searcher only",
+			"err", err.Error())
+	}
 	round := project.Status.Round + 1
 	proposal, proposalSource, err := r.requestProposal(ctx, &project, int(round))
 	if err != nil {
@@ -429,19 +440,65 @@ func (r *AutoResearchProjectReconciler) requestProposal(ctx context.Context, p *
 	//    wiki. Any I/O error here aborts the round (we won't
 	//    propose blindly without consulting history). An EMPTY
 	//    history is fine — the searcher handles warmup itself.
-	history, err := search.LoadWikiHistory(tx, defaultQLoRASpace())
+	defaultSpace := defaultQLoRASpace()
+	history, err := search.LoadWikiHistory(tx, defaultSpace)
 	if err != nil {
 		return QLoRAConfig{}, "", fmt.Errorf("load wiki history: %w", err)
 	}
 
-	// 3. Ask the searcher for the next config. Seeded from the
+	// 3. Apply HYPOTHESES.md if present. This is Phase 2's
+	//    contract: the strategist (LLM, runs on cadence) lands
+	//    HYPOTHESES.md as a YAML doc describing search-space
+	//    adjustments + a hypothesis narrative. We layer those
+	//    adjustments onto the default space before constructing
+	//    the searcher. Malformed HYPOTHESES.md → log + ignore
+	//    (the searcher uses the un-adjusted space; the loop
+	//    keeps turning).
+	space := defaultSpace
+	hypothesesPresent := false
+	hypothesesBody, herr := tx.Read("HYPOTHESES.md")
+	if herr != nil {
+		// I/O error reading the file — surface but don't fail
+		// the round; the searcher works with the default space.
+		log.Info("read HYPOTHESES.md failed; using default search space", "err", herr.Error())
+	} else if len(hypothesesBody) > 0 {
+		hypothesesPresent = true
+		h, perr := search.ParseHypotheses(hypothesesBody)
+		if perr != nil {
+			log.Info("parse HYPOTHESES.md failed; using default search space", "err", perr.Error())
+			p.Status.Conditions = mergeARPConditions(p.Status.Conditions,
+				agentofficev1alpha1.AutoResearchProjectCondition{
+					Type:               "StrategistOK",
+					Status:             "False",
+					Reason:             "HypothesesMalformed",
+					Message:            truncateMsg(perr.Error(), 256),
+					LastTransitionTime: metav1.Now(),
+				})
+		} else {
+			adjusted, notices := h.Apply(defaultSpace)
+			space = adjusted
+			if len(notices) > 0 {
+				log.Info("HYPOTHESES.md applied with notices", "notices", strings.Join(notices, "; "))
+			}
+			p.Status.Conditions = mergeARPConditions(p.Status.Conditions,
+				agentofficev1alpha1.AutoResearchProjectCondition{
+					Type:               "StrategistOK",
+					Status:             "True",
+					Reason:             "HypothesesApplied",
+					Message:            truncateMsg(strategistMessage(h, len(notices)), 256),
+					LastTransitionTime: metav1.Now(),
+				})
+		}
+	}
+
+	// 4. Ask the searcher for the next config. Seeded from the
 	//    project's UID so the search is reproducible per-project
 	//    across operator restarts.
 	searcher, err := search.NewSearcher(search.Config{
 		Sampler:   search.SamplerTPE,
 		Direction: search.DirectionMinimize, // eval_loss is "lower is better"
 		Seed:      seedFromUID(p.UID),
-		Space:     defaultQLoRASpace(),
+		Space:     space,
 		Warmup:    defaultWarmupTrials,
 	})
 	if err != nil {
@@ -486,8 +543,11 @@ func (r *AutoResearchProjectReconciler) requestProposal(ctx context.Context, p *
 		return QLoRAConfig{}, "", werr
 	}
 
-	// 6. Happy path — record status + return.
+	// 7. Happy path — record status + return.
 	source := fmt.Sprintf("searcher (TPE, %d prior observations)", len(history))
+	if hypothesesPresent {
+		source += " + HYPOTHESES.md"
+	}
 	p.Status.Conditions = mergeARPConditions(p.Status.Conditions,
 		agentofficev1alpha1.AutoResearchProjectCondition{
 			Type:               "WikiSyncOK",
@@ -497,6 +557,30 @@ func (r *AutoResearchProjectReconciler) requestProposal(ctx context.Context, p *
 			LastTransitionTime: metav1.Now(),
 		})
 	return cfg, source, nil
+}
+
+// strategistMessage builds a short Status.message describing which
+// of the LLM strategist's adjustments landed. Used by Backstage
+// UI + `oc describe` to surface the strategist's contribution
+// without re-reading HYPOTHESES.md.
+func strategistMessage(h search.Hypotheses, noticeCount int) string {
+	parts := []string{}
+	if h.GeneratedAfterRound > 0 {
+		parts = append(parts, fmt.Sprintf("after round %d", h.GeneratedAfterRound))
+	}
+	if n := len(h.AdjustSearchSpace); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d param adjustments", n))
+	}
+	if n := len(h.References); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d references", n))
+	}
+	if noticeCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d clamped", noticeCount))
+	}
+	if len(parts) == 0 {
+		return "HYPOTHESES.md applied (no adjustments)"
+	}
+	return "HYPOTHESES.md applied: " + strings.Join(parts, ", ")
 }
 
 // defaultWarmupTrials is the number of random-sampled rounds the
