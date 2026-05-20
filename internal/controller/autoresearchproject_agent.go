@@ -678,7 +678,22 @@ func (r *AutoResearchProjectReconciler) openWikiRepo(
 }
 
 // commitAndPush stages the named paths (relative to the repo root),
-// commits with the given message, and pushes to origin.
+// commits with the given message, and pushes the currently-checked-
+// out branch to its same name on origin.
+//
+// History note (v0.0.70): for every release prior to this one, the
+// RefSpec was the typo `refs/heads/+HEAD:refs/heads/HEAD` — the `+`
+// (force-push flag) was buried mid-path producing a source ref name
+// that didn't exist locally. go-git silently no-op'd the push and
+// returned nil. The wiki repos for every AutoResearchProject only
+// ever received the initial commit + the bootstrap commit; no
+// proposals/round-N or results/round-N has ever landed remote.
+// The combination of broken refspec + "best-effort" error handling
+// at the caller masked this completely.
+//
+// Correct refspec: `+refs/heads/<branch>:refs/heads/<branch>`. We
+// resolve <branch> from HEAD so we don't have to thread it through
+// every caller.
 func commitAndPush(ctx context.Context, repo *git.Repository, auth *githttp.BasicAuth, msg string, paths ...string) error {
 	w, err := repo.Worktree()
 	if err != nil {
@@ -699,12 +714,26 @@ func commitAndPush(ctx context.Context, repo *git.Repository, auth *githttp.Basi
 	}); err != nil {
 		return fmt.Errorf("commit: %w", err)
 	}
+
+	// Resolve the local checked-out branch name from HEAD. The
+	// clone in openWikiRepo uses SingleBranch + ReferenceName so
+	// HEAD reliably points at refs/heads/<branch>.
+	head, err := repo.Head()
+	if err != nil {
+		return fmt.Errorf("read HEAD: %w", err)
+	}
+	if !head.Name().IsBranch() {
+		return fmt.Errorf("HEAD is not a branch (got %q)", head.Name())
+	}
+	branchRef := head.Name().String() // e.g. "refs/heads/main"
+
+	refSpec := config.RefSpec("+" + branchRef + ":" + branchRef)
 	if err := repo.PushContext(ctx, &git.PushOptions{
 		RemoteName: "origin",
 		Auth:       auth,
-		RefSpecs:   []config.RefSpec{config.RefSpec("refs/heads/+HEAD:refs/heads/HEAD")},
+		RefSpecs:   []config.RefSpec{refSpec},
 	}); err != nil && err != git.NoErrAlreadyUpToDate {
-		return fmt.Errorf("push: %w", err)
+		return fmt.Errorf("push %s: %w", refSpec, err)
 	}
 	return nil
 }
