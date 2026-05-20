@@ -592,20 +592,27 @@ func (r *AutoResearchProjectReconciler) openWikiRepo(
 		return nil, "", nil, fmt.Errorf("KnowledgeBase %s has no spec.gitMirror.url", kb.Name)
 	}
 
-	// Read the git PAT from the KB's credentials secret.
-	var sec corev1.Secret
-	if err := r.Get(ctx, types.NamespacedName{Namespace: p.Namespace, Name: kb.Spec.GitMirror.CredentialsSecretRef}, &sec); err != nil {
-		return nil, "", nil, fmt.Errorf("get git-token secret %s: %w", kb.Spec.GitMirror.CredentialsSecretRef, err)
+	// Resolve git auth. Two paths in priority order:
+	//
+	//  1. Per-agent PAT — kb.Spec.GitMirror.CredentialsSecretRef
+	//     references a Secret holding a GIT_TOKEN key. This is the
+	//     legacy path; new agents shouldn't use it (the template's
+	//     wikiGitToken form input was removed in v0.0.67). Existing
+	//     agents that still have a populated per-agent Secret
+	//     continue working — no migration required.
+	//
+	//  2. Cluster-shared GitHub App — agent-office/agent-office-
+	//     github-app Secret holds the App's private key, App ID,
+	//     and installation ID. We sign a JWT, exchange for a
+	//     ~1-hour installation token, return it as go-git BasicAuth.
+	//     This is the path for any agent without a per-agent Secret
+	//     (or whose Secret has an empty GIT_TOKEN — the form-input
+	//     bug we hit in May 2026 that produced GIT_TOKEN: null).
+	auth, authSource, err := r.resolveWikiAuth(ctx, p, &kb)
+	if err != nil {
+		return nil, "", nil, err
 	}
-	token := string(sec.Data["GIT_TOKEN"])
-	if token == "" {
-		return nil, "", nil, fmt.Errorf("secret %s has no GIT_TOKEN key", kb.Spec.GitMirror.CredentialsSecretRef)
-	}
-
-	auth := &githttp.BasicAuth{
-		Username: "git", // any non-empty string; GitHub ignores it when using a PAT
-		Password: token,
-	}
+	_ = authSource // currently unused; surfaced in conditions in a follow-up commit.
 
 	dir, err := os.MkdirTemp("", "autoresearch-wiki-*")
 	if err != nil {
@@ -722,3 +729,43 @@ func notFoundOnlyAsAgentUnreachable(err error) error {
 var commitedFilesRE = regexp.MustCompile(`^(proposals|results|log)/`)
 
 var _ = commitedFilesRE
+
+// resolveWikiAuth picks the right git auth for the wiki push:
+// per-agent PAT (legacy, if present + non-empty) or the cluster-
+// shared GitHub App installation token (the default for any agent
+// since v0.0.67). The returned string identifies which path won —
+// surfaced in operator logs + future status conditions so we can
+// observe how many agents are still on the legacy path.
+func (r *AutoResearchProjectReconciler) resolveWikiAuth(
+	ctx context.Context,
+	p *agentofficev1alpha1.AutoResearchProject,
+	kb *agentofficev1alpha1.KnowledgeBase,
+) (*githttp.BasicAuth, string, error) {
+	// Path 1: legacy per-agent PAT.
+	if kb.Spec.GitMirror.CredentialsSecretRef != "" {
+		var sec corev1.Secret
+		if err := r.Get(ctx, types.NamespacedName{
+			Namespace: p.Namespace,
+			Name:      kb.Spec.GitMirror.CredentialsSecretRef,
+		}, &sec); err == nil {
+			token := strings.TrimSpace(string(sec.Data["GIT_TOKEN"]))
+			if token != "" {
+				return &githttp.BasicAuth{
+					Username: "git",
+					Password: token,
+				}, "per-agent PAT (" + kb.Spec.GitMirror.CredentialsSecretRef + ")", nil
+			}
+		}
+	}
+
+	// Path 2: cluster-shared GitHub App. Errors here are fatal —
+	// if both paths fail, the caller's WikiSyncOK condition will
+	// flip to False with the message.
+	auth, err := GitHubAppBasicAuth(ctx, r.Client)
+	if err != nil {
+		return nil, "", fmt.Errorf(
+			"no wiki auth available: per-agent secret %q empty or missing AND App auth failed: %w",
+			kb.Spec.GitMirror.CredentialsSecretRef, err)
+	}
+	return auth, "github-app " + GitHubAppSecretName, nil
+}
