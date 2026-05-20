@@ -410,14 +410,51 @@ func (r *AutoResearchProjectReconciler) requestProposal(ctx context.Context, p *
 	// v0.0.67: try to get a real proposal from the experimenter agent.
 	// Failure falls back to the starter config so the loop never
 	// wedges — AgentIntegrationOK condition surfaces what went wrong.
+	//
+	// v0.0.70: proposeViaAgent can now return BOTH a valid cfg AND
+	// a non-nil error: the agent replied with a good config, but
+	// the subsequent wiki-push failed. In that case we still want
+	// to train (the config is good) — we just surface the wiki
+	// failure on WikiSyncOK and let AgentIntegrationOK stay True.
 	cfg, source, err := r.proposeViaAgent(ctx, p, round)
-	if err == nil {
+	switch {
+	case err == nil:
 		p.Status.Conditions = mergeARPConditions(p.Status.Conditions,
 			agentofficev1alpha1.AutoResearchProjectCondition{
 				Type:               "AgentIntegrationOK",
 				Status:             "True",
 				Reason:             "AgentReplied",
 				Message:            fmt.Sprintf("experimenter %s proposed round %d", p.Spec.Experimenter.Workstation, round),
+				LastTransitionTime: metav1.Now(),
+			})
+		p.Status.Conditions = mergeARPConditions(p.Status.Conditions,
+			agentofficev1alpha1.AutoResearchProjectCondition{
+				Type:               "WikiSyncOK",
+				Status:             "True",
+				Reason:             "ProposalPushed",
+				Message:            fmt.Sprintf("proposals/round-%d.{yaml,md} committed to wiki via GitHub App", round),
+				LastTransitionTime: metav1.Now(),
+			})
+		return cfg, source, nil
+	case cfg.LoraRank > 0 && err != nil:
+		// Agent succeeded, wiki push failed. Train anyway, but
+		// surface the wiki error loudly so we don't ship rounds
+		// whose reasoning was lost.
+		log.Error(err, "agent proposed config but wiki push failed; training will still proceed", "round", round)
+		p.Status.Conditions = mergeARPConditions(p.Status.Conditions,
+			agentofficev1alpha1.AutoResearchProjectCondition{
+				Type:               "AgentIntegrationOK",
+				Status:             "True",
+				Reason:             "AgentReplied",
+				Message:            fmt.Sprintf("experimenter %s proposed round %d (wiki push failed; see WikiSyncOK)", p.Spec.Experimenter.Workstation, round),
+				LastTransitionTime: metav1.Now(),
+			})
+		p.Status.Conditions = mergeARPConditions(p.Status.Conditions,
+			agentofficev1alpha1.AutoResearchProjectCondition{
+				Type:               "WikiSyncOK",
+				Status:             "False",
+				Reason:             "ProposalPushFailed",
+				Message:            truncateMsg(err.Error(), 256),
 				LastTransitionTime: metav1.Now(),
 			})
 		return cfg, source, nil

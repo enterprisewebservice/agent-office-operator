@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	agentofficev1alpha1 "github.com/enterprisewebservice/agent-office-operator/api/v1alpha1"
 )
@@ -881,5 +882,81 @@ and uses it as the next round's QLoRA hyperparameters.
 		aw.Namespace, aw.Name, gateway, model, provider, tools,
 		aw.Namespace, aw.Name,
 		systemPrompt)
+}
+
+// refreshWikiCredentialsSecret mints a fresh GitHub App installation
+// token and writes it into the per-KB credentials Secret as
+// `GIT_TOKEN`. The git-sync sidecar reads this Secret via envFrom
+// and uses the token in a `https://x-access-token:${GIT_TOKEN}@...`
+// remote URL (see sync.sh in reconcileGitSyncConfigMap).
+//
+// Why operator-managed rather than ESO-from-Vault: tokens are
+// minted from a single App private key the operator already has
+// access to. No additional Vault dependency, no ESO refresh-
+// interval to tune, and the token is always fresh when the KB
+// reconciles (controller resync = 30 min, token TTL = ~1 hour).
+//
+// The Secret is created if missing — same name as
+// kb.Spec.GitMirror.CredentialsSecretRef. The operator does NOT
+// own it via SetControllerReference because Backstage scaffolder
+// may have created it first (e.g. on KB creation from a template)
+// and we don't want to GC user-provisioned objects on detach.
+func (r *KnowledgeBaseReconciler) refreshWikiCredentialsSecret(
+	ctx context.Context,
+	kb *agentofficev1alpha1.KnowledgeBase,
+) error {
+	auth, err := GitHubAppBasicAuth(ctx, r.Client)
+	if err != nil {
+		return fmt.Errorf("mint App installation token: %w", err)
+	}
+	token := auth.Password
+	if token == "" {
+		return fmt.Errorf("App auth returned empty token")
+	}
+
+	sec := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: kb.Namespace,
+			Name:      kb.Spec.GitMirror.CredentialsSecretRef,
+		},
+	}
+	op, err := controllerutil.CreateOrUpdate(ctx, r.Client, sec, func() error {
+		if sec.Data == nil {
+			sec.Data = map[string][]byte{}
+		}
+		sec.Data["GIT_TOKEN"] = []byte(token)
+		// `GIT_USERNAME` is set so the existing sync.sh stays
+		// generic — `x-access-token` is what GitHub expects for
+		// App installation tokens over HTTPS.
+		sec.Data["GIT_USERNAME"] = []byte("x-access-token")
+		if sec.Labels == nil {
+			sec.Labels = map[string]string{}
+		}
+		sec.Labels["agentoffice.ai/knowledgebase"] = kb.Name
+		sec.Labels["app.kubernetes.io/managed-by"] = "agent-office-operator"
+		// Annotation lets operators see when the token was last
+		// refreshed (token TTL ≈ 1h; we refresh every reconcile).
+		if sec.Annotations == nil {
+			sec.Annotations = map[string]string{}
+		}
+		sec.Annotations["agentoffice.ai/token-source"] = "github-app:" + GitHubAppSecretName
+		sec.Annotations["agentoffice.ai/token-refreshed-at"] = metav1.Now().UTC().Format("2006-01-02T15:04:05Z")
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("upsert credentials Secret %s/%s: %w",
+			kb.Namespace, kb.Spec.GitMirror.CredentialsSecretRef, err)
+	}
+	if op != controllerutil.OperationResultNone {
+		// Avoid the controller log going noisy every 30 min:
+		// only log when the operation was a real create/update,
+		// not a no-op. (CreateOrUpdate always reports Updated when
+		// the token value changes, which is every reconcile —
+		// so this still prints, but at one entry per refresh
+		// which is the right cadence.)
+		logf.FromContext(ctx).Info("refreshed wiki credentials with fresh App token",
+			"secret", sec.Name, "op", string(op))
+	}
+	return nil
 }
 

@@ -140,10 +140,23 @@ func (r *AutoResearchProjectReconciler) proposeViaAgent(
 		return QLoRAConfig{}, "", fmt.Errorf("parse agent reply: %w (reply: %s)", perr, truncateMsg(out, 400))
 	}
 
-	// 7. Best-effort: commit the proposal to the wiki repo so the
-	//    agent's reasoning lands in Obsidian even if training fails.
+	// 7. Commit the proposal to the wiki repo so the agent's
+	//    reasoning lands in Obsidian. This is NOT best-effort —
+	//    if the push fails the round still trains (we already
+	//    have the config in cfg), but the failure must propagate
+	//    so the caller can flip WikiSyncOK=False on Status. A
+	//    silent push failure is exactly the symptom we got burned
+	//    by in v0.0.69 (App auth needed `x-access-token`, the old
+	//    legacy path used `git`, push failed silently, no
+	//    `proposals/round-N.yaml` ever landed).
 	if werr := r.wikiPushProposal(ctx, p, round, cfg, reasoning); werr != nil {
-		log.Info("wiki proposal commit failed (continuing with proposed config)", "err", werr.Error())
+		log.Error(werr, "wiki proposal commit failed", "round", round)
+		// Return the cfg + reasoning + the wiki error. Caller
+		// (requestProposal) decides whether to still submit the
+		// round (yes — training is independent of wiki) but it
+		// also surfaces the error on the WikiSyncOK condition.
+		return cfg, fmt.Sprintf("agent %s", agentName),
+			fmt.Errorf("agent proposed round %d but wiki push failed: %w", round, werr)
 	}
 
 	return cfg, fmt.Sprintf("agent %s", agentName), nil
@@ -821,42 +834,30 @@ var commitedFilesRE = regexp.MustCompile(`^(proposals|results|log)/`)
 
 var _ = commitedFilesRE
 
-// resolveWikiAuth picks the right git auth for the wiki push:
-// per-agent PAT (legacy, if present + non-empty) or the cluster-
-// shared GitHub App installation token (the default for any agent
-// since v0.0.67). The returned string identifies which path won —
-// surfaced in operator logs + future status conditions so we can
-// observe how many agents are still on the legacy path.
+// resolveWikiAuth returns the cluster-shared GitHub App installation
+// token wrapped as go-git BasicAuth. The per-agent PAT branch was
+// removed in v0.0.70 — every agent uses the same App identity
+// (`agent-office-bot`), and the App's "All repositories" install
+// scope covers gitops + wiki repos that get created later by the
+// Backstage template. The per-agent KnowledgeBase Secret still
+// exists, but it's now a cache the operator keeps refreshed with
+// a fresh installation token for the git-sync sidecar, not a
+// distinct auth path.
+//
+// A 1-hour installation token is minted fresh on each call. That
+// avoids token-expiry races at the cost of one HTTP round trip
+// per wiki operation — fine because wiki pushes are rare events
+// (one per round).
 func (r *AutoResearchProjectReconciler) resolveWikiAuth(
 	ctx context.Context,
 	p *agentofficev1alpha1.AutoResearchProject,
 	kb *agentofficev1alpha1.KnowledgeBase,
 ) (*githttp.BasicAuth, string, error) {
-	// Path 1: legacy per-agent PAT.
-	if kb.Spec.GitMirror.CredentialsSecretRef != "" {
-		var sec corev1.Secret
-		if err := r.Get(ctx, types.NamespacedName{
-			Namespace: p.Namespace,
-			Name:      kb.Spec.GitMirror.CredentialsSecretRef,
-		}, &sec); err == nil {
-			token := strings.TrimSpace(string(sec.Data["GIT_TOKEN"]))
-			if token != "" {
-				return &githttp.BasicAuth{
-					Username: "git",
-					Password: token,
-				}, "per-agent PAT (" + kb.Spec.GitMirror.CredentialsSecretRef + ")", nil
-			}
-		}
-	}
-
-	// Path 2: cluster-shared GitHub App. Errors here are fatal —
-	// if both paths fail, the caller's WikiSyncOK condition will
-	// flip to False with the message.
 	auth, err := GitHubAppBasicAuth(ctx, r.Client)
 	if err != nil {
 		return nil, "", fmt.Errorf(
-			"no wiki auth available: per-agent secret %q empty or missing AND App auth failed: %w",
-			kb.Spec.GitMirror.CredentialsSecretRef, err)
+			"resolve wiki auth (KnowledgeBase %s/%s): %w",
+			kb.Namespace, kb.Name, err)
 	}
 	return auth, "github-app " + GitHubAppSecretName, nil
 }

@@ -133,6 +133,28 @@ func (r *KnowledgeBaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		// will surface the gap on the next gateway-side reconcile
 	}
 
+	// 1c. Refresh the per-KB credentials Secret with a fresh App
+	//     installation token. The git-sync sidecar consumes
+	//     GIT_TOKEN from this Secret and uses
+	//     `https://x-access-token:${GIT_TOKEN}@github.com/...` to
+	//     pull from the wiki repo. Tokens are good for ~1 hour;
+	//     this reconcile runs every 30 min (the operator's
+	//     resync period) so the token never expires from the
+	//     sidecar's perspective.
+	//
+	//     v0.0.70: the per-agent PAT input field on the template
+	//     was retired — the App is the single auth identity.
+	//     The Secret still exists, but it's now operator-managed
+	//     storage of a short-lived App-minted token.
+	if kb.Spec.GitMirror.URL != "" && kb.Spec.GitMirror.CredentialsSecretRef != "" {
+		if err := r.refreshWikiCredentialsSecret(ctx, &kb); err != nil {
+			log.Info("wiki credentials refresh failed; git-sync may report auth errors until next reconcile",
+				"secret", kb.Spec.GitMirror.CredentialsSecretRef, "err", err.Error())
+			// Non-fatal — surface on condition below but don't
+			// block the rest of the reconcile.
+		}
+	}
+
 	// 2. Resolve gateway binding (informational — the gateway
 	//    controller does the actual mount). We surface the
 	//    bound gateway and the count of logical agents in it
