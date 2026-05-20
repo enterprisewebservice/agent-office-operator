@@ -318,6 +318,42 @@ func parseAgentProposal(raw string, round int) (QLoRAConfig, string, error) {
 		body = wrapper.Reply
 	}
 
+	// Path A2: openclaw 2026.04+ returns an "ACP payload" envelope
+	// rather than the legacy {reply: "..."} shape. Captured live:
+	//
+	//   {
+	//     "runId": "...",
+	//     "status": "ok",
+	//     "summary": "completed",
+	//     "result": {
+	//       "payloads": [
+	//         {"text": "<JSON-encoded QLoRAConfig>"},
+	//         ...
+	//       ]
+	//     }
+	//   }
+	//
+	// Each payload's `text` is a JSON-encoded string. We unwrap the
+	// first text payload that looks like a config (contains lora_rank)
+	// and feed it through the rest of the pipeline.
+	var acp struct {
+		Result struct {
+			Payloads []struct {
+				Text string `json:"text"`
+				Type string `json:"type"`
+			} `json:"payloads"`
+		} `json:"result"`
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(raw), &acp); err == nil && len(acp.Result.Payloads) > 0 {
+		for _, p := range acp.Result.Payloads {
+			if strings.Contains(p.Text, "lora_rank") {
+				body = p.Text
+				break
+			}
+		}
+	}
+
 	// Path B: the body sometimes contains markdown like ```json{...}```.
 	// Strip those fences if present.
 	body = stripCodeFences(body)

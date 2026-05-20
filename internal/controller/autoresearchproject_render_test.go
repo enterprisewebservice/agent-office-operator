@@ -305,6 +305,19 @@ func TestParseAgentProposal(t *testing.T) {
 		{name: "openclaw --json wrapper", raw: `{"reply":` + jsonQuote(goldenJSON) + `,"session_id":"abc"}`},
 		{name: "fenced markdown", raw: "```json\n" + goldenJSON + "\n```"},
 		{name: "prose then JSON", raw: "I'm proposing the following config:\n\n" + goldenJSON + "\n\nbecause baseline."},
+		// openclaw 2026.04+ "ACP payload" envelope. The QLoRAConfig
+		// lives at result.payloads[0].text as a JSON-encoded string.
+		// Captured live from the v2 experimenter on 2026-05-20.
+		{name: "openclaw ACP payload envelope", raw: `{
+  "runId": "a5162e9c-abb7-47ce-83d5-f4a366681492",
+  "status": "ok",
+  "summary": "completed",
+  "result": {
+    "payloads": [
+      {"type": "text", "text": ` + jsonQuote(goldenJSON) + `}
+    ]
+  }
+}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
