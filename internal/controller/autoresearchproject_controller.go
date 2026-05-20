@@ -526,6 +526,15 @@ func (r *AutoResearchProjectReconciler) requestProposal(ctx context.Context, p *
 	if werr := tx.Write(fmt.Sprintf("proposals/round-%d.md", round), []byte(md)); werr != nil {
 		return QLoRAConfig{}, "", werr
 	}
+	// v0.4.0 (Phase 3): re-render DASHBOARD.md as part of the
+	// same atomic commit so the wiki's "current view" is always
+	// consistent with the round being proposed. Render is
+	// best-effort — a render bug shouldn't fail the round.
+	if dashMD := renderDashboard(p, round, cfg, history, currentHypothesesForRender(hypothesesBody), space, tx); dashMD != "" {
+		if werr := tx.Write("DASHBOARD.md", []byte(dashMD)); werr != nil {
+			log.Info("dashboard render failed; continuing with proposal commit", "err", werr.Error())
+		}
+	}
 	if werr := tx.CommitAndPush(ctx, fmt.Sprintf("propose: round %d", round)); werr != nil {
 		// Wiki push failed — round cannot proceed. Surface
 		// on Status and return the error; the controller will
@@ -556,7 +565,54 @@ func (r *AutoResearchProjectReconciler) requestProposal(ctx context.Context, p *
 			Message:            fmt.Sprintf("proposals/round-%d.{yaml,md} committed to wiki via GitHub App", round),
 			LastTransitionTime: metav1.Now(),
 		})
+	// Phase 3 conditions: SearchAlive + StagnationDetected.
+	// SearchAlive=True means "the deterministic searcher produced
+	// a config this reconcile" — distinct from WikiSyncOK which
+	// is about the commit. A True SearchAlive with False WikiSyncOK
+	// would mean "kernel works, push doesn't" — useful to
+	// distinguish in oc describe.
+	p.Status.Conditions = mergeARPConditions(p.Status.Conditions,
+		agentofficev1alpha1.AutoResearchProjectCondition{
+			Type:               "SearchAlive",
+			Status:             "True",
+			Reason:             "SuggestProduced",
+			Message:            fmt.Sprintf("TPE produced round %d config from %d observations", round, len(history)),
+			LastTransitionTime: metav1.Now(),
+		})
+	stag := search.StagnationCount(history)
+	stagStatus := "False"
+	stagReason := "Improving"
+	stagMessage := fmt.Sprintf("%d rounds since last improvement", stag)
+	if stag >= defaultStrategistOnStagnation {
+		stagStatus = "True"
+		stagReason = "PlateauDetected"
+		stagMessage = fmt.Sprintf("plateau: no eval_loss improvement in %d rounds (threshold %d) — strategist will run on next reconcile", stag, defaultStrategistOnStagnation)
+	}
+	p.Status.Conditions = mergeARPConditions(p.Status.Conditions,
+		agentofficev1alpha1.AutoResearchProjectCondition{
+			Type:               "StagnationDetected",
+			Status:             stagStatus,
+			Reason:             stagReason,
+			Message:            truncateMsg(stagMessage, 256),
+			LastTransitionTime: metav1.Now(),
+		})
 	return cfg, source, nil
+}
+
+// currentHypothesesForRender is a small helper: re-parses the
+// hypotheses body the caller already read so the dashboard
+// renderer can show "current hypothesis" + "cited artifacts."
+// Tolerates parse errors silently (returns zero-value) — the
+// renderer handles empty Hypotheses correctly.
+func currentHypothesesForRender(body []byte) search.Hypotheses {
+	if len(body) == 0 {
+		return search.Hypotheses{}
+	}
+	h, err := search.ParseHypotheses(body)
+	if err != nil {
+		return search.Hypotheses{}
+	}
+	return h
 }
 
 // strategistMessage builds a short Status.message describing which
