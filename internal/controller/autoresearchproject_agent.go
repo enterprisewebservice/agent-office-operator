@@ -249,14 +249,26 @@ func (r *AutoResearchProjectReconciler) execInGatewayPod(
 	if err != nil {
 		return "", fmt.Errorf("spdy executor: %w", err)
 	}
-	var out bytes.Buffer
+	// IMPORTANT: stdout and stderr MUST be separate buffers.
+	// client-go's SPDY executor writes the two streams from separate
+	// goroutines, and bytes.Buffer is not safe for concurrent writes.
+	// Pointing both at the same buffer is a data race that can
+	// silently drop the entire stdout payload — observed in the
+	// wild as `parse agent reply: empty reply` even when the
+	// openclaw process emitted a full JSON envelope. (Reproduces
+	// only under the operator's runtime; manual `oc exec` works
+	// because the CLI buffers locally.)
+	var stdout, stderr bytes.Buffer
 	if err := exec.StreamWithContext(ctx, remotecommand.StreamOptions{
-		Stdout: &out,
-		Stderr: &out,
+		Stdout: &stdout,
+		Stderr: &stderr,
 	}); err != nil {
-		return out.String(), fmt.Errorf("stream: %w", err)
+		// On error, return both streams concatenated so the caller
+		// sees whatever diagnostic the binary printed.
+		combined := stdout.String() + stderr.String()
+		return combined, fmt.Errorf("stream: %w", err)
 	}
-	return out.String(), nil
+	return stdout.String(), nil
 }
 
 // buildExperimenterPrompt constructs the message we send to the

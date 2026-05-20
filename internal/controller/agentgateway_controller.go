@@ -425,12 +425,15 @@ func (r *AgentGatewayReconciler) execInGatewayPod(ctx context.Context, pod *core
 	if err != nil {
 		return "", err
 	}
-	var out bytes.Buffer
-	err = exec.StreamWithContext(ctx, remotecommand.StreamOptions{Stdout: &out, Stderr: &out})
+	// Separate buffers for stdout/stderr — same data-race fix as
+	// AutoResearchProjectReconciler.execInGatewayPod. See that
+	// function's comment for the wire-level story.
+	var stdout, stderr bytes.Buffer
+	err = exec.StreamWithContext(ctx, remotecommand.StreamOptions{Stdout: &stdout, Stderr: &stderr})
 	if err != nil {
-		return out.String(), err
+		return stdout.String() + stderr.String(), err
 	}
-	return out.String(), nil
+	return stdout.String(), nil
 }
 
 

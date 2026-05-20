@@ -468,15 +468,20 @@ func (r *AgentWorkstationReconciler) execInPod(ctx context.Context, pod *corev1.
 	if err != nil {
 		return "", fmt.Errorf("new spdy executor: %w", err)
 	}
-	var out bytes.Buffer
+	// Separate buffers — bytes.Buffer is not goroutine-safe, and
+	// client-go writes stdout/stderr from different goroutines.
+	// See AutoResearchProjectReconciler.execInGatewayPod for the
+	// full story; passing the same buffer for both streams was the
+	// root cause of intermittent `parse agent reply: empty reply`.
+	var stdout, stderr bytes.Buffer
 	err = exec.StreamWithContext(ctx, remotecommand.StreamOptions{
-		Stdout: &out,
-		Stderr: &out,
+		Stdout: &stdout,
+		Stderr: &stderr,
 	})
 	if err != nil {
-		return out.String(), fmt.Errorf("exec: %w", err)
+		return stdout.String() + stderr.String(), fmt.Errorf("exec: %w", err)
 	}
-	return out.String(), nil
+	return stdout.String(), nil
 }
 
 // parseDiscordChannelID extracts the channel snowflake from URLs of
