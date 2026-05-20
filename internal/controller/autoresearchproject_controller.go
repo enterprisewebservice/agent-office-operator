@@ -33,9 +33,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/yaml"
 
 	agentofficev1alpha1 "github.com/enterprisewebservice/agent-office-operator/api/v1alpha1"
 	"github.com/enterprisewebservice/agent-office-operator/internal/dsp"
+	"github.com/enterprisewebservice/agent-office-operator/internal/search"
 )
 
 // AutoResearchProjectReconciler drives Karpathy-style autonomous
@@ -213,18 +215,20 @@ func (r *AutoResearchProjectReconciler) Reconcile(ctx context.Context, req ctrl.
 		return ctrl.Result{RequeueAfter: 1 * time.Minute}, nil
 	}
 
-	// 6. Ask the experimenter agent for a config proposal. v0.0.1:
-	//    the agent's wiki-write skill files
-	//    wiki/proposals/round-<N>.yaml; we read it after the
-	//    exec returns. If the agent is unreachable or the
-	//    proposal isn't parseable, fall back to a deterministic
-	//    starter config so the loop never wedges.
+	// 6. Ask the deterministic searcher for the next config.
+	//    v0.2.0: the kernel reads completed history from the
+	//    wiki and never returns empty. If requestProposal
+	//    errors (wiki unreachable, push failed) we requeue and
+	//    retry rather than training a fallback config —
+	//    "always train SOMETHING" was the anti-pattern that
+	//    let v0.0.x burn rounds on the starter config.
 	round := project.Status.Round + 1
 	proposal, proposalSource, err := r.requestProposal(ctx, &project, int(round))
 	if err != nil {
-		log.Info("agent proposal failed; using starter config", "err", err)
-		proposal = starterQLoRAConfig(int(round))
-		proposalSource = "starter (fallback)"
+		log.Error(err, "proposal failed; will retry", "round", round)
+		_, _ = r.markPhaseAndSave(ctx, &project, "Running",
+			fmt.Sprintf("proposal failed (will retry): %v", err))
+		return ctrl.Result{RequeueAfter: 1 * time.Minute}, err
 	}
 
 	// 7. Submit the experiment as a DSP pipeline run. RunID is
@@ -341,27 +345,17 @@ type QLoRAConfig struct {
 	Notes            string   `json:"notes,omitempty"`
 }
 
-// starterQLoRAConfig is the deterministic fallback used when the
-// agent's proposal is unavailable. Conservative defaults that
-// converge cleanly on most 7-13B QLoRA setups.
-func starterQLoRAConfig(round int) QLoRAConfig {
-	return QLoRAConfig{
-		Round:            round,
-		LoraRank:         8,
-		LoraAlpha:        16,
-		LoraDropout:      0.05,
-		TargetModules:    []string{"q_proj", "v_proj"},
-		LearningRate:     2e-4,
-		NumTrainingSteps: 200,
-		PerDeviceBatch:   4,
-		GradAccum:        4,
-		MaxSeqLen:        1024,
-		WarmupSteps:      20,
-		WeightDecay:      0.0,
-		OffloadStrategy:  "cpu",
-		Notes:            "starter config (operator fallback; agent proposal unavailable)",
-	}
-}
+// starterQLoRAConfig and the related "agent-fallback" code path
+// were removed in v0.2.0 (Phase 1 of the autoresearch flywheel
+// refactor). Previously, an LLM failure (empty reply, exec
+// timeout, openclaw issue) caused the operator to silently
+// reuse the same starter config for every retry — so the
+// search made zero progress when the LLM was sick. The
+// deterministic searcher (internal/search.Searcher) replaces
+// that fallback: it never returns empty, never times out, and
+// always picks a config the search policy hasn't tried before.
+// The LLM still has a role in Phase 2 (strategist, on cadence,
+// writing HYPOTHESES.md) but is off the critical path.
 
 // validationQLoRAConfig is the smoke-test profile triggered by
 // spec.validationMode=true. Designed to complete on a single
@@ -389,17 +383,21 @@ func validationQLoRAConfig(round int) QLoRAConfig {
 	}
 }
 
-// requestProposal asks the experimenter agent for the next
-// QLoRA config. v0.0.1 falls back to starterQLoRAConfig if the
-// agent isn't wired up yet — the agent-driven proposal is
-// added in v0.0.2 alongside the wiki integration. This keeps
-// the loop runnable in isolation while we iterate on the
-// agent prompt.
+// requestProposal returns the next QLoRA config to train.
 //
-// spec.validationMode=true short-circuits everything to the
-// validation profile — neither the agent nor the starter is
-// consulted, since the whole point of validation mode is to
-// run a tiny known-shape experiment.
+// v0.2.0 (Phase 1 of the flywheel refactor): the LLM agent is
+// no longer on the critical path. The deterministic searcher
+// (internal/search) reads completed (config, eval_loss) history
+// from the wiki, fits a TPE sampler, and returns the next
+// configuration. The kernel never returns empty, never times
+// out, never falls back to "the same starter config every
+// retry." When the wiki has fewer than `defaultWarmupTrials`
+// completed rounds the sampler runs in Random mode so TPE has
+// scatter to fit later.
+//
+// spec.validationMode=true still short-circuits to the validation
+// profile — useful for smoke-testing the pipeline plumbing
+// without the kernel choosing a real config.
 func (r *AutoResearchProjectReconciler) requestProposal(ctx context.Context, p *agentofficev1alpha1.AutoResearchProject, round int) (QLoRAConfig, string, error) {
 	log := logf.FromContext(ctx)
 
@@ -407,68 +405,239 @@ func (r *AutoResearchProjectReconciler) requestProposal(ctx context.Context, p *
 		return validationQLoRAConfig(round), "validation (spec.validationMode=true)", nil
 	}
 
-	// v0.0.67: try to get a real proposal from the experimenter agent.
-	// Failure falls back to the starter config so the loop never
-	// wedges — AgentIntegrationOK condition surfaces what went wrong.
-	//
-	// v0.0.70: proposeViaAgent can now return BOTH a valid cfg AND
-	// a non-nil error: the agent replied with a good config, but
-	// the subsequent wiki-push failed. In that case we still want
-	// to train (the config is good) — we just surface the wiki
-	// failure on WikiSyncOK and let AgentIntegrationOK stay True.
-	cfg, source, err := r.proposeViaAgent(ctx, p, round)
-	switch {
-	case err == nil:
-		p.Status.Conditions = mergeARPConditions(p.Status.Conditions,
-			agentofficev1alpha1.AutoResearchProjectCondition{
-				Type:               "AgentIntegrationOK",
-				Status:             "True",
-				Reason:             "AgentReplied",
-				Message:            fmt.Sprintf("experimenter %s proposed round %d", p.Spec.Experimenter.Workstation, round),
-				LastTransitionTime: metav1.Now(),
-			})
+	// 1. Open a wiki transaction so we can BOTH read history and
+	//    commit the new proposal atomically. The same transaction
+	//    serves both roles — one clone, one commit, one push.
+	tx, err := r.beginWikiTx(ctx, p)
+	if err != nil {
+		// Wiki unreachable → can't make progress (the searcher
+		// needs history, and the proposal needs to be commit-
+		// ted). Surface loudly and let the controller retry.
 		p.Status.Conditions = mergeARPConditions(p.Status.Conditions,
 			agentofficev1alpha1.AutoResearchProjectCondition{
 				Type:               "WikiSyncOK",
-				Status:             "True",
-				Reason:             "ProposalPushed",
-				Message:            fmt.Sprintf("proposals/round-%d.{yaml,md} committed to wiki via GitHub App", round),
+				Status:             "False",
+				Reason:             "OpenFailed",
+				Message:            truncateMsg(err.Error(), 256),
 				LastTransitionTime: metav1.Now(),
 			})
-		return cfg, source, nil
-	case cfg.LoraRank > 0 && err != nil:
-		// Agent succeeded, wiki push failed. Train anyway, but
-		// surface the wiki error loudly so we don't ship rounds
-		// whose reasoning was lost.
-		log.Error(err, "agent proposed config but wiki push failed; training will still proceed", "round", round)
-		p.Status.Conditions = mergeARPConditions(p.Status.Conditions,
-			agentofficev1alpha1.AutoResearchProjectCondition{
-				Type:               "AgentIntegrationOK",
-				Status:             "True",
-				Reason:             "AgentReplied",
-				Message:            fmt.Sprintf("experimenter %s proposed round %d (wiki push failed; see WikiSyncOK)", p.Spec.Experimenter.Workstation, round),
-				LastTransitionTime: metav1.Now(),
-			})
+		return QLoRAConfig{}, "", fmt.Errorf("open wiki: %w", err)
+	}
+	defer tx.Close()
+
+	// 2. Load completed (config, eval_loss) observations from the
+	//    wiki. Any I/O error here aborts the round (we won't
+	//    propose blindly without consulting history). An EMPTY
+	//    history is fine — the searcher handles warmup itself.
+	history, err := search.LoadWikiHistory(tx, defaultQLoRASpace())
+	if err != nil {
+		return QLoRAConfig{}, "", fmt.Errorf("load wiki history: %w", err)
+	}
+
+	// 3. Ask the searcher for the next config. Seeded from the
+	//    project's UID so the search is reproducible per-project
+	//    across operator restarts.
+	searcher, err := search.NewSearcher(search.Config{
+		Sampler:   search.SamplerTPE,
+		Direction: search.DirectionMinimize, // eval_loss is "lower is better"
+		Seed:      seedFromUID(p.UID),
+		Space:     defaultQLoRASpace(),
+		Warmup:    defaultWarmupTrials,
+	})
+	if err != nil {
+		return QLoRAConfig{}, "", fmt.Errorf("build searcher: %w", err)
+	}
+	trial, err := searcher.Suggest(history)
+	if err != nil {
+		return QLoRAConfig{}, "", fmt.Errorf("searcher.Suggest: %w", err)
+	}
+
+	// 4. Map the trial's params → QLoRAConfig.
+	cfg := trialToQLoRAConfig(round, trial, len(history))
+
+	// 5. Commit proposals/round-N.{yaml,md} via the same
+	//    transaction. The push must succeed or this round
+	//    doesn't happen.
+	cfgYAML, err := yaml.Marshal(cfg)
+	if err != nil {
+		return QLoRAConfig{}, "", fmt.Errorf("marshal proposal: %w", err)
+	}
+	if werr := tx.Write(fmt.Sprintf("proposals/round-%d.yaml", round), cfgYAML); werr != nil {
+		return QLoRAConfig{}, "", werr
+	}
+	md := buildProposalMD(round, cfg, len(history))
+	if werr := tx.Write(fmt.Sprintf("proposals/round-%d.md", round), []byte(md)); werr != nil {
+		return QLoRAConfig{}, "", werr
+	}
+	if werr := tx.CommitAndPush(ctx, fmt.Sprintf("propose: round %d", round)); werr != nil {
+		// Wiki push failed — round cannot proceed. Surface
+		// on Status and return the error; the controller will
+		// re-queue and retry next reconcile (with a fresh App
+		// token).
+		log.Error(werr, "wiki proposal commit failed; round skipped", "round", round)
 		p.Status.Conditions = mergeARPConditions(p.Status.Conditions,
 			agentofficev1alpha1.AutoResearchProjectCondition{
 				Type:               "WikiSyncOK",
 				Status:             "False",
 				Reason:             "ProposalPushFailed",
-				Message:            truncateMsg(err.Error(), 256),
+				Message:            truncateMsg(werr.Error(), 256),
 				LastTransitionTime: metav1.Now(),
 			})
-		return cfg, source, nil
+		return QLoRAConfig{}, "", werr
 	}
-	log.Info("agent proposal failed; falling back to starter config", "err", err.Error())
+
+	// 6. Happy path — record status + return.
+	source := fmt.Sprintf("searcher (TPE, %d prior observations)", len(history))
 	p.Status.Conditions = mergeARPConditions(p.Status.Conditions,
 		agentofficev1alpha1.AutoResearchProjectCondition{
-			Type:               "AgentIntegrationOK",
-			Status:             "False",
-			Reason:             "AgentFallback",
-			Message:            truncateMsg(fmt.Sprintf("falling back to starter config: %v", err), 256),
+			Type:               "WikiSyncOK",
+			Status:             "True",
+			Reason:             "ProposalPushed",
+			Message:            fmt.Sprintf("proposals/round-%d.{yaml,md} committed to wiki via GitHub App", round),
 			LastTransitionTime: metav1.Now(),
 		})
-	return starterQLoRAConfig(round), "starter (agent fallback)", nil
+	return cfg, source, nil
+}
+
+// defaultWarmupTrials is the number of random-sampled rounds the
+// searcher runs before switching to TPE. Five gives TPE four
+// scatter points to fit against, which is enough for it to
+// produce reasonable suggestions on the 6th call without being
+// so much warmup that the user waits forever to see TPE behavior.
+const defaultWarmupTrials = 5
+
+// defaultQLoRASpace returns the QLoRA hyperparameter search space.
+// Bounds are intentionally wider than the prior LLM was producing
+// — e.g. lora_rank up to 64 instead of capping at 16 — so the
+// searcher can find good points outside what a default agent
+// prompt would have explored. v0.3.0 makes this configurable per
+// AutoResearchProject via spec.searchStrategy.searchSpace.
+func defaultQLoRASpace() search.Space {
+	return search.Space{
+		Ints: map[string]search.IntSpec{
+			"lora_rank":                   {Low: 4, High: 64, Step: 2},
+			"lora_alpha":                  {Low: 8, High: 128, Step: 4},
+			"num_training_steps":          {Low: 100, High: 500, Step: 20},
+			"per_device_batch_size":       {Low: 1, High: 8},
+			"gradient_accumulation_steps": {Low: 1, High: 8},
+			"max_seq_length":              {Low: 512, High: 2048, Step: 256},
+			"warmup_steps":                {Low: 0, High: 50, Step: 5},
+		},
+		Floats: map[string]search.FloatSpec{
+			"lora_dropout":  {Low: 0.0, High: 0.2},
+			"learning_rate": {Low: 5e-5, High: 5e-4, Log: true},
+			"weight_decay":  {Low: 0.0, High: 0.1},
+		},
+		Categoricals: map[string]search.CategoricalSpec{
+			"offload_strategy": {Choices: []string{"none", "cpu", "disk"}},
+		},
+	}
+}
+
+// trialToQLoRAConfig maps the searcher's typed params into a
+// QLoRAConfig. Includes a default target_modules set (the search
+// kernel doesn't optimize over it in v0.2.0 — Phase 2/3 LLM
+// strategist may propose alternative module sets via
+// HYPOTHESES.md adjustments). Notes field documents the
+// provenance so a human reading proposals/round-N.yaml can tell
+// it came from the searcher, not an LLM.
+func trialToQLoRAConfig(round int, trial search.Trial, observed int) QLoRAConfig {
+	asInt := func(key string) int {
+		v, _ := trial.Params[key].(int)
+		return v
+	}
+	asFloat := func(key string) float64 {
+		v, _ := trial.Params[key].(float64)
+		return v
+	}
+	asString := func(key string) string {
+		v, _ := trial.Params[key].(string)
+		return v
+	}
+	return QLoRAConfig{
+		Round:            round,
+		LoraRank:         asInt("lora_rank"),
+		LoraAlpha:        asInt("lora_alpha"),
+		LoraDropout:      asFloat("lora_dropout"),
+		TargetModules:    []string{"q_proj", "v_proj", "k_proj", "o_proj"},
+		LearningRate:     asFloat("learning_rate"),
+		NumTrainingSteps: asInt("num_training_steps"),
+		PerDeviceBatch:   asInt("per_device_batch_size"),
+		GradAccum:        asInt("gradient_accumulation_steps"),
+		MaxSeqLen:        asInt("max_seq_length"),
+		WarmupSteps:      asInt("warmup_steps"),
+		WeightDecay:      asFloat("weight_decay"),
+		OffloadStrategy:  asString("offload_strategy"),
+		Notes:            fmt.Sprintf("searcher proposal (TPE; %d prior observations)", observed),
+	}
+}
+
+// buildProposalMD renders the human-readable side of a proposal.
+// The YAML file is the machine-readable one (consumed by the
+// trainer + the next round's history loader); this is what
+// shows up in Obsidian.
+func buildProposalMD(round int, cfg QLoRAConfig, observed int) string {
+	mode := "TPE"
+	if observed < defaultWarmupTrials {
+		mode = "Random (warmup)"
+	}
+	return fmt.Sprintf(`# Round %d — proposal
+
+| Source | Value |
+|--------|-------|
+| Searcher | %s |
+| Observations seen | %d |
+| Decision | proposed by the deterministic kernel |
+
+**Config (machine-readable in `+"`round-%d.yaml`"+`):**
+
+`+"```yaml\n"+`lora_rank: %d
+lora_alpha: %d
+lora_dropout: %g
+target_modules: [%s]
+learning_rate: %g
+num_training_steps: %d
+per_device_batch_size: %d
+gradient_accumulation_steps: %d
+max_seq_length: %d
+warmup_steps: %d
+weight_decay: %g
+offload_strategy: %s
+`+"```\n",
+		round,
+		mode,
+		observed,
+		round,
+		cfg.LoraRank,
+		cfg.LoraAlpha,
+		cfg.LoraDropout,
+		strings.Join(cfg.TargetModules, ", "),
+		cfg.LearningRate,
+		cfg.NumTrainingSteps,
+		cfg.PerDeviceBatch,
+		cfg.GradAccum,
+		cfg.MaxSeqLen,
+		cfg.WarmupSteps,
+		cfg.WeightDecay,
+		cfg.OffloadStrategy)
+}
+
+// seedFromUID derives a stable int64 seed from the K8s object UID.
+// Pinning the search seed to the project UID means: identical
+// observed history + same project = identical next suggestion,
+// regardless of which operator pod is running. Restart-safe.
+func seedFromUID(uid types.UID) int64 {
+	var sum int64
+	for _, b := range []byte(uid) {
+		sum = sum*131 + int64(b)
+	}
+	if sum < 0 {
+		sum = -sum
+	}
+	if sum == 0 {
+		sum = 1 // 0 means "non-deterministic" in search.Config — avoid
+	}
+	return sum
 }
 
 // submitTrainerJob creates a Kubernetes Job that runs the

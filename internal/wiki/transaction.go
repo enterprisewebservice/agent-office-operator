@@ -199,6 +199,30 @@ func (tx *Transaction) Read(relPath string) ([]byte, error) {
 	return b, nil
 }
 
+// List returns the names (no path prefix) of regular files
+// directly under `dir` (relative to the wiki root). Subdirectories
+// are NOT recursed into. Returns (nil, nil) if `dir` doesn't
+// exist — same convenience as Read, since "no rounds yet" is the
+// canonical empty case for callers like the search history loader.
+func (tx *Transaction) List(dir string) ([]string, error) {
+	abs := filepath.Join(tx.dir, dir)
+	entries, err := os.ReadDir(abs)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("wiki.List %s: %w", dir, err)
+	}
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		out = append(out, e.Name())
+	}
+	return out, nil
+}
+
 // Write stages content at `relPath` under the wiki root. Parent
 // directories are created with mode 0755. The file is written with
 // mode 0644. Caller is responsible for ensuring `relPath` is a
