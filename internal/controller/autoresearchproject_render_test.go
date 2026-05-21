@@ -28,7 +28,6 @@ package controller
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -290,66 +289,23 @@ func TestVerifyAdapterArtifact_BearerFlow_404(t *testing.T) {
 // fence, JSON embedded in prose — all parse to a usable QLoRAConfig.
 // Crucially the round number is always overridden by the operator so
 // a hallucinating agent can't desync the loop counter.
-func TestParseAgentProposal(t *testing.T) {
-	const goldenJSON = `{"lora_rank":8,"lora_alpha":16,"lora_dropout":0.05,` +
-		`"target_modules":["q_proj","v_proj"],"learning_rate":0.0002,` +
-		`"num_training_steps":200,"per_device_batch_size":4,` +
-		`"gradient_accumulation_steps":4,"max_seq_length":1024,` +
-		`"warmup_steps":20,"weight_decay":0.01,"offload_strategy":"cpu",` +
-		`"notes":"baseline-ish"}`
-
-	cases := []struct {
-		name, raw string
-	}{
-		{name: "raw JSON only", raw: goldenJSON},
-		{name: "openclaw --json wrapper", raw: `{"reply":` + jsonQuote(goldenJSON) + `,"session_id":"abc"}`},
-		{name: "fenced markdown", raw: "```json\n" + goldenJSON + "\n```"},
-		{name: "prose then JSON", raw: "I'm proposing the following config:\n\n" + goldenJSON + "\n\nbecause baseline."},
-		// openclaw 2026.04+ "ACP payload" envelope. The QLoRAConfig
-		// lives at result.payloads[0].text as a JSON-encoded string.
-		// Captured live from the v2 experimenter on 2026-05-20.
-		{name: "openclaw ACP payload envelope", raw: `{
-  "runId": "a5162e9c-abb7-47ce-83d5-f4a366681492",
-  "status": "ok",
-  "summary": "completed",
-  "result": {
-    "payloads": [
-      {"type": "text", "text": ` + jsonQuote(goldenJSON) + `}
-    ]
-  }
-}`},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg, _, err := parseAgentProposal(tc.raw, 42)
-			if err != nil {
-				t.Fatalf("parseAgentProposal: %v", err)
-			}
-			if cfg.Round != 42 {
-				t.Errorf("operator should override round; got %d", cfg.Round)
-			}
-			if cfg.LoraRank != 8 || cfg.NumTrainingSteps != 200 {
-				t.Errorf("fields didn't round-trip: %+v", cfg)
-			}
-		})
-	}
-}
-
-// TestParseAgentProposal_RejectsGarbage ensures we don't silently
-// pass a junk reply through. The caller's fallback path is the
-// starter config — that only kicks in if we return error.
-func TestParseAgentProposal_RejectsGarbage(t *testing.T) {
-	cases := []string{"", "I don't know", "{}", `{"lora_rank":-1}`}
-	for _, raw := range cases {
-		if _, _, err := parseAgentProposal(raw, 1); err == nil {
-			t.Errorf("expected error for %q, got nil", raw)
-		}
-	}
-}
+// TestParseAgentProposal + TestParseAgentProposal_RejectsGarbage
+// + TestExtractJSONObject were removed in v1.1.0 along with the
+// parseAgentProposal / stripCodeFences / extractJSONObject
+// functions they tested. The deterministic searcher
+// (internal/search) owns proposal generation now; there is no
+// LLM-reply parser on the proposal critical path. The strategist
+// runner has its own envelope-extraction (extractStrategistReply
+// in autoresearchproject_strategist.go) — see that file's own
+// tests if more parser coverage is needed in the future.
 
 // TestValidateQLoRAConfig ensures the operator clamps out-of-range
 // proposals. An agent that hallucinates a 0 learning_rate or a
 // 100000-step run shouldn't get to burn a real training cycle.
+// Still used: validateQLoRAConfig is now called from the searcher's
+// trial-to-config mapping path (round trip from goptuna into a
+// QLoRAConfig validates the same bounds before the trainer sees
+// the config).
 func TestValidateQLoRAConfig(t *testing.T) {
 	good := QLoRAConfig{LoraRank: 8, LoraAlpha: 16, LearningRate: 2e-4, NumTrainingSteps: 200, TargetModules: []string{"q_proj"}}
 	if err := validateQLoRAConfig(&good); err != nil {
@@ -368,32 +324,6 @@ func TestValidateQLoRAConfig(t *testing.T) {
 	}
 }
 
-// TestExtractJSONObject verifies the brace-balancing extractor
-// finds the right object even when there's surrounding prose.
-func TestExtractJSONObject(t *testing.T) {
-	body := `Sure! Here's my proposal:
-
-Thinking about it, I want to be a bit conservative.
-
-{"setup": {"name": "ignore"}, "decoy": 1}
-{"lora_rank": 4, "notes": "real one"}
-
-Hope that helps!`
-	got, ok := extractJSONObject(body, "lora_rank")
-	if !ok {
-		t.Fatal("expected to find marker")
-	}
-	if !strings.Contains(got, `"lora_rank": 4`) {
-		t.Errorf("wrong object extracted: %q", got)
-	}
-}
-
-// jsonQuote escapes a string as a JSON string literal for embedding
-// in test data (quoting + backslash-escaping handled by encoding/json).
-func jsonQuote(s string) string {
-	b, _ := json.Marshal(s)
-	return string(b)
-}
 
 // ---- end of v0.0.52 agent-integration tests ----
 

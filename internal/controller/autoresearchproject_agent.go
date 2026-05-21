@@ -37,7 +37,6 @@ package controller
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -48,7 +47,6 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/remotecommand"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/yaml"
 
 	agentofficev1alpha1 "github.com/enterprisewebservice/agent-office-operator/api/v1alpha1"
@@ -64,95 +62,26 @@ const agentExecTimeout = 10 * time.Minute
 // research-gateway pod we exec into.
 const gatewayContainerName = "openclaw"
 
-// proposeViaAgent runs one agent turn via the gateway and parses the
-// reply as a QLoRAConfig. On any failure it returns an error and the
-// caller falls back to the starter config.
+// PRE-v0.2.0 architecture: proposeViaAgent ran one agent turn via
+// the gateway, parsed the reply as a QLoRAConfig, and was on the
+// proposal critical path. Removed in v1.1.0 — the deterministic
+// goptuna-backed searcher (internal/search) owns proposal
+// generation now; the LLM agent runs as the strategist on cadence
+// (see autoresearchproject_strategist.go), writing HYPOTHESES.md
+// instead of raw configs. The helpers proposeViaAgent depended on
+// (parseAgentProposal, stripCodeFences, extractJSONObject,
+// buildExperimenterPrompt, seedWorkspaceLog) are also gone.
 //
-// Side effects (only on success): the round's `proposals/round-N.yaml`
-// is committed + pushed to the KnowledgeBase git repo so the agent's
-// reasoning is captured in the wiki BEFORE training even starts.
-func (r *AutoResearchProjectReconciler) proposeViaAgent(
-	ctx context.Context,
-	p *agentofficev1alpha1.AutoResearchProject,
-	round int,
-) (QLoRAConfig, string, error) {
-	log := logf.FromContext(ctx)
-
-	agentName := p.Spec.Experimenter.Workstation
-	if agentName == "" {
-		return QLoRAConfig{}, "", fmt.Errorf("spec.experimenter.workstation is empty")
-	}
-
-	// 1. Find the experimenter AgentWorkstation + its gateway pod.
-	gwPod, err := r.findGatewayPodForAgent(ctx, p.Namespace, agentName)
-	if err != nil {
-		return QLoRAConfig{}, "", fmt.Errorf("find gateway pod: %w", err)
-	}
-
-	// 2. Seed the agent's workspace with the live wiki log so its
-	//    `file_read log/log.md` tool call resolves. The wiki PVC and
-	//    workspace PVC are both mounted in the gateway container —
-	//    a single exec copy is enough to bridge them. We do this
-	//    every turn so the agent always sees the freshest log even
-	//    after the operator appends a new round entry.
-	if err := r.seedWorkspaceLog(ctx, gwPod, p, agentName); err != nil {
-		// Non-fatal: the operator also embeds the log snapshot in
-		// the prompt body below, so the agent can still reason
-		// even if the seed copy fails.
-		log.Info("seed workspace log failed (continuing; log is still in prompt)", "err", err.Error())
-	}
-
-	// 3. Read the current wiki log to give the agent prior context.
-	//    The system prompt also tells the agent to file_read log.md
-	//    (now possible thanks to step 2), but we embed a snapshot
-	//    here too as belt-and-suspenders + so the model can plan
-	//    without first burning a tool call.
-	logSnapshot, _ := r.readWikiLogSnapshot(ctx, p)
-
-	// 4. Build the prompt.
-	prompt := buildExperimenterPrompt(p, round, logSnapshot)
-
-	// 5. Exec `openclaw agent --agent <name> --message <prompt> --json`.
-	tctx, cancel := context.WithTimeout(ctx, agentExecTimeout)
-	defer cancel()
-	out, err := r.execInGatewayPod(tctx, gwPod, []string{
-		"openclaw", "agent",
-		"--agent", agentName,
-		"--message", prompt,
-		"--json",
-		"--timeout", "540",
-	})
-	if err != nil {
-		return QLoRAConfig{}, "", fmt.Errorf("openclaw agent exec: %w (stdout/stderr: %s)", err, truncateMsg(out, 400))
-	}
-
-	// 6. Parse the agent's reply back into a QLoRAConfig.
-	cfg, reasoning, perr := parseAgentProposal(out, round)
-	if perr != nil {
-		return QLoRAConfig{}, "", fmt.Errorf("parse agent reply: %w (reply: %s)", perr, truncateMsg(out, 400))
-	}
-
-	// 7. Commit the proposal to the wiki repo so the agent's
-	//    reasoning lands in Obsidian. This is NOT best-effort —
-	//    if the push fails the round still trains (we already
-	//    have the config in cfg), but the failure must propagate
-	//    so the caller can flip WikiSyncOK=False on Status. A
-	//    silent push failure is exactly the symptom we got burned
-	//    by in v0.0.69 (App auth needed `x-access-token`, the old
-	//    legacy path used `git`, push failed silently, no
-	//    `proposals/round-N.yaml` ever landed).
-	if werr := r.wikiPushProposal(ctx, p, round, cfg, reasoning); werr != nil {
-		log.Error(werr, "wiki proposal commit failed", "round", round)
-		// Return the cfg + reasoning + the wiki error. Caller
-		// (requestProposal) decides whether to still submit the
-		// round (yes — training is independent of wiki) but it
-		// also surfaces the error on the WikiSyncOK condition.
-		return cfg, fmt.Sprintf("agent %s", agentName),
-			fmt.Errorf("agent proposed round %d but wiki push failed: %w", round, werr)
-	}
-
-	return cfg, fmt.Sprintf("agent %s", agentName), nil
-}
+// Kept from the old agent-path file because the strategist runner
+// still uses them:
+//
+//   * findGatewayPodForAgent — locates the openclaw pod for the
+//     strategist's AgentWorkstation.
+//   * execInGatewayPod        — execs `openclaw agent --json` for
+//     one strategist turn.
+//   * validateQLoRAConfig    — sanity-checks a config before it's
+//     submitted to DSP. Now also called from
+//     internal/controller/autoresearchproject_render_test.go.
 
 // findGatewayPodForAgent locates the openclaw container we need to
 // exec into for an agent turn. Handles both runtime modes the AW
@@ -274,192 +203,6 @@ func (r *AutoResearchProjectReconciler) execInGatewayPod(
 		return combined, fmt.Errorf("stream: %w", err)
 	}
 	return stdout.String(), nil
-}
-
-// buildExperimenterPrompt constructs the message we send to the
-// agent. The agent is configured (system prompt) to respond with
-// JSON matching QLoRAConfig; this prompt provides the project
-// context + previous log + an explicit instruction to reply in JSON.
-//
-// Keeps the prompt boring on purpose — the agent's reasoning capacity
-// comes from its system prompt + tool list, not from this template.
-func buildExperimenterPrompt(p *agentofficev1alpha1.AutoResearchProject, round int, logSnapshot string) string {
-	base := p.Spec.BaseModel.HuggingfaceID
-	if base == "" {
-		base = "ibm-granite/granite-4.1-8b"
-	}
-	dataset := p.Spec.TrainingData.HuggingfaceDataset
-	if dataset == "" {
-		dataset = "ise-uiuc/Magicoder-OSS-Instruct-75K"
-	}
-	bestLoss := p.Status.BestEvalLoss
-	if bestLoss == "" {
-		bestLoss = "(none yet)"
-	}
-	// Truncate the log snapshot to keep the prompt manageable. The
-	// agent can always file_read the full log itself.
-	if len(logSnapshot) > 4000 {
-		logSnapshot = "...(earlier entries truncated)\n\n" + logSnapshot[len(logSnapshot)-4000:]
-	}
-	return strings.Join([]string{
-		fmt.Sprintf("Project: %s (round %d)", p.Name, round),
-		fmt.Sprintf("Base model: %s", base),
-		fmt.Sprintf("Dataset: %s", dataset),
-		fmt.Sprintf("Best eval_loss so far: %s", bestLoss),
-		"",
-		"Recent experiment log (newest last):",
-		"```",
-		strings.TrimSpace(logSnapshot),
-		"```",
-		"",
-		"Propose the next QLoRA configuration. Reply with ONLY a JSON object matching:",
-		"  {\"lora_rank\": int, \"lora_alpha\": int, \"lora_dropout\": float,",
-		"   \"target_modules\": [string], \"learning_rate\": float,",
-		"   \"num_training_steps\": int (100-500), \"per_device_batch_size\": int (1-8),",
-		"   \"gradient_accumulation_steps\": int (1-8), \"max_seq_length\": int (512-2048),",
-		"   \"warmup_steps\": int (0-50), \"weight_decay\": float (0.0-0.1),",
-		"   \"offload_strategy\": \"cpu\" | \"disk\" | \"none\",",
-		"   \"notes\": \"brief explanation\"}",
-		"",
-		"No prose. No markdown. JSON only.",
-	}, "\n")
-}
-
-// parseAgentProposal extracts a QLoRAConfig from `openclaw agent --json`
-// output. The wrapper shape is approximately:
-//   {"reply": "...", "session_id": "...", "channel": null}
-// The reply field carries the agent's text. Inside that text we look
-// for a JSON object matching our schema. We're tolerant of agents
-// that wrap the JSON in backticks or include a small amount of
-// chatter; the JSON object regex is permissive but anchored on the
-// known keys.
-func parseAgentProposal(raw string, round int) (QLoRAConfig, string, error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return QLoRAConfig{}, "", fmt.Errorf("empty reply")
-	}
-
-	// Path A: stdout IS the JSON object (some `openclaw agent --json`
-	// invocations write the wrapper as a single line).
-	var wrapper struct {
-		Reply string `json:"reply"`
-	}
-	body := raw
-	if err := json.Unmarshal([]byte(raw), &wrapper); err == nil && wrapper.Reply != "" {
-		body = wrapper.Reply
-	}
-
-	// Path A2: openclaw 2026.04+ returns an "ACP payload" envelope
-	// rather than the legacy {reply: "..."} shape. Captured live:
-	//
-	//   {
-	//     "runId": "...",
-	//     "status": "ok",
-	//     "summary": "completed",
-	//     "result": {
-	//       "payloads": [
-	//         {"text": "<JSON-encoded QLoRAConfig>"},
-	//         ...
-	//       ]
-	//     }
-	//   }
-	//
-	// Each payload's `text` is a JSON-encoded string. We unwrap the
-	// first text payload that looks like a config (contains lora_rank)
-	// and feed it through the rest of the pipeline.
-	var acp struct {
-		Result struct {
-			Payloads []struct {
-				Text string `json:"text"`
-				Type string `json:"type"`
-			} `json:"payloads"`
-		} `json:"result"`
-		Status string `json:"status"`
-	}
-	if err := json.Unmarshal([]byte(raw), &acp); err == nil && len(acp.Result.Payloads) > 0 {
-		for _, p := range acp.Result.Payloads {
-			if strings.Contains(p.Text, "lora_rank") {
-				body = p.Text
-				break
-			}
-		}
-	}
-
-	// Path B: the body sometimes contains markdown like ```json{...}```.
-	// Strip those fences if present.
-	body = stripCodeFences(body)
-
-	// Path C: agent might prefix with prose. Grab the first JSON object
-	// that contains `lora_rank` (a required, near-unique key).
-	jsonStr, found := extractJSONObject(body, "lora_rank")
-	if !found {
-		// Body itself might be the JSON.
-		jsonStr = strings.TrimSpace(body)
-	}
-
-	var cfg QLoRAConfig
-	if err := json.Unmarshal([]byte(jsonStr), &cfg); err != nil {
-		return QLoRAConfig{}, "", fmt.Errorf("unmarshal config JSON: %w", err)
-	}
-	cfg.Round = round // operator always overrides — agent shouldn't pick the round number
-
-	// Validate the agent's choice is sane; reject otherwise.
-	if err := validateQLoRAConfig(&cfg); err != nil {
-		return QLoRAConfig{}, "", fmt.Errorf("validate: %w", err)
-	}
-
-	return cfg, strings.TrimSpace(body), nil
-}
-
-// stripCodeFences removes ```json ... ``` or ``` ... ``` wrappers if
-// the entire body is inside one.
-func stripCodeFences(s string) string {
-	s = strings.TrimSpace(s)
-	if !strings.HasPrefix(s, "```") {
-		return s
-	}
-	// Drop the opening line (possibly "```json")
-	s = strings.TrimPrefix(s, "```")
-	if idx := strings.Index(s, "\n"); idx >= 0 {
-		s = s[idx+1:]
-	}
-	// Drop the trailing fence
-	s = strings.TrimSuffix(strings.TrimSpace(s), "```")
-	return strings.TrimSpace(s)
-}
-
-// extractJSONObject finds the first balanced { ... } block containing
-// the marker key. Returns the substring and whether it was found.
-// Brace-balancing is naive but adequate for our well-defined schema.
-func extractJSONObject(body, marker string) (string, bool) {
-	if !strings.Contains(body, marker) {
-		return "", false
-	}
-	// Find the start of the object containing the marker.
-	idx := strings.Index(body, marker)
-	if idx < 0 {
-		return "", false
-	}
-	start := strings.LastIndex(body[:idx], "{")
-	if start < 0 {
-		return "", false
-	}
-	// Walk forward, counting braces (no escape-aware string parsing —
-	// our schema has no embedded "{" in values, and json.Unmarshal
-	// will catch any malformation downstream).
-	depth := 0
-	for i := start; i < len(body); i++ {
-		switch body[i] {
-		case '{':
-			depth++
-		case '}':
-			depth--
-			if depth == 0 {
-				return body[start : i+1], true
-			}
-		}
-	}
-	return "", false
 }
 
 // validateQLoRAConfig sanity-checks the agent's proposal so a
@@ -649,71 +392,6 @@ func (r *AutoResearchProjectReconciler) readWikiLogSnapshot(
 		return "(no log entries yet)", nil
 	}
 	return string(raw), nil
-}
-
-// seedWorkspaceLog copies the live wiki log file into the agent's
-// workspace just before the agent runs, so the agent's `file_read
-// log/log.md` call (per its system prompt) resolves successfully.
-//
-// The gateway pod has BOTH PVCs mounted under /home/node/.openclaw:
-//
-//   workspace PVC    /home/node/.openclaw/                 (with workspaces/<agent>/)
-//   wiki PVC         /home/node/.openclaw/wiki/<kb-name>/  (the live, git-synced wiki)
-//
-// The agent's file_read tool resolves paths relative to its own
-// workspace at /home/node/.openclaw/workspaces/<agent>/. So
-// "log/log.md" → workspaces/<agent>/log/log.md which doesn't exist.
-//
-// We exec a single `sh -c 'mkdir -p && cp'` in the openclaw
-// container before each turn. The copy is intentionally per-turn
-// (not a one-time seed) because the wiki log grows as rounds
-// complete and we want the agent to always see the freshest state.
-//
-// Best-effort: any failure is logged by the caller and the run
-// continues — the operator also embeds the log snapshot in the
-// prompt body so the agent has the context even without the file.
-func (r *AutoResearchProjectReconciler) seedWorkspaceLog(
-	ctx context.Context,
-	gwPod *corev1.Pod,
-	p *agentofficev1alpha1.AutoResearchProject,
-	agentName string,
-) error {
-	if p.Spec.KnowledgeBase == "" {
-		return fmt.Errorf("spec.knowledgeBase is empty")
-	}
-	// The wiki PVC is mounted with the KnowledgeBase resource name
-	// as the directory under /home/node/.openclaw/wiki/. See
-	// agentgateway_resources.go where the mount is constructed.
-	kbDir := p.Spec.KnowledgeBase
-	src := fmt.Sprintf("/home/node/.openclaw/wiki/%s/log/log.md", kbDir)
-	wsDir := fmt.Sprintf("/home/node/.openclaw/workspaces/%s", agentName)
-	dst := wsDir + "/log/log.md"
-	// `cp -f` so a stale file from a previous turn gets overwritten
-	// with the current wiki content. If the wiki file doesn't yet
-	// exist (very first round), the agent will get ENOENT on its
-	// read tool — but that's fine because the prompt body also
-	// contains "(no log entries yet)". The system prompt's fallback
-	// instruction for "log is empty" still kicks in.
-	script := fmt.Sprintf(
-		"mkdir -p %s/log && if [ -f %s ]; then cp -f %s %s; fi",
-		shQuote(wsDir), shQuote(src), shQuote(src), shQuote(dst),
-	)
-	tctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	out, err := r.execInGatewayPod(tctx, gwPod, []string{"sh", "-c", script})
-	if err != nil {
-		return fmt.Errorf("exec seed copy: %w (out: %s)", err, truncateMsg(out, 200))
-	}
-	return nil
-}
-
-// shQuote wraps an arg in single quotes for safe inclusion in an
-// `sh -c` script. Path components inside the gateway pod are
-// controlled by the operator (KB name, agent name) so injection is
-// not a real concern — this is purely for whitespace + special-char
-// safety if someone names a KB with a hyphen-quirk in the future.
-func shQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // truncateMsg is shared with autoresearchproject_controller.go's
