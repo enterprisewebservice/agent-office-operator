@@ -215,7 +215,28 @@ func (r *AutoResearchProjectReconciler) Reconcile(ctx context.Context, req ctrl.
 		return ctrl.Result{RequeueAfter: 1 * time.Minute}, nil
 	}
 
-	// 6. Ask the deterministic searcher for the next config.
+	// 6. Backfill missing wiki history if Status.RecentRuns has
+	//    eval_loss data we lost to the pre-v0.0.71 refspec bug.
+	//    Idempotent: only writes files for rounds that are
+	//    MISSING on the wiki. Runs at most once per project, on
+	//    the first reconcile after v0.5.0 lands. Failure surfaces
+	//    on WikiSyncOK but does not block the round.
+	if stats, berr := r.backfillWikiHistoryIfNeeded(ctx, &project); berr != nil {
+		log.Info("backfill failed; proceeding with searcher (may have less history than expected)",
+			"err", berr.Error())
+		project.Status.Conditions = mergeARPConditions(project.Status.Conditions,
+			agentofficev1alpha1.AutoResearchProjectCondition{
+				Type:               "WikiSyncOK",
+				Status:             "False",
+				Reason:             "BackfillFailed",
+				Message:            truncateMsg(berr.Error(), 256),
+				LastTransitionTime: metav1.Now(),
+			})
+	} else if stats.written > 0 {
+		log.Info("backfill complete", "rounds", stats.written, "skipped", stats.skipped)
+	}
+
+	// 7. Ask the deterministic searcher for the next config.
 	//    v0.2.0: the kernel reads completed history from the
 	//    wiki and never returns empty. If requestProposal
 	//    errors (wiki unreachable, push failed) we requeue and
