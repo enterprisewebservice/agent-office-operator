@@ -612,6 +612,13 @@ func (in *AutoResearchProjectStatus) DeepCopyInto(out *AutoResearchProjectStatus
 			(*out)[key] = val
 		}
 	}
+	if in.OpenRunStartedAt != nil {
+		in, out := &in.OpenRunStartedAt, &out.OpenRunStartedAt
+		*out = make(map[string]metav1.Time, len(*in))
+		for key, val := range *in {
+			(*out)[key] = *val.DeepCopy()
+		}
+	}
 	if in.RecentRuns != nil {
 		in, out := &in.RecentRuns, &out.RecentRuns
 		*out = make([]AutoResearchExperimentRecord, len(*in))

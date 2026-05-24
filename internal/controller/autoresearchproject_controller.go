@@ -207,6 +207,61 @@ func (r *AutoResearchProjectReconciler) Reconcile(ctx context.Context, req ctrl.
 		return ctrl.Result{RequeueAfter: cadence}, nil
 	}
 
+	// 4b. v1.2.0 circuit-breaker gate. If N consecutive rounds
+	//     have completed without a parseable eval_loss, HALT new
+	//     submissions until a human resets Status.Consecutive
+	//     DrainFailures. Without this, the loop happily burns
+	//     through MaxTotalExperiments firing rounds against a
+	//     broken trainer image / unreachable HF / etc., producing
+	//     nothing of value (the v2 disaster: 100 rounds of zero
+	//     progress over 5 days). The Ready=False + DrainStuck=True
+	//     conditions surface what's wrong in `oc describe`.
+	maxDrainFailures := int32(project.Spec.LoopConfig.MaxConsecutiveDrainFailures)
+	if maxDrainFailures <= 0 {
+		maxDrainFailures = 3
+	}
+	if project.Status.ConsecutiveDrainFailures >= maxDrainFailures {
+		project.Status.Conditions = mergeARPConditions(project.Status.Conditions,
+			agentofficev1alpha1.AutoResearchProjectCondition{
+				Type:   "DrainStuck",
+				Status: "True",
+				Reason: "ConsecutiveDrainFailures",
+				Message: fmt.Sprintf("%d consecutive rounds completed without parseable eval_loss "+
+					"(trainer hangs / HF unreachable / image broken). New rounds are HALTED. "+
+					"Inspect a recent trainer pod for the root cause, then reset with: "+
+					"oc patch autoresearchproject -n %s %s --type=merge --subresource=status "+
+					"-p '{\"status\":{\"consecutiveDrainFailures\":0}}'",
+					project.Status.ConsecutiveDrainFailures, project.Namespace, project.Name),
+				LastTransitionTime: metav1.Now(),
+			})
+		project.Status.Conditions = mergeARPConditions(project.Status.Conditions,
+			agentofficev1alpha1.AutoResearchProjectCondition{
+				Type:               "Ready",
+				Status:             "False",
+				Reason:             "DrainStuck",
+				Message:            "circuit breaker open; see DrainStuck condition for the reset command",
+				LastTransitionTime: metav1.Now(),
+			})
+		// Save status without firing new rounds; long requeue so
+		// we don't spam reconciles while halted.
+		_, err := r.markPhaseAndSave(ctx, &project, "Failed",
+			fmt.Sprintf("drain stuck: %d consecutive failures",
+				project.Status.ConsecutiveDrainFailures))
+		if err != nil {
+			return ctrl.Result{RequeueAfter: 5 * time.Minute}, err
+		}
+		return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+	}
+	// Healthy path — clear DrainStuck if it was set previously.
+	project.Status.Conditions = mergeARPConditions(project.Status.Conditions,
+		agentofficev1alpha1.AutoResearchProjectCondition{
+			Type:               "DrainStuck",
+			Status:             "False",
+			Reason:             "Healthy",
+			Message:            fmt.Sprintf("%d consecutive drain failures (threshold: %d)", project.Status.ConsecutiveDrainFailures, maxDrainFailures),
+			LastTransitionTime: metav1.Now(),
+		})
+
 	// 5. Validate references the project depends on.
 	if err := r.validateRefs(ctx, &project); err != nil {
 		_, _ = r.markPhaseAndSave(ctx, &project, "Pending", err.Error())
@@ -286,12 +341,22 @@ func (r *AutoResearchProjectReconciler) Reconcile(ctx context.Context, req ctrl.
 	if project.Status.OpenRuns == nil {
 		project.Status.OpenRuns = map[string]string{}
 	}
+	if project.Status.OpenRunStartedAt == nil {
+		project.Status.OpenRunStartedAt = map[string]metav1.Time{}
+	}
 	// Store the DSP-issued run ID so drain can poll it. Our
 	// deterministic display name (runID) and DSP's internal
 	// run_id are separate; we key by display name in OpenRuns
 	// and stash the DSP id as the value.
 	project.Status.OpenRuns[runID] = dspRun.RunID
 	now := metav1.Now()
+	// v1.2.0: record when this run was submitted so drainOpenJobs
+	// can apply the spec.loopConfig.maxRoundDurationMinutes
+	// timeout. Without this, a trainer pod stuck at
+	// "Downloading shards: 0%" would hold a GPU forever (the
+	// failure mode that wasted 3 GPUs × 5 days on the v2
+	// project before the timeout existed).
+	project.Status.OpenRunStartedAt[runID] = now
 	project.Status.LastCycleTime = &now
 	project.Status.Round = round
 	project.Status.Phase = "Running"
@@ -970,6 +1035,15 @@ func (r *AutoResearchProjectReconciler) drainOpenJobs(ctx context.Context, p *ag
 		// next reconcile.
 		return false, fmt.Errorf("dspClientFor: %w", err)
 	}
+	// v1.2.0: round-timeout budget. If a run has been open
+	// longer than spec.loopConfig.maxRoundDurationMinutes, we
+	// kill the trainer pod + treat the round as failed. Default
+	// 120 min if spec is zero-valued.
+	maxRoundDuration := time.Duration(p.Spec.LoopConfig.MaxRoundDurationMinutes) * time.Minute
+	if maxRoundDuration <= 0 {
+		maxRoundDuration = 2 * time.Hour
+	}
+
 	completed := false
 	for displayID, dspRunID := range p.Status.OpenRuns {
 		run, err := dspClient.GetRun(ctx, dspRunID)
@@ -978,22 +1052,60 @@ func (r *AutoResearchProjectReconciler) drainOpenJobs(ctx context.Context, p *ag
 			// for next cycle's retry.
 			continue
 		}
+
+		// v1.2.0: round-timeout watchdog. If the run isn't
+		// terminal but has been in flight longer than the
+		// budget, force-fail it. Catches the failure mode where
+		// the trainer hangs at "Downloading shards: 0%" or
+		// similar pre-CUDA stall — DSP would never declare the
+		// run terminal on its own (kfp considers a still-running
+		// pod as "in progress" indefinitely), so without this
+		// check the pod sits forever holding a GPU.
 		if !isRunTerminal(run.State) {
-			continue
+			startedAt, hasStart := p.Status.OpenRunStartedAt[displayID]
+			if hasStart && time.Since(startedAt.Time) > maxRoundDuration {
+				log.Info("round exceeded MaxRoundDuration — force-failing",
+					"runID", displayID, "dspRunID", dspRunID,
+					"startedAt", startedAt.Time.Format(time.RFC3339),
+					"budget", maxRoundDuration.String())
+				// Force the DSP run terminal. Operator-side
+				// only — we mark this round as if DSP had said
+				// FAILED. We DON'T propagate to DSP itself
+				// (terminateRun method doesn't exist on the
+				// thin client) — kfp will clean up its
+				// workflow eventually, and the pod kill below
+				// frees the GPU immediately.
+				run.State = "FAILED"
+				r.killTrainerPodsForRun(ctx, p.Namespace, run.RunID)
+			} else {
+				continue
+			}
 		}
 		completed = true
+
 		var evalLoss float64
 		var adapterURI string
 		var kept bool
+		var drainOK bool // true iff we got a real AUTORESEARCH_RESULT= line
+
 		if run.State == "SUCCEEDED" {
 			// v0.0.43: fetch the full trainer result so we
 			// can record adapter_uri + model_version_id in
 			// status.recentRuns, not just eval_loss.
+			//
+			// v1.2.0: if this returns nil (DSP said SUCCEEDED
+			// but the trainer never emitted
+			// AUTORESEARCH_RESULT=), treat as a hard drain
+			// failure — same class as FAILED. This is the bug
+			// that hid the v2 100-round zero-progress disaster:
+			// silent "eval_loss = 0.0" got accepted as a
+			// completed round.
 			if full := r.readFullResultFromDSPRun(ctx, p, run); full != nil {
 				evalLoss = full.EvalLoss
 				adapterURI = full.AdapterURI
+				drainOK = true
 			}
-			kept = isImprovement(p, evalLoss)
+			kept = drainOK && isImprovement(p, evalLoss)
 
 			// v0.0.67: verify the adapter URI is actually
 			// pullable from the registry before trusting the
@@ -1078,7 +1190,7 @@ func (r *AutoResearchProjectReconciler) drainOpenJobs(ctx context.Context, p *ag
 			if p.Status.RecentRuns[i].RunID != displayID {
 				continue
 			}
-			if run.State == "SUCCEEDED" {
+			if drainOK {
 				p.Status.RecentRuns[i].EvalLoss = fmt.Sprintf("%.6f", evalLoss)
 				p.Status.RecentRuns[i].Kept = &kept
 				if adapterURI != "" {
@@ -1087,7 +1199,9 @@ func (r *AutoResearchProjectReconciler) drainOpenJobs(ctx context.Context, p *ag
 			} else {
 				// State on failure becomes the "kept" string
 				// so the UI shows what happened. Use a false
-				// kept value alongside.
+				// kept value alongside. EvalLoss stays empty
+				// — pair-based history loader correctly skips
+				// this round (no usable observation).
 				fail := false
 				p.Status.RecentRuns[i].Kept = &fail
 			}
@@ -1100,9 +1214,59 @@ func (r *AutoResearchProjectReconciler) drainOpenJobs(ctx context.Context, p *ag
 			p.Status.BestEvalLoss = fmt.Sprintf("%.6f", evalLoss)
 			p.Status.BestRunID = displayID
 		}
+		// v1.2.0: circuit-breaker counter. Reset on success,
+		// increment on failure. The reconcile main loop reads
+		// this counter against spec.loopConfig.maxConsecutive
+		// DrainFailures to decide whether to halt new
+		// submissions.
+		if drainOK {
+			p.Status.ConsecutiveDrainFailures = 0
+		} else {
+			p.Status.ConsecutiveDrainFailures++
+			log.Info("drain failure recorded",
+				"runID", displayID,
+				"dspState", run.State,
+				"consecutiveFailures", p.Status.ConsecutiveDrainFailures)
+		}
 		delete(p.Status.OpenRuns, displayID)
+		delete(p.Status.OpenRunStartedAt, displayID)
 	}
 	return completed, nil
+}
+
+// killTrainerPodsForRun finds the kfp-launched container-impl pods
+// for a given DSP runID and deletes them. Used by the round-timeout
+// path in drainOpenJobs to force-free GPUs held by stuck pods (the
+// "Downloading shards: 0%" pattern that wasted 3 GPUs × 5 days on
+// the v2 project). Best-effort — log errors but don't fail the
+// drain. Pods are labeled `pipeline/runid=<DSP-UUID>` by kfp v2.
+func (r *AutoResearchProjectReconciler) killTrainerPodsForRun(ctx context.Context, namespace, dspRunID string) {
+	log := logf.FromContext(ctx)
+	pods := &corev1.PodList{}
+	if err := r.List(ctx, pods,
+		client.InNamespace(namespace),
+		client.MatchingLabels{"pipeline/runid": dspRunID},
+	); err != nil {
+		log.Info("killTrainerPodsForRun: pod list failed (continuing)",
+			"runID", dspRunID, "err", err.Error())
+		return
+	}
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		// Only kill the container-impl pod (the trainer);
+		// driver/wait pods are kfp scaffolding that will exit
+		// on their own once their dependencies disappear.
+		if !strings.Contains(pod.Name, "container-impl") {
+			continue
+		}
+		if err := r.Delete(ctx, pod); err != nil {
+			log.Info("killTrainerPodsForRun: delete failed",
+				"pod", pod.Name, "err", err.Error())
+			continue
+		}
+		log.Info("killed stuck trainer pod (round-timeout watchdog)",
+			"pod", pod.Name, "dspRunID", dspRunID)
+	}
 }
 
 // isRunTerminal reports whether a DSP run's state is one we

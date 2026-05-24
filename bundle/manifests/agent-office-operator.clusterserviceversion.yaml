@@ -49,7 +49,7 @@ metadata:
     capabilities: Basic Install
     categories: AI/Machine Learning, Developer Tools
     containerImage: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-operator:v0.0.1
-    createdAt: "2026-05-21T02:59:29Z"
+    createdAt: "2026-05-24T23:34:37Z"
     description: OLM-managed operator for the Governed Agent Platform. Owns the AgentWorkstation
       and MemoryModule CRDs and reconciles the per-agent runtime artifacts (Deployment,
       Service, ConfigMap, PVC) on OpenShift.
@@ -57,7 +57,7 @@ metadata:
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
     repository: https://github.com/enterprisewebservice/agent-office-operator
     support: Red Hat Solution Architecture
-  name: agent-office-operator.v1.1.0
+  name: agent-office-operator.v1.2.0
   namespace: placeholder
 spec:
   apiservicedefinitions: {}
@@ -330,7 +330,7 @@ spec:
                       fieldPath: metadata.annotations['olm.targetNamespaces']
                 - name: CLUSTER_APPS_DOMAIN
                   value: apps.salamander.aimlworkbench.com
-                image: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-operator:v1.1.0
+                image: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-operator:v1.2.0
                 imagePullPolicy: Always
                 livenessProbe:
                   httpGet:
@@ -437,4 +437,4 @@ spec:
   provider:
     name: Red Hat Solution Architecture
     url: https://github.com/enterprisewebservice
-  version: 1.1.0
+  version: 1.2.0

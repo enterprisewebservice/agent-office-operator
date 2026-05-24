@@ -287,12 +287,50 @@ spec:
                       operator allows at once (across cycles). Default 1.
                     format: int32
                     type: integer
+                  maxConsecutiveDrainFailures:
+                    default: 3
+                    description: |-
+                      MaxConsecutiveDrainFailures is the number of back-to-back
+                      rounds that may complete with no parseable eval_loss
+                      (either DSP said SUCCEEDED but the trainer never emitted
+                      AUTORESEARCH_RESULT=, or DSP said FAILED) before the
+                      operator HALTS new-round submission. Surfaces as
+                      DrainStuck=True condition. Default 3 — three strikes is
+                      enough signal that something is structurally wrong
+                      (trainer image broken, HF unreachable, etc.) and the
+                      loop should stop firing rounds until a human resets it.
+
+                      Reset by clearing Status.ConsecutiveDrainFailures (e.g.
+                      `oc patch ... --type=merge --subresource=status -p
+                      '{"status":{"consecutiveDrainFailures":0}}'`).
+
+                      Added in v1.2.0 alongside MaxRoundDurationMinutes.
+                    format: int32
+                    type: integer
                   maxExperimentsPerCycle:
                     default: 1
                     description: |-
                       MaxExperimentsPerCycle caps how many experiments the
                       operator will submit per cycle. Default 1 (serial).
                       Raise once you trust the loop + power watchdog.
+                    format: int32
+                    type: integer
+                  maxRoundDurationMinutes:
+                    default: 120
+                    description: |-
+                      MaxRoundDurationMinutes is the wall-clock budget for a
+                      single round (from DSP submit to terminal state). If a
+                      round exceeds this, the operator terminates the DSP run +
+                      kills the trainer pod's container-impl + counts the round
+                      as a drain failure. Default 120 (2 hours) — covers a
+                      realistic 8B QLoRA run with model download time.
+
+                      Added in v1.2.0 to catch the failure mode where the
+                      trainer hangs at "Downloading shards: 0%" indefinitely,
+                      leaving zombie pods holding GPUs while the operator
+                      silently advances the loop (a bug introduced before this
+                      timeout existed; without it, three v2 zombies held GPUs
+                      for 5 days).
                     format: int32
                     type: integer
                   maxTotalExperiments:
@@ -458,6 +496,23 @@ spec:
                   - type
                   type: object
                 type: array
+              consecutiveDrainFailures:
+                description: |-
+                  ConsecutiveDrainFailures counts how many rounds in a row
+                  have completed without a parseable eval_loss (DSP said
+                  SUCCEEDED but the trainer never emitted
+                  AUTORESEARCH_RESULT=, or DSP said FAILED, or the round
+                  was force-failed by the round-timeout watchdog). When it
+                  reaches spec.loopConfig.maxConsecutiveDrainFailures the
+                  operator sets the DrainStuck=True condition and stops
+                  submitting new rounds.
+
+                  Reset to 0 by any successful drain. Operators can also
+                  reset manually with `oc patch ... --subresource=status`.
+                  Added in v1.2.0 to catch the silent-advance pattern that
+                  burned 100 v2 rounds with zero progress over 5 days.
+                format: int32
+                type: integer
               experimentsKept:
                 description: ExperimentsKept counts the kept (improving) runs.
                 format: int32
@@ -475,6 +530,21 @@ spec:
                   CadenceMinutes.
                 format: date-time
                 type: string
+              openRunStartedAt:
+                additionalProperties:
+                  format: date-time
+                  type: string
+                description: |-
+                  OpenRunStartedAt tracks when each open run was first
+                  submitted. Used by the round-timeout check in
+                  drainOpenJobs — if `time.Now() - OpenRunStartedAt[runID]
+                  > spec.loopConfig.maxRoundDurationMinutes`, the run is
+                  terminated and the round is recorded as failed.
+
+                  Added in v1.2.0. Older CRs that don't have this field
+                  populated will skip the timeout check on their existing
+                  open runs (the field is populated at submission time).
+                type: object
               openRuns:
                 additionalProperties:
                   type: string

@@ -164,6 +164,42 @@ type AutoResearchLoopConfig struct {
 	// +kubebuilder:default=1
 	// +optional
 	MaxConcurrentRuns int32 `json:"maxConcurrentRuns,omitempty"`
+
+	// MaxRoundDurationMinutes is the wall-clock budget for a
+	// single round (from DSP submit to terminal state). If a
+	// round exceeds this, the operator terminates the DSP run +
+	// kills the trainer pod's container-impl + counts the round
+	// as a drain failure. Default 120 (2 hours) — covers a
+	// realistic 8B QLoRA run with model download time.
+	//
+	// Added in v1.2.0 to catch the failure mode where the
+	// trainer hangs at "Downloading shards: 0%" indefinitely,
+	// leaving zombie pods holding GPUs while the operator
+	// silently advances the loop (a bug introduced before this
+	// timeout existed; without it, three v2 zombies held GPUs
+	// for 5 days).
+	// +kubebuilder:default=120
+	// +optional
+	MaxRoundDurationMinutes int32 `json:"maxRoundDurationMinutes,omitempty"`
+
+	// MaxConsecutiveDrainFailures is the number of back-to-back
+	// rounds that may complete with no parseable eval_loss
+	// (either DSP said SUCCEEDED but the trainer never emitted
+	// AUTORESEARCH_RESULT=, or DSP said FAILED) before the
+	// operator HALTS new-round submission. Surfaces as
+	// DrainStuck=True condition. Default 3 — three strikes is
+	// enough signal that something is structurally wrong
+	// (trainer image broken, HF unreachable, etc.) and the
+	// loop should stop firing rounds until a human resets it.
+	//
+	// Reset by clearing Status.ConsecutiveDrainFailures (e.g.
+	// `oc patch ... --type=merge --subresource=status -p
+	// '{"status":{"consecutiveDrainFailures":0}}'`).
+	//
+	// Added in v1.2.0 alongside MaxRoundDurationMinutes.
+	// +kubebuilder:default=3
+	// +optional
+	MaxConsecutiveDrainFailures int32 `json:"maxConsecutiveDrainFailures,omitempty"`
 }
 
 // AutoResearchTrainer configures the workload that runs inside
@@ -485,6 +521,34 @@ type AutoResearchProjectStatus struct {
 	// reconcile cycle polls each for status + drains them.
 	// +optional
 	OpenRuns map[string]string `json:"openRuns,omitempty"`
+
+	// OpenRunStartedAt tracks when each open run was first
+	// submitted. Used by the round-timeout check in
+	// drainOpenJobs — if `time.Now() - OpenRunStartedAt[runID]
+	// > spec.loopConfig.maxRoundDurationMinutes`, the run is
+	// terminated and the round is recorded as failed.
+	//
+	// Added in v1.2.0. Older CRs that don't have this field
+	// populated will skip the timeout check on their existing
+	// open runs (the field is populated at submission time).
+	// +optional
+	OpenRunStartedAt map[string]metav1.Time `json:"openRunStartedAt,omitempty"`
+
+	// ConsecutiveDrainFailures counts how many rounds in a row
+	// have completed without a parseable eval_loss (DSP said
+	// SUCCEEDED but the trainer never emitted
+	// AUTORESEARCH_RESULT=, or DSP said FAILED, or the round
+	// was force-failed by the round-timeout watchdog). When it
+	// reaches spec.loopConfig.maxConsecutiveDrainFailures the
+	// operator sets the DrainStuck=True condition and stops
+	// submitting new rounds.
+	//
+	// Reset to 0 by any successful drain. Operators can also
+	// reset manually with `oc patch ... --subresource=status`.
+	// Added in v1.2.0 to catch the silent-advance pattern that
+	// burned 100 v2 rounds with zero progress over 5 days.
+	// +optional
+	ConsecutiveDrainFailures int32 `json:"consecutiveDrainFailures,omitempty"`
 
 	// RecentRuns is a bounded ring of the last N experiment
 	// records (typically 20) for the UI to render.
