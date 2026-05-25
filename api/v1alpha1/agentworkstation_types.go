@@ -187,8 +187,45 @@ type AgentWorkstationSpec struct {
 	Model ModelSpec `json:"model"`
 
 	// Description is a brief description of the agent's purpose.
+	// Added value in v1.3.0: the PM Agent reads this when inventorying
+	// the available agent pool during project intake — it's the
+	// human-readable "what does this agent do" that helps PM decide
+	// which existing agent (if any) maps to a task in a new project.
+	// Keep it dense and concrete; PM ingests these as one-liners.
 	// +optional
 	Description string `json:"description,omitempty"`
+
+	// Role identifies the agent's position in the larger
+	// orchestration. Open-set string the PM Agent uses to route
+	// tasks: "pm" (the orchestrator itself), "doc-ingestor",
+	// "rag-indexer", "autoresearch-runner", "data-curator",
+	// "code-generator", "web-researcher", etc.
+	//
+	// The operator does NOT validate or enforce specific values —
+	// roles are a discovery axis, not a constraint. PM picks an
+	// agent by exact role match (with capabilities as a tiebreaker)
+	// and falls back to "no agent for this role" pushback if no
+	// match exists. Empty role = "untyped" = PM will ask the human
+	// what to do with it rather than auto-assigning.
+	//
+	// Added in v1.3.0 (PM-as-collaborator design slice 1).
+	// +optional
+	Role string `json:"role,omitempty"`
+
+	// Capabilities is the open-set list of skills/affordances this
+	// agent has beyond what its Role implies. Examples:
+	// "pdf-parsing", "ocr-en", "docling", "sdxl-lora-train",
+	// "web-fetch", "browser-automation".
+	//
+	// PM uses this as a tiebreaker when multiple agents declare the
+	// same Role, and as a feasibility hint when planning ("this
+	// task needs `docling`; do any agents declare it?"). Like Role,
+	// capabilities are open-set and unvalidated — vocabulary
+	// discipline is a team norm, not enforced by the operator.
+	//
+	// Added in v1.3.0.
+	// +optional
+	Capabilities []string `json:"capabilities,omitempty"`
 
 	// Emoji icon for the agent in the office view.
 	// +optional

@@ -64,6 +64,23 @@ spec:
                   APIKeySecretRef is the name of a Secret containing the API key
                   (key "api-key").
                 type: string
+              capabilities:
+                description: |-
+                  Capabilities is the open-set list of skills/affordances this
+                  agent has beyond what its Role implies. Examples:
+                  "pdf-parsing", "ocr-en", "docling", "sdxl-lora-train",
+                  "web-fetch", "browser-automation".
+
+                  PM uses this as a tiebreaker when multiple agents declare the
+                  same Role, and as a feasibility hint when planning ("this
+                  task needs `docling`; do any agents declare it?"). Like Role,
+                  capabilities are open-set and unvalidated — vocabulary
+                  discipline is a team norm, not enforced by the operator.
+
+                  Added in v1.3.0.
+                items:
+                  type: string
+                type: array
               channels:
                 description: Channels configures the channels the agent communicates
                   on.
@@ -82,7 +99,13 @@ spec:
                     type: object
                 type: object
               description:
-                description: Description is a brief description of the agent's purpose.
+                description: |-
+                  Description is a brief description of the agent's purpose.
+                  Added value in v1.3.0: the PM Agent reads this when inventorying
+                  the available agent pool during project intake — it's the
+                  human-readable "what does this agent do" that helps PM decide
+                  which existing agent (if any) maps to a task in a new project.
+                  Keep it dense and concrete; PM ingests these as one-liners.
                 type: string
               displayName:
                 description: DisplayName is the human-readable name for this agent
@@ -226,6 +249,23 @@ spec:
                       More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
                     type: object
                 type: object
+              role:
+                description: |-
+                  Role identifies the agent's position in the larger
+                  orchestration. Open-set string the PM Agent uses to route
+                  tasks: "pm" (the orchestrator itself), "doc-ingestor",
+                  "rag-indexer", "autoresearch-runner", "data-curator",
+                  "code-generator", "web-researcher", etc.
+
+                  The operator does NOT validate or enforce specific values —
+                  roles are a discovery axis, not a constraint. PM picks an
+                  agent by exact role match (with capabilities as a tiebreaker)
+                  and falls back to "no agent for this role" pushback if no
+                  match exists. Empty role = "untyped" = PM will ask the human
+                  what to do with it rather than auto-assigning.
+
+                  Added in v1.3.0 (PM-as-collaborator design slice 1).
+                type: string
               runtime:
                 description: |-
                   Runtime selects how the operator materializes this agent. If

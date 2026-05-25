@@ -220,6 +220,11 @@ func (in *AgentWorkstationList) DeepCopyObject() runtime.Object {
 func (in *AgentWorkstationSpec) DeepCopyInto(out *AgentWorkstationSpec) {
 	*out = *in
 	out.Model = in.Model
+	if in.Capabilities != nil {
+		in, out := &in.Capabilities, &out.Capabilities
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	if in.Tools != nil {
 		in, out := &in.Tools, &out.Tools
 		*out = new(ToolsSpec)
