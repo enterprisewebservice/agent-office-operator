@@ -81,6 +81,74 @@ type ToolsSpec struct {
 	// Allow is the list of tool names the agent is allowed to use.
 	// +optional
 	Allow []string `json:"allow,omitempty"`
+
+	// MCPServers declares Model Context Protocol servers this agent
+	// can call. Each entry becomes an `openclaw mcp set` invocation
+	// against the agent's gateway pod, and any referenced credentials
+	// Secret is envFrom'd onto the openclaw container with a
+	// stakater/Reloader annotation so the pod rolls on Secret
+	// rotation (e.g. ESO-rotated GitHub App installation tokens).
+	//
+	// Only meaningful when spec.runtime.shared.gatewayRef is set —
+	// dedicated-runtime agents own their own pod and configure MCP
+	// directly via their own manifest.
+	//
+	// Added in v1.4.0 alongside the MCP Gateway integration.
+	// +optional
+	MCPServers []MCPServerSpec `json:"mcpServers,omitempty"`
+}
+
+// MCPServerSpec declares one MCP server the agent talks to. The
+// operator translates this into `openclaw mcp set <name> '<json>'`
+// against the agent's gateway pod, plus optional envFrom + Reloader
+// wiring on the gateway Deployment so rotated credentials are
+// available as env-var refs in Headers.
+type MCPServerSpec struct {
+	// Name is the local identifier openclaw uses for this MCP server.
+	// Tools from this server appear in openclaw as `<name>_<toolname>`
+	// (matches the upstream MCPServerRegistration.spec.toolPrefix
+	// convention used by the Kuadrant mcp-gateway operator).
+	Name string `json:"name"`
+
+	// URL is the HTTP/SSE endpoint of the MCP server. Typically a
+	// cluster-internal Service DNS pointing at the Kuadrant MCP
+	// Gateway broker (which then federates to backend MCP servers).
+	// +kubebuilder:validation:Pattern=`^https?://`
+	URL string `json:"url"`
+
+	// Type selects the MCP transport. "http" is the modern Streamable
+	// HTTP transport (mcp/2025-06-18 spec, what github-mcp-server
+	// and the Kuadrant MCP Gateway speak). "sse" is the legacy
+	// server-sent-events transport. stdio MCP servers (defined as
+	// `{"command":...,"args":...}` in openclaw's native shape) are
+	// not currently expressible via this CRD — use `openclaw mcp set`
+	// directly inside the gateway pod for those.
+	// +kubebuilder:default=http
+	// +kubebuilder:validation:Enum=http;sse
+	// +optional
+	Type string `json:"type,omitempty"`
+
+	// Headers is the static request-header map sent on every MCP
+	// call. Values support `${ENV_VAR}` interpolation that openclaw
+	// resolves at request time from the gateway pod's environment.
+	// Typical usage with a rotating GitHub App installation token:
+	//   headers:
+	//     Authorization: "Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN}"
+	// paired with EnvFromSecret pointing at the ESO-rotated Secret.
+	// +optional
+	Headers map[string]string `json:"headers,omitempty"`
+
+	// EnvFromSecret names a Secret in the AgentGateway's namespace
+	// whose keys are projected into the openclaw container via
+	// envFrom. Required when Headers contains any `${ENV_VAR}`
+	// references. The operator also patches the gateway Deployment
+	// with a `secret.reloader.stakater.com/reload` annotation
+	// naming this Secret, so stakater/Reloader bounces the pod
+	// whenever the Secret content changes (kubelet's mounted-secret
+	// refresh doesn't cover env-var consumers — openclaw reads
+	// ${VAR} at startup, not per-request).
+	// +optional
+	EnvFromSecret string `json:"envFromSecret,omitempty"`
 }
 
 // MemoryModuleRef is a reference to a MemoryModule CR consumed by this

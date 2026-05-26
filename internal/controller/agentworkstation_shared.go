@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -365,6 +366,23 @@ if (after === before) {
 			"err", vErr, "stdout", strings.TrimSpace(validateOut))
 	}
 
+	// 6. Reconcile any MCP servers declared on this AW into the
+	//    gateway's openclaw mcp config + the gateway Deployment's
+	//    envFrom (idempotent; safe to skip-on-error per call).
+	//    This is what wires a PM Agent (or any AW) to the Kuadrant
+	//    MCP Gateway endpoint so it can call federated tools like
+	//    `github_list_issues` without ever seeing a credential.
+	if aw.Spec.Tools != nil && len(aw.Spec.Tools.MCPServers) > 0 {
+		if err := r.reconcileMCPServers(ctx, aw, &gw, gwPod); err != nil {
+			log.Info("mcp servers reconcile partial; will retry next loop",
+				"err", err)
+			// Non-fatal — the rest of the agent is still up. Surface
+			// in status so it's visible but stay Running.
+			aw.Status.Message = fmt.Sprintf("%s — MCP setup pending: %s",
+				aw.Status.Message, truncate(err.Error(), 120))
+		}
+	}
+
 	// 7. Status — Running with a hint about Discord routing so
 	// users can see at a glance whether their @-mentions will
 	// reach this agent.
@@ -525,4 +543,157 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// reconcileMCPServers handles spec.tools.mcpServers on a shared-runtime
+// AW. Added in v1.4.0 to wire agents to the Kuadrant MCP Gateway
+// (and any other MCP server) without ever exposing rotated credentials
+// to the agent itself. For each declared server:
+//
+//  1. exec `openclaw mcp set <name> '<json>'` inside the gateway pod —
+//     idempotent (openclaw replaces by name; the pod auto-rolls on
+//     openclaw.json change).
+//
+//  2. for each EnvFromSecret declared on any server, ensure the gateway
+//     Deployment's openclaw container envFrom's that Secret, so any
+//     `${ENV_VAR}` references in the server's Headers resolve at
+//     openclaw startup.
+//
+//  3. patch the gateway Deployment's pod-template annotations with a
+//     stakater/Reloader trigger naming every EnvFromSecret, so the
+//     pod rolls whenever the Secret content changes. This is what
+//     covers the env-var-at-startup blindspot — openclaw reads env
+//     refs once at boot; without a rolling restart on Secret rotation,
+//     a rotated GitHub App installation token would never reach the
+//     in-process openclaw mcp client.
+//
+// All three operations are idempotent. Errors are returned for the
+// caller to surface in status; the caller treats partial failure as
+// non-fatal (the agent itself is up regardless).
+//
+// NOTE: removing an entry from spec.tools.mcpServers does NOT call
+// `openclaw mcp unset` today — the entry stays in openclaw.json
+// until manually removed. Adding the unset path requires tracking
+// "what we previously set"; deferred until first user request.
+func (r *AgentWorkstationReconciler) reconcileMCPServers(
+	ctx context.Context,
+	aw *agentofficev1alpha1.AgentWorkstation,
+	gw *agentofficev1alpha1.AgentGateway,
+	gwPod *corev1.Pod,
+) error {
+	log := logf.FromContext(ctx)
+
+	// Step 1: openclaw mcp set per server.
+	for _, srv := range aw.Spec.Tools.MCPServers {
+		mcpType := srv.Type
+		if mcpType == "" {
+			mcpType = "http"
+		}
+		cfg := map[string]interface{}{
+			"url":  srv.URL,
+			"type": mcpType,
+		}
+		if len(srv.Headers) > 0 {
+			cfg["headers"] = srv.Headers
+		}
+		cfgJSON, err := json.Marshal(cfg)
+		if err != nil {
+			return fmt.Errorf("marshal mcp config for %q: %w", srv.Name, err)
+		}
+		out, err := r.execInPod(ctx, gwPod, []string{
+			"openclaw", "mcp", "set", srv.Name, string(cfgJSON),
+		})
+		if err != nil {
+			return fmt.Errorf("openclaw mcp set %q: %w (out=%s)",
+				srv.Name, err, strings.TrimSpace(out))
+		}
+		log.Info("mcp server registered with openclaw",
+			"name", srv.Name, "agent", aw.Name,
+			"url", srv.URL, "type", mcpType)
+	}
+
+	// Step 2 + 3: collect EnvFromSecret names, patch the gateway
+	// Deployment with envFrom + Reloader annotation.
+	wantSecrets := map[string]struct{}{}
+	for _, srv := range aw.Spec.Tools.MCPServers {
+		if srv.EnvFromSecret != "" {
+			wantSecrets[srv.EnvFromSecret] = struct{}{}
+		}
+	}
+	if len(wantSecrets) == 0 {
+		return nil
+	}
+
+	var dep appsv1.Deployment
+	if err := r.Get(ctx, client.ObjectKey{Namespace: gw.Namespace, Name: gw.Name}, &dep); err != nil {
+		return fmt.Errorf("get gateway deployment %s/%s: %w",
+			gw.Namespace, gw.Name, err)
+	}
+	changed := false
+
+	// Reloader annotation: merge with any existing value so multiple
+	// AWs sharing the same gateway accumulate their secrets.
+	const reloaderKey = "secret.reloader.stakater.com/reload"
+	if dep.Spec.Template.Annotations == nil {
+		dep.Spec.Template.Annotations = map[string]string{}
+	}
+	existing := map[string]struct{}{}
+	if v := dep.Spec.Template.Annotations[reloaderKey]; v != "" {
+		for _, s := range strings.Split(v, ",") {
+			s = strings.TrimSpace(s)
+			if s != "" {
+				existing[s] = struct{}{}
+			}
+		}
+	}
+	for s := range wantSecrets {
+		existing[s] = struct{}{}
+	}
+	names := make([]string, 0, len(existing))
+	for s := range existing {
+		names = append(names, s)
+	}
+	sort.Strings(names)
+	desiredAnnot := strings.Join(names, ",")
+	if dep.Spec.Template.Annotations[reloaderKey] != desiredAnnot {
+		dep.Spec.Template.Annotations[reloaderKey] = desiredAnnot
+		changed = true
+	}
+
+	// envFrom: ensure each wanted Secret is on the openclaw container.
+	for i := range dep.Spec.Template.Spec.Containers {
+		c := &dep.Spec.Template.Spec.Containers[i]
+		if c.Name != gatewayContainerName { // "openclaw"
+			continue
+		}
+		for s := range wantSecrets {
+			already := false
+			for _, ef := range c.EnvFrom {
+				if ef.SecretRef != nil && ef.SecretRef.Name == s {
+					already = true
+					break
+				}
+			}
+			if !already {
+				c.EnvFrom = append(c.EnvFrom, corev1.EnvFromSource{
+					SecretRef: &corev1.SecretEnvSource{
+						LocalObjectReference: corev1.LocalObjectReference{Name: s},
+					},
+				})
+				changed = true
+			}
+		}
+	}
+
+	if changed {
+		if err := r.Update(ctx, &dep); err != nil {
+			return fmt.Errorf("update gateway deployment %s/%s: %w",
+				gw.Namespace, gw.Name, err)
+		}
+		log.Info("patched gateway deployment for mcp env",
+			"deployment", dep.Name,
+			"secrets", names,
+			"agent", aw.Name)
+	}
+	return nil
 }
