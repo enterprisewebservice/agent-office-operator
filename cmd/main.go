@@ -322,6 +322,16 @@ func main() {
 		// reason} computed from the codex-subscription-credentials
 		// Secret's auth.json `last_refresh` field.
 		mux.Handle("/codex-auth/status", bs)
+		// v1.5.3: /binders/... — read-only endpoints consumed by the
+		// agentworkstation-binders Backstage frontend plugin to list
+		// available KnowledgeBases / MemoryModules / Skills /
+		// SkillBindings and Get a specific AgentWorkstation's spec +
+		// gitops-source. RHDH's proxy plugin reaches this via
+		// /api/proxy/agent-office-binders/binders/... See
+		// internal/controller/backstage_binders.go for the full route
+		// table.
+		binders := controller.NewBindersHandler(mgr.GetClient())
+		mux.Handle("/binders/", binders)
 		mux.HandleFunc("/healthz/backstage", func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte("ok"))
 		})

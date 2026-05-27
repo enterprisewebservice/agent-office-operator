@@ -17,14 +17,14 @@ schema: olm.channel
 package: agent-office-operator
 name: alpha
 entries:
-  - name: agent-office-operator.v1.5.2
-    replaces: agent-office-operator.v1.5.1
-    skipRange: ">=0.0.1 <1.5.2"
+  - name: agent-office-operator.v1.5.3
+    replaces: agent-office-operator.v1.5.2
+    skipRange: ">=0.0.1 <1.5.3"
 
 ---
 ---
-image: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-operator-bundle:v1.5.2
-name: agent-office-operator.v1.5.2
+image: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-operator-bundle:v1.5.3
+name: agent-office-operator.v1.5.3
 package: agent-office-operator
 properties:
 - type: olm.gvk
@@ -157,6 +157,6 @@ properties:
   value:
     data: eyJhcGlWZXJzaW9uIjoidjEiLCJraW5kIjoiU2VydmljZSIsIm1ldGFkYXRhIjp7ImNyZWF0aW9uVGltZXN0YW1wIjpudWxsLCJsYWJlbHMiOnsiYXBwLmt1YmVybmV0ZXMuaW8vbWFuYWdlZC1ieSI6Imt1c3RvbWl6ZSIsImFwcC5rdWJlcm5ldGVzLmlvL25hbWUiOiJhZ2VudC1vZmZpY2Utb3BlcmF0b3IiLCJjb250cm9sLXBsYW5lIjoiY29udHJvbGxlci1tYW5hZ2VyIn0sIm5hbWUiOiJhZ2VudC1vZmZpY2Utb3BlcmF0b3ItY29udHJvbGxlci1tYW5hZ2VyLW1ldHJpY3Mtc2VydmljZSJ9LCJzcGVjIjp7InBvcnRzIjpbeyJuYW1lIjoiaHR0cHMiLCJwb3J0Ijo4NDQzLCJwcm90b2NvbCI6IlRDUCIsInRhcmdldFBvcnQiOjg0NDN9XSwic2VsZWN0b3IiOnsiYXBwLmt1YmVybmV0ZXMuaW8vbmFtZSI6ImFnZW50LW9mZmljZS1vcGVyYXRvciIsImNvbnRyb2wtcGxhbmUiOiJjb250cm9sbGVyLW1hbmFnZXIifX0sInN0YXR1cyI6eyJsb2FkQmFsYW5jZXIiOnt9fX0=
 relatedImages:
-- image: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-operator.v1.5.2
+- image: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-operator.v1.5.3
   name: ""
 schema: olm.bundle
