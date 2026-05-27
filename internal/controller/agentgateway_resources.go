@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -44,8 +45,16 @@ func gwRouteName(gwName string)   string { return gwName }
 // includes the gateway's own token Secret; optionally adds an
 // operator-supplied secret carrying model-provider API keys
 // (OPENAI_API_KEY / ANTHROPIC_API_KEY / etc.) when
-// spec.envFromSecretRef is set.
-func gatewayEnvFrom(gw *agentofficev1alpha1.AgentGateway, tokenSecretName string) []corev1.EnvFromSource {
+// spec.envFromSecretRef is set; optionally adds extra Secrets the
+// caller passes in (in v1.4.1+, these are the per-AW
+// `spec.tools.mcpServers[].envFromSecret` values discovered by the
+// AgentGateway reconciler — see reconcileGatewayDeployment's call
+// to collectMCPEnvFromSecrets()).
+//
+// All extra Secrets are marked Optional so missing references don't
+// block the pod from starting — openclaw will surface a Config
+// warning instead, which is the right UX during demo/dev iteration.
+func gatewayEnvFrom(gw *agentofficev1alpha1.AgentGateway, tokenSecretName string, extraSecrets []string) []corev1.EnvFromSource {
 	out := []corev1.EnvFromSource{
 		{SecretRef: &corev1.SecretEnvSource{
 			LocalObjectReference: corev1.LocalObjectReference{Name: tokenSecretName},
@@ -55,6 +64,14 @@ func gatewayEnvFrom(gw *agentofficev1alpha1.AgentGateway, tokenSecretName string
 		out = append(out, corev1.EnvFromSource{
 			SecretRef: &corev1.SecretEnvSource{
 				LocalObjectReference: corev1.LocalObjectReference{Name: gw.Spec.EnvFromSecretRef},
+				Optional:             ptrBool(true),
+			},
+		})
+	}
+	for _, s := range extraSecrets {
+		out = append(out, corev1.EnvFromSource{
+			SecretRef: &corev1.SecretEnvSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: s},
 				Optional:             ptrBool(true),
 			},
 		})
@@ -440,18 +457,38 @@ func (r *AgentGatewayReconciler) reconcileGatewayDeployment(ctx context.Context,
 		return attachedKBs[i].Name < attachedKBs[j].Name
 	})
 
+	// v1.4.1: discover EnvFromSecret values from all AWs targeting
+	// this gateway via spec.tools.mcpServers. These secrets get
+	// envFrom'd onto the openclaw container so MCP server header
+	// templates like `Authorization: "Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN}"`
+	// resolve at request time. The deduplicated, sorted list also
+	// drives a Reloader annotation on the pod template so the pod
+	// rolls when any of those Secrets rotate (e.g. ESO-managed
+	// GitHub App installation tokens that refresh every 30min).
+	mcpExtraSecrets, err := r.collectMCPEnvFromSecrets(ctx, gw)
+	if err != nil {
+		return fmt.Errorf("collecting mcp envFrom secrets: %w", err)
+	}
+
 	dep := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      gwDeployName(gw.Name),
 			Namespace: gw.Namespace,
 		},
 	}
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, dep, func() error {
+	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, dep, func() error {
 		dep.Labels = mergeLabels(dep.Labels, labels)
 		dep.Spec.Replicas = &replicas
 		dep.Spec.Selector = &metav1.LabelSelector{MatchLabels: labels}
+		// Reloader annotation: bounce the pod when any MCP-credential
+		// Secret rotates. Set unconditionally so we DELETE the
+		// annotation when the last AW drops its mcpServers entry.
+		podAnnotations := map[string]string{}
+		if len(mcpExtraSecrets) > 0 {
+			podAnnotations["secret.reloader.stakater.com/reload"] = strings.Join(mcpExtraSecrets, ",")
+		}
 		dep.Spec.Template = corev1.PodTemplateSpec{
-			ObjectMeta: metav1.ObjectMeta{Labels: labels},
+			ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: podAnnotations},
 			Spec: corev1.PodSpec{
 				ImagePullSecrets: []corev1.LocalObjectReference{
 					{Name: "quay-pull-secret"},
@@ -483,7 +520,7 @@ func (r *AgentGatewayReconciler) reconcileGatewayDeployment(ctx context.Context,
 					`},
 					VolumeMounts: gatewayInitMounts(gw),
 				}},
-				Containers: gatewayContainers(image, gw, tokenSecretName, attachedKBs),
+				Containers: gatewayContainers(image, gw, tokenSecretName, attachedKBs, mcpExtraSecrets),
 				Volumes:    gatewayVolumes(gw, dshmSize, attachedKBs),
 			},
 		}
@@ -495,12 +532,63 @@ func (r *AgentGatewayReconciler) reconcileGatewayDeployment(ctx context.Context,
 	return err
 }
 
+// collectMCPEnvFromSecrets walks all AgentWorkstations in the
+// gateway's namespace, filters to those targeting THIS gateway via
+// spec.runtime.shared.gatewayRef, and collects the deduplicated,
+// sorted list of Secret names declared in their
+// spec.tools.mcpServers[].envFromSecret fields.
+//
+// Why on the AG reconciler (v1.4.1 fix): the AG reconciler OWNS the
+// Deployment via SetControllerReference and rebuilds the pod
+// template from scratch on every pass. v1.4.0 put the same merge
+// logic on the AW reconciler, which raced and lost — every AW
+// reconcile that patched the Deployment was immediately reverted
+// by the next AG reconcile. Moving it here makes the merge part of
+// the AG's authoritative state, so it survives. AW reconcile still
+// calls `openclaw mcp set` (no Deployment write) and touches the
+// AG to trigger a prompt re-reconcile.
+func (r *AgentGatewayReconciler) collectMCPEnvFromSecrets(ctx context.Context, gw *agentofficev1alpha1.AgentGateway) ([]string, error) {
+	var awList agentofficev1alpha1.AgentWorkstationList
+	if err := r.List(ctx, &awList, client.InNamespace(gw.Namespace)); err != nil {
+		return nil, fmt.Errorf("listing AgentWorkstations: %w", err)
+	}
+	set := map[string]struct{}{}
+	for _, aw := range awList.Items {
+		if aw.Spec.Runtime == nil || aw.Spec.Runtime.Shared == nil {
+			continue
+		}
+		if aw.Spec.Runtime.Shared.GatewayRef != gw.Name {
+			continue
+		}
+		if aw.Spec.Tools == nil {
+			continue
+		}
+		for _, srv := range aw.Spec.Tools.MCPServers {
+			if srv.EnvFromSecret != "" {
+				set[srv.EnvFromSecret] = struct{}{}
+			}
+		}
+	}
+	out := make([]string, 0, len(set))
+	for s := range set {
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
 // gatewayContainers returns the pod's container list: always
 // the openclaw runtime, plus one git-sync sidecar per attached
 // KnowledgeBase whose spec.gitMirror is configured. Sidecars
 // share the wiki PVC volume already in the pod (no rsync between
 // containers — both read/write the same files).
-func gatewayContainers(image string, gw *agentofficev1alpha1.AgentGateway, tokenSecretName string, attachedKBs []agentofficev1alpha1.KnowledgeBase) []corev1.Container {
+//
+// mcpExtraSecrets (v1.4.1+) is the deduplicated list of
+// EnvFromSecret values declared across all AgentWorkstations
+// targeting this gateway via spec.tools.mcpServers — gives openclaw
+// the env vars it needs to resolve ${VAR} references in MCP
+// server header configs (e.g. ${GITHUB_PERSONAL_ACCESS_TOKEN}).
+func gatewayContainers(image string, gw *agentofficev1alpha1.AgentGateway, tokenSecretName string, attachedKBs []agentofficev1alpha1.KnowledgeBase, mcpExtraSecrets []string) []corev1.Container {
 	out := []corev1.Container{{
 		Name:            "openclaw",
 		Image:           image,
@@ -508,7 +596,7 @@ func gatewayContainers(image string, gw *agentofficev1alpha1.AgentGateway, token
 		Ports: []corev1.ContainerPort{{
 			Name: "gateway", ContainerPort: 18789, Protocol: corev1.ProtocolTCP,
 		}},
-		EnvFrom:      gatewayEnvFrom(gw, tokenSecretName),
+		EnvFrom:      gatewayEnvFrom(gw, tokenSecretName, mcpExtraSecrets),
 		VolumeMounts: gatewayVolumeMounts(gw, attachedKBs),
 	}}
 	// codex-auth-sync sidecar: propagates Vault → Secret → emptyDir

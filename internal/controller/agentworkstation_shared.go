@@ -15,7 +15,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -546,35 +545,37 @@ func truncate(s string, n int) string {
 }
 
 // reconcileMCPServers handles spec.tools.mcpServers on a shared-runtime
-// AW. Added in v1.4.0 to wire agents to the Kuadrant MCP Gateway
-// (and any other MCP server) without ever exposing rotated credentials
-// to the agent itself. For each declared server:
+// AW. Added in v1.4.0; substantially refactored in v1.4.1 to fix a
+// race with the AgentGateway reconciler.
 //
-//  1. exec `openclaw mcp set <name> '<json>'` inside the gateway pod —
-//     idempotent (openclaw replaces by name; the pod auto-rolls on
-//     openclaw.json change).
+// Two responsibilities here:
 //
-//  2. for each EnvFromSecret declared on any server, ensure the gateway
-//     Deployment's openclaw container envFrom's that Secret, so any
-//     `${ENV_VAR}` references in the server's Headers resolve at
-//     openclaw startup.
+//  1. For each declared MCP server, exec `openclaw mcp set
+//     <name> '<json>'` inside the gateway pod. Idempotent — openclaw
+//     replaces by name. The pod auto-reloads on openclaw.json change.
 //
-//  3. patch the gateway Deployment's pod-template annotations with a
-//     stakater/Reloader trigger naming every EnvFromSecret, so the
-//     pod rolls whenever the Secret content changes. This is what
-//     covers the env-var-at-startup blindspot — openclaw reads env
-//     refs once at boot; without a rolling restart on Secret rotation,
-//     a rotated GitHub App installation token would never reach the
-//     in-process openclaw mcp client.
+//  2. If any server declares an EnvFromSecret, TOUCH the AgentGateway
+//     CR (annotation bump) so the AgentGateway reconciler runs
+//     immediately and picks up the new EnvFromSecret in its
+//     collectMCPEnvFromSecrets() pass — which is where the envFrom
+//     + Reloader annotation actually get applied to the Deployment.
 //
-// All three operations are idempotent. Errors are returned for the
-// caller to surface in status; the caller treats partial failure as
-// non-fatal (the agent itself is up regardless).
+// v1.4.0 tried to do step 2's work HERE (patch the Deployment
+// directly). That lost the race against the AG reconciler, which
+// owns the Deployment via SetControllerReference and rebuilds the
+// pod template from scratch every pass — wiping our patches. v1.4.1
+// moves the merge into the AG reconciler and uses this AW reconciler
+// only to nudge it.
 //
-// NOTE: removing an entry from spec.tools.mcpServers does NOT call
-// `openclaw mcp unset` today — the entry stays in openclaw.json
-// until manually removed. Adding the unset path requires tracking
-// "what we previously set"; deferred until first user request.
+// Errors are returned for the caller to surface in status; the
+// caller treats partial failure as non-fatal (the agent itself is
+// up regardless).
+//
+// Known limitation: removing an entry from spec.tools.mcpServers
+// does NOT call `openclaw mcp unset` — the entry stays in
+// openclaw.json until manually removed. Adding the unset path
+// requires tracking "what we previously set"; deferred until first
+// user request.
 func (r *AgentWorkstationReconciler) reconcileMCPServers(
 	ctx context.Context,
 	aw *agentofficev1alpha1.AgentWorkstation,
@@ -612,88 +613,33 @@ func (r *AgentWorkstationReconciler) reconcileMCPServers(
 			"url", srv.URL, "type", mcpType)
 	}
 
-	// Step 2 + 3: collect EnvFromSecret names, patch the gateway
-	// Deployment with envFrom + Reloader annotation.
-	wantSecrets := map[string]struct{}{}
+	// Step 2: any EnvFromSecret declared? Touch the AgentGateway so
+	// its reconciler runs and re-builds the Deployment with the new
+	// secrets in envFrom + Reloader annotation. Watches on
+	// AgentWorkstation also trigger this, but the explicit touch
+	// guarantees promptness for users testing manually.
+	hasEnvFromSecret := false
 	for _, srv := range aw.Spec.Tools.MCPServers {
 		if srv.EnvFromSecret != "" {
-			wantSecrets[srv.EnvFromSecret] = struct{}{}
+			hasEnvFromSecret = true
+			break
 		}
 	}
-	if len(wantSecrets) == 0 {
+	if !hasEnvFromSecret {
 		return nil
 	}
-
-	var dep appsv1.Deployment
-	if err := r.Get(ctx, client.ObjectKey{Namespace: gw.Namespace, Name: gw.Name}, &dep); err != nil {
-		return fmt.Errorf("get gateway deployment %s/%s: %w",
-			gw.Namespace, gw.Name, err)
+	if gw.Annotations == nil {
+		gw.Annotations = map[string]string{}
 	}
-	changed := false
-
-	// Reloader annotation: merge with any existing value so multiple
-	// AWs sharing the same gateway accumulate their secrets.
-	const reloaderKey = "secret.reloader.stakater.com/reload"
-	if dep.Spec.Template.Annotations == nil {
-		dep.Spec.Template.Annotations = map[string]string{}
-	}
-	existing := map[string]struct{}{}
-	if v := dep.Spec.Template.Annotations[reloaderKey]; v != "" {
-		for _, s := range strings.Split(v, ",") {
-			s = strings.TrimSpace(s)
-			if s != "" {
-				existing[s] = struct{}{}
-			}
-		}
-	}
-	for s := range wantSecrets {
-		existing[s] = struct{}{}
-	}
-	names := make([]string, 0, len(existing))
-	for s := range existing {
-		names = append(names, s)
-	}
-	sort.Strings(names)
-	desiredAnnot := strings.Join(names, ",")
-	if dep.Spec.Template.Annotations[reloaderKey] != desiredAnnot {
-		dep.Spec.Template.Annotations[reloaderKey] = desiredAnnot
-		changed = true
-	}
-
-	// envFrom: ensure each wanted Secret is on the openclaw container.
-	for i := range dep.Spec.Template.Spec.Containers {
-		c := &dep.Spec.Template.Spec.Containers[i]
-		if c.Name != gatewayContainerName { // "openclaw"
-			continue
-		}
-		for s := range wantSecrets {
-			already := false
-			for _, ef := range c.EnvFrom {
-				if ef.SecretRef != nil && ef.SecretRef.Name == s {
-					already = true
-					break
-				}
-			}
-			if !already {
-				c.EnvFrom = append(c.EnvFrom, corev1.EnvFromSource{
-					SecretRef: &corev1.SecretEnvSource{
-						LocalObjectReference: corev1.LocalObjectReference{Name: s},
-					},
-				})
-				changed = true
-			}
-		}
-	}
-
-	if changed {
-		if err := r.Update(ctx, &dep); err != nil {
-			return fmt.Errorf("update gateway deployment %s/%s: %w",
+	desired := fmt.Sprintf("%d", time.Now().Unix())
+	if gw.Annotations["agentoffice.ai/mcp-secrets-touch"] != desired {
+		gw.Annotations["agentoffice.ai/mcp-secrets-touch"] = desired
+		if err := r.Update(ctx, gw); err != nil {
+			return fmt.Errorf("touch gateway %s/%s for mcp reconcile: %w",
 				gw.Namespace, gw.Name, err)
 		}
-		log.Info("patched gateway deployment for mcp env",
-			"deployment", dep.Name,
-			"secrets", names,
-			"agent", aw.Name)
+		log.Info("touched gateway for mcp envFrom reconcile",
+			"gateway", gw.Name, "agent", aw.Name)
 	}
 	return nil
 }

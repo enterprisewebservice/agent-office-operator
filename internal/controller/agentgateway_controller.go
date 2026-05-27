@@ -511,6 +511,24 @@ func (r *AgentGatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		}}}
 	}
 
+	// v1.4.1: when an AgentWorkstation with spec.tools.mcpServers
+	// targeting this gateway changes, re-reconcile so
+	// collectMCPEnvFromSecrets() picks up new/removed Secret refs
+	// and the Deployment's envFrom + Reloader annotation stay in
+	// sync with the union of AWs targeting this gateway.
+	mapAW := func(ctx context.Context, obj client.Object) []reconcile.Request {
+		aw, ok := obj.(*agentofficev1alpha1.AgentWorkstation)
+		if !ok || aw.Spec.Runtime == nil || aw.Spec.Runtime.Shared == nil {
+			return nil
+		}
+		if aw.Spec.Runtime.Shared.GatewayRef == "" {
+			return nil
+		}
+		return []reconcile.Request{{NamespacedName: types.NamespacedName{
+			Namespace: aw.Namespace, Name: aw.Spec.Runtime.Shared.GatewayRef,
+		}}}
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&agentofficev1alpha1.AgentGateway{}).
 		Owns(&appsv1.Deployment{}).
@@ -519,6 +537,7 @@ func (r *AgentGatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Secret{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Watches(&agentofficev1alpha1.KnowledgeBase{}, handler.EnqueueRequestsFromMapFunc(mapKB)).
+		Watches(&agentofficev1alpha1.AgentWorkstation{}, handler.EnqueueRequestsFromMapFunc(mapAW)).
 		Named("agentgateway").
 		Complete(r)
 }
