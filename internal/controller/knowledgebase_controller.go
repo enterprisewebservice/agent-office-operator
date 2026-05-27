@@ -146,7 +146,13 @@ func (r *KnowledgeBaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	//     was retired — the App is the single auth identity.
 	//     The Secret still exists, but it's now operator-managed
 	//     storage of a short-lived App-minted token.
-	if kb.Spec.GitMirror.URL != "" && kb.Spec.GitMirror.CredentialsSecretRef != "" {
+	// v1.5.1: nil-guard. KBs may legitimately omit spec.gitMirror
+	// (PVC-only KBs that don't sync to a remote git repo — e.g., the
+	// agent-platform-capabilities KB whose content is curated in-cluster).
+	// Pre-v1.5.1 every KB CR shipped with gitMirror, so this dereference
+	// never panicked in practice; once v1.5.0 invited PVC-only KBs the
+	// latent bug surfaced.
+	if kb.Spec.GitMirror != nil && kb.Spec.GitMirror.URL != "" && kb.Spec.GitMirror.CredentialsSecretRef != "" {
 		if err := r.refreshWikiCredentialsSecret(ctx, &kb); err != nil {
 			log.Info("wiki credentials refresh failed; git-sync may report auth errors until next reconcile",
 				"secret", kb.Spec.GitMirror.CredentialsSecretRef, "err", err.Error())
