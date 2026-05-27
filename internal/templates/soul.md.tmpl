@@ -5,6 +5,10 @@ name: {{.DisplayName}} Soul
 # Core Directive
 
 {{.SystemPrompt}}
+{{- if .SystemPromptAddons}}
+
+{{.SystemPromptAddons}}
+{{- end}}
 
 # Values
 

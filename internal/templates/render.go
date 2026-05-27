@@ -39,9 +39,10 @@ type OpenClawConfigData struct {
 
 // AgentsMdData holds data for rendering AGENTS.md.
 type AgentsMdData struct {
-	Name         string
-	DisplayName  string
-	SystemPrompt string
+	Name               string
+	DisplayName        string
+	SystemPrompt       string
+	SystemPromptAddons string
 }
 
 // IdentityMdData holds data for rendering IDENTITY.md.
@@ -52,8 +53,9 @@ type IdentityMdData struct {
 
 // SoulMdData holds data for rendering SOUL.md.
 type SoulMdData struct {
-	DisplayName  string
-	SystemPrompt string
+	DisplayName        string
+	SystemPrompt       string
+	SystemPromptAddons string
 }
 
 // ToolsMdData holds data for rendering TOOLS.md.
@@ -140,9 +142,10 @@ func RenderOpenClawConfig(aw *agentofficev1alpha1.AgentWorkstation, gatewayToken
 // spec. Each is a pure function so reconcile is deterministic.
 func RenderAgentsMd(aw *agentofficev1alpha1.AgentWorkstation) (string, error) {
 	return renderTemplate("agents.md.tmpl", AgentsMdData{
-		Name:         aw.Name,
-		DisplayName:  aw.Spec.DisplayName,
-		SystemPrompt: aw.Spec.SystemPrompt,
+		Name:               aw.Name,
+		DisplayName:        aw.Spec.DisplayName,
+		SystemPrompt:       aw.Spec.SystemPrompt,
+		SystemPromptAddons: aw.Spec.SystemPromptAddons,
 	})
 }
 
@@ -155,8 +158,9 @@ func RenderIdentityMd(aw *agentofficev1alpha1.AgentWorkstation) (string, error) 
 
 func RenderSoulMd(aw *agentofficev1alpha1.AgentWorkstation) (string, error) {
 	return renderTemplate("soul.md.tmpl", SoulMdData{
-		DisplayName:  aw.Spec.DisplayName,
-		SystemPrompt: aw.Spec.SystemPrompt,
+		DisplayName:        aw.Spec.DisplayName,
+		SystemPrompt:       aw.Spec.SystemPrompt,
+		SystemPromptAddons: aw.Spec.SystemPromptAddons,
 	})
 }
 

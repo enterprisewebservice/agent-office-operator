@@ -5,3 +5,7 @@ name: {{.Name}}
 # {{.DisplayName}}
 
 {{.SystemPrompt}}
+{{- if .SystemPromptAddons}}
+
+{{.SystemPromptAddons}}
+{{- end}}

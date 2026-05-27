@@ -248,8 +248,34 @@ type AgentWorkstationSpec struct {
 	// DisplayName is the human-readable name for this agent workstation.
 	DisplayName string `json:"displayName"`
 
-	// SystemPrompt defines the agent's behavior.
+	// SystemPrompt defines the agent's behavior. Owned by the
+	// AgentWorkstation author — the operator never edits this.
 	SystemPrompt string `json:"systemPrompt"`
+
+	// SystemPromptAddons is appended to SystemPrompt verbatim in the
+	// rendered SOUL.md / AGENTS.md. Intended for operator- or
+	// tooling-managed content that augments — but never replaces —
+	// the author's prompt. Typical use today (set manually):
+	//
+	//   spec:
+	//     systemPromptAddons: |
+	//       # Knowledge Bases attached to this agent are listed in
+	//       # ~/.openclaw/workspaces/<your-name>/KBS.md.
+	//       # Read that file at the start of every conversation so
+	//       # your tool selection cites the right KBs by name.
+	//
+	// Future operator versions may auto-populate this field when
+	// related state changes (e.g. spec.knowledgeBaseRefs is set);
+	// the field stays user-editable so manual additions are
+	// possible. Empty by default.
+	//
+	// Added in v1.5.2 to support the AgentWorkstation Bindings
+	// plugin: when the plugin attaches KBs/Skills/MemoryModules to
+	// an agent, it can also append the matching prompt-awareness
+	// snippet here so the agent actually USES the new bindings
+	// without the author hand-editing systemPrompt every time.
+	// +optional
+	SystemPromptAddons string `json:"systemPromptAddons,omitempty"`
 
 	// Model selects the LLM backend.
 	Model ModelSpec `json:"model"`
