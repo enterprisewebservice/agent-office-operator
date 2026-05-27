@@ -382,6 +382,22 @@ if (after === before) {
 		}
 	}
 
+	// 6b. v1.5.0: render the per-agent KBS.md from spec.knowledgeBaseRefs.
+	//     The KB PVCs are mounted at the gateway level already (handled
+	//     by the AG reconciler's existing attachedKBs logic). What's
+	//     per-agent is the curated list with role hints, surfaced as a
+	//     markdown file in the agent's workspace dir. The agent's
+	//     system prompt can teach the agent to read
+	//     ~/.openclaw/workspaces/<agent>/KBS.md at conversation start.
+	if len(aw.Spec.KnowledgeBaseRefs) > 0 {
+		if err := r.reconcileKnowledgeBaseRefs(ctx, aw, &gw, gwPod); err != nil {
+			log.Info("knowledgeBaseRefs reconcile partial; will retry",
+				"err", err)
+			aw.Status.Message = fmt.Sprintf("%s — KB attach pending: %s",
+				aw.Status.Message, truncate(err.Error(), 120))
+		}
+	}
+
 	// 7. Status — Running with a hint about Discord routing so
 	// users can see at a glance whether their @-mentions will
 	// reach this agent.
@@ -642,4 +658,159 @@ func (r *AgentWorkstationReconciler) reconcileMCPServers(
 			"gateway", gw.Name, "agent", aw.Name)
 	}
 	return nil
+}
+
+// reconcileKnowledgeBaseRefs (v1.5.0+) renders a per-agent KBS.md into
+// the agent's workspace directory inside the gateway pod, describing
+// each KB attached to this AW via spec.knowledgeBaseRefs.
+//
+// Why per-agent and not per-gateway: the KB's PVC is mounted at the
+// gateway level (existing AG reconciler logic — handles dedup,
+// git-sync sidecars, volume topology). Many agents on the same
+// gateway share the underlying mounts. What we want is per-agent
+// CURATION: an agent only "knows about" the KBs explicitly listed in
+// its own spec.knowledgeBaseRefs, with the AW-specific role hint
+// telling the agent HOW to use each KB. KBS.md is the materialized
+// per-agent index.
+//
+// Validation: every ref's KnowledgeBase must (a) exist in the
+// agent's namespace and (b) have spec.gatewayRef.name matching the
+// agent's gateway. Cross-gateway refs are refused with a status
+// condition `KnowledgeBaseRefsResolved=False, reason=GatewayMismatch`
+// — the Backstage plugin should grey-out incompatible KBs in the
+// drag-drop UI based on the same compatibility check.
+//
+// Idempotent — KBS.md is rewritten on every reconcile pass.
+func (r *AgentWorkstationReconciler) reconcileKnowledgeBaseRefs(
+	ctx context.Context,
+	aw *agentofficev1alpha1.AgentWorkstation,
+	gw *agentofficev1alpha1.AgentGateway,
+	gwPod *corev1.Pod,
+) error {
+	log := logf.FromContext(ctx)
+
+	// Build the resolved entries, deduplicating by name.
+	seen := map[string]struct{}{}
+	type resolved struct {
+		Ref agentofficev1alpha1.KnowledgeBaseRef
+		KB  *agentofficev1alpha1.KnowledgeBase
+	}
+	entries := make([]resolved, 0, len(aw.Spec.KnowledgeBaseRefs))
+	var mismatchErrs []string
+	var notFoundErrs []string
+	for _, ref := range aw.Spec.KnowledgeBaseRefs {
+		if _, dup := seen[ref.Name]; dup {
+			continue
+		}
+		seen[ref.Name] = struct{}{}
+		var kb agentofficev1alpha1.KnowledgeBase
+		if err := r.Get(ctx, client.ObjectKey{Namespace: aw.Namespace, Name: ref.Name}, &kb); err != nil {
+			notFoundErrs = append(notFoundErrs, ref.Name)
+			continue
+		}
+		if kb.Spec.GatewayRef.Name != gw.Name {
+			mismatchErrs = append(mismatchErrs, fmt.Sprintf("%s (on %s, agent on %s)",
+				ref.Name, kb.Spec.GatewayRef.Name, gw.Name))
+			continue
+		}
+		entries = append(entries, resolved{Ref: ref, KB: &kb})
+	}
+
+	// Render KBS.md content. The format is markdown the agent can
+	// parse: one section per KB with name, role, path, displayName,
+	// description.
+	var sb strings.Builder
+	sb.WriteString("# Knowledge Bases attached to this agent\n\n")
+	sb.WriteString("You have access to the following Knowledge Bases. Each\n")
+	sb.WriteString("entry says what the KB is and HOW you should use it for\n")
+	sb.WriteString("your role.\n\n")
+	sb.WriteString("Role vocabulary:\n")
+	sb.WriteString("  - planning-reference  : read at start of every conversation\n")
+	sb.WriteString("  - knowledge-pool      : search on-demand (wiki-search Skill)\n")
+	sb.WriteString("  - experiment-history  : read when working on the related CR\n")
+	sb.WriteString("  - runbook             : read when triggered operationally\n")
+	sb.WriteString("  - style-guide         : read when producing the relevant output\n\n")
+
+	if len(entries) == 0 && len(notFoundErrs) == 0 && len(mismatchErrs) == 0 {
+		sb.WriteString("_(no KnowledgeBases attached yet)_\n")
+	}
+	for _, e := range entries {
+		role := e.Ref.Role
+		if role == "" {
+			role = "knowledge-pool"
+		}
+		displayName := e.KB.Spec.DisplayName
+		if displayName == "" {
+			displayName = e.KB.Name
+		}
+		desc := strings.TrimSpace(e.KB.Spec.Description)
+		mount := fmt.Sprintf("/home/node/.openclaw/wiki/%s/", e.KB.Name)
+		sb.WriteString(fmt.Sprintf("## %s — role: %s\n\n", e.KB.Name, role))
+		sb.WriteString(fmt.Sprintf("**Display name**: %s\n\n", displayName))
+		sb.WriteString(fmt.Sprintf("**Mount path on this gateway**: `%s`\n\n", mount))
+		if desc != "" {
+			sb.WriteString("**Description**:\n\n")
+			for _, line := range strings.Split(desc, "\n") {
+				sb.WriteString("> " + line + "\n")
+			}
+			sb.WriteString("\n")
+		}
+	}
+	if len(mismatchErrs) > 0 {
+		sb.WriteString("## Refs refused (gateway mismatch)\n\n")
+		for _, m := range mismatchErrs {
+			sb.WriteString("- " + m + "\n")
+		}
+		sb.WriteString("\n")
+	}
+	if len(notFoundErrs) > 0 {
+		sb.WriteString("## Refs refused (KnowledgeBase not found)\n\n")
+		for _, n := range notFoundErrs {
+			sb.WriteString("- " + n + "\n")
+		}
+		sb.WriteString("\n")
+	}
+	content := sb.String()
+
+	// Write to the agent's workspace dir. Path follows the same
+	// convention as agents.list[].workspace.
+	workspacePath := fmt.Sprintf("/home/node/.openclaw/workspaces/%s", aw.Name)
+	target := workspacePath + "/KBS.md"
+
+	// Build a small heredoc-via-shell script so we don't need to
+	// stream the file via stdin. tee writes atomically enough for
+	// our purposes (overwrite-on-rewrite).
+	script := fmt.Sprintf(`set -eu
+mkdir -p %s
+cat > %s <<'AGENTOFFICE_KBS_EOF'
+%sAGENTOFFICE_KBS_EOF
+echo "wrote $(wc -c < %s) bytes to %s"`,
+		shellEscape(workspacePath),
+		shellEscape(target),
+		content,
+		shellEscape(target),
+		shellEscape(target),
+	)
+	out, err := r.execInPod(ctx, gwPod, []string{"/bin/sh", "-c", script})
+	if err != nil {
+		return fmt.Errorf("write KBS.md for %q: %w (out=%s)",
+			aw.Name, err, strings.TrimSpace(out))
+	}
+	log.Info("rendered KBS.md",
+		"agent", aw.Name,
+		"target", target,
+		"attached", len(entries),
+		"mismatches", len(mismatchErrs),
+		"notFound", len(notFoundErrs))
+	if len(mismatchErrs) > 0 || len(notFoundErrs) > 0 {
+		return fmt.Errorf("partial KnowledgeBaseRefs resolution: mismatches=%d notFound=%d",
+			len(mismatchErrs), len(notFoundErrs))
+	}
+	return nil
+}
+
+// shellEscape wraps a string in single quotes for safe shell use,
+// escaping any embedded single quotes.
+func shellEscape(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

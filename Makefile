@@ -11,7 +11,7 @@
 # embedded olm.bundle.object content (which is what OLM reads when
 # computing channel heads). Keep in sync with the image tag in
 # .tekton/operator-image-on-push.yaml etc.
-VERSION ?= 1.4.1
+VERSION ?= 1.5.0
 
 # CHANNELS define the bundle channels used in the bundle.
 # Add a new line here if you would like to change its default config. (E.g CHANNELS = "candidate,fast,stable")

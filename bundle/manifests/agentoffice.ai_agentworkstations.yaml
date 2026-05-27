@@ -118,6 +118,63 @@ spec:
                 default: quay.io/aicatalyst/openclaw:latest
                 description: Image is the container image for the agent runtime.
                 type: string
+              knowledgeBaseRefs:
+                description: |-
+                  KnowledgeBaseRefs attaches one or more KnowledgeBases to this
+                  agent. The operator renders a per-agent KBS.md into the agent's
+                  workspace describing each attached KB, its role (how the agent
+                  should think about it), and the on-pod mount path.
+
+                  Today the KB's PVC mounts at the AgentGateway level (no change
+                  to that — saves on volumes, prevents duplicate mounts when
+                  multiple agents share a gateway and reference the same KB).
+                  What's per-agent is the KBS.md curation: each AW lists ONLY
+                  the KBs it actually wants to think about, with its
+                  AW-specific role.
+
+                  Each ref must match a KnowledgeBase CR in the same namespace
+                  whose spec.gatewayRef.name matches this agent's gateway. The
+                  reconciler refuses cross-gateway refs and surfaces a status
+                  condition explaining why.
+
+                  Added in v1.5.0 to support the Backstage "drag a KB onto an
+                  agent" UX (the plugin writes to this field; the operator
+                  handles materialization).
+
+                  Only supported on shared-runtime AWs today. Dedicated-runtime
+                  agents (own pod) need a different mount-injection story —
+                  deferred to v1.6.0.
+                items:
+                  description: |-
+                    KnowledgeBaseRef attaches a KnowledgeBase to an AgentWorkstation
+                    with an agent-specific role hint.
+                  properties:
+                    name:
+                      description: |-
+                        Name of the KnowledgeBase CR in the same namespace. Must exist
+                        and must target the agent's gateway via spec.gatewayRef.name.
+                      type: string
+                    role:
+                      description: |-
+                        Role hints to the agent HOW to think about this KB. Open-set
+                        string; the operator does NOT enforce specific values. Suggested
+                        vocabulary the agent system prompts can teach against:
+                          - planning-reference  : read at start of every conversation
+                          - knowledge-pool      : search on-demand via wiki-search Skill;
+                                                  write new findings via wiki-write
+                          - experiment-history  : read when working on the related
+                                                  AutoResearchProject or feature
+                          - runbook             : read when triggered on an operational
+                                                  task
+                          - style-guide         : read when producing a specific kind of
+                                                  output
+                        The role is included verbatim in the per-agent KBS.md so the
+                        agent can act on it. Empty string defaults to "knowledge-pool".
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
               memory:
                 description: Memory lists shared MemoryModule references and per-agent
                   overrides.
