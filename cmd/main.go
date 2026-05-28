@@ -332,6 +332,16 @@ func main() {
 		// table.
 		binders := controller.NewBindersHandler(mgr.GetClient())
 		mux.Handle("/binders/", binders)
+		// v1.6.0: /catalog/... — runtime skill-discovery endpoints
+		// consumed by (a) the binders plugin's catalog-browse UI
+		// and (b) the upcoming MCP discovery server's skill_discover
+		// and skill_load tools. Returns the metadata-only listing
+		// at /catalog/skills and the full SKILL.md body at
+		// /catalog/skills/<name>. See
+		// internal/controller/catalog_skills.go for the route table.
+		catalogSkills := controller.NewCatalogSkillsHandler(mgr.GetClient())
+		mux.Handle("/catalog/skills", catalogSkills)
+		mux.Handle("/catalog/skills/", catalogSkills)
 		mux.HandleFunc("/healthz/backstage", func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte("ok"))
 		})
