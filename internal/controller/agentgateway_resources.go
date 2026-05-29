@@ -191,6 +191,15 @@ func gatewayVolumeMounts(gw *agentofficev1alpha1.AgentGateway, attachedKBs []age
 			MountPath: kbMountPath(kb.Name),
 		})
 	}
+	// Skill catalog image volume, read-only. Mounted UNDER the
+	// workspace mount (/home/node/.openclaw) at a dedicated subpath;
+	// the deeper mount wins for that subtree. The AW seed step copies
+	// skill folders out of here into each per-agent workspace skills/.
+	mounts = append(mounts, corev1.VolumeMount{
+		Name:      skillsCatalogVolName,
+		MountPath: skillsCatalogMountPath,
+		ReadOnly:  true,
+	})
 	return mounts
 }
 
@@ -199,6 +208,22 @@ func gatewayVolumeMounts(gw *agentofficev1alpha1.AgentGateway, attachedKBs []age
 // are configured, also project the secret's auth.json key. When
 // `attachedKBs` is non-empty, each KB's PVC is added as a volume
 // (paired with the matching mount in gatewayVolumeMounts).
+// defaultSkillsImage is the OCI image holding the SKILL.md skill
+// catalog (built from skills-image/ in the agent-office repo via
+// Konflux). Mounted into the gateway pod as a Kubernetes image
+// volume at skillsCatalogMountPath, then the AgentWorkstation seed
+// step copies skill folders from it into each agent's workspace —
+// the Red Hat skill-distribution pattern (cf. openshift/agentic-skills:
+// SKILL.md folders in a plain image, consumed via image volume).
+//
+// Bump the tag here + re-release the operator to roll a new skill
+// catalog (incl. bundled scripts/references) into agents.
+const (
+	defaultSkillsImage     = "quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-skills:v0.0.1"
+	skillsCatalogMountPath = "/home/node/.openclaw/skills-catalog"
+	skillsCatalogVolName   = "skills-catalog"
+)
+
 func gatewayVolumes(gw *agentofficev1alpha1.AgentGateway, dshmSize resource.Quantity, attachedKBs []agentofficev1alpha1.KnowledgeBase) []corev1.Volume {
 	vols := []corev1.Volume{
 		{Name: "config", VolumeSource: corev1.VolumeSource{
@@ -260,6 +285,20 @@ func gatewayVolumes(gw *agentofficev1alpha1.AgentGateway, dshmSize resource.Quan
 			vols = append(vols, gitSyncVolume(kb))
 		}
 	}
+	// Skill catalog image volume (read-only). The kubelet pulls the
+	// skills image and exposes its filesystem here; the AW seed step
+	// copies skill folders from skillsCatalogMountPath into each
+	// agent's per-workspace skills/ dir. Requires the ImageVolume
+	// feature gate (GA on OCP 4.20+; verified enabled on this cluster).
+	vols = append(vols, corev1.Volume{
+		Name: skillsCatalogVolName,
+		VolumeSource: corev1.VolumeSource{
+			Image: &corev1.ImageVolumeSource{
+				Reference:  defaultSkillsImage,
+				PullPolicy: corev1.PullIfNotPresent,
+			},
+		},
+	})
 	return vols
 }
 

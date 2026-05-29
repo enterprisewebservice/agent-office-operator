@@ -195,8 +195,7 @@ func (r *AgentWorkstationReconciler) reconcileSharedFull(ctx context.Context, aw
 	// for `wiki-search` / `wiki-write` skill operations.
 	wikiMd, _ := r.renderWikiMd(ctx, aw, gwRef)
 
-	// Build the file map. Order: SOUL/IDENTITY first, WIKI next,
-	// then skills.
+	// Non-skill workspace files (always written from spec).
 	writes := map[string]string{
 		"IDENTITY.md": identityMd,
 		"SOUL.md":     soulMd,
@@ -204,20 +203,22 @@ func (r *AgentWorkstationReconciler) reconcileSharedFull(ctx context.Context, aw
 	if wikiMd != "" {
 		writes["WIKI.md"] = wikiMd
 	}
-	// Folder-per-skill: each granted skill renders at
-	// skills/<name>/SKILL.md. keepSkillDirs is the set of skill
-	// folder names this AW should currently have (used by the
-	// seed script to garbage-collect revoked skills).
+	// Skills (v1.6.1): the SOURCE OF TRUTH is the skills-catalog image
+	// volume mounted at skillsCatalogMountPath on the gateway pod. The
+	// seed copies whole skill folders out of it — so bundled
+	// scripts/references/assets ride along, which inline rendering
+	// couldn't carry. inlineSkillWrites is the FALLBACK used only when
+	// the image volume isn't present (old pod mid-rollout, or the
+	// mount failed) so we never strand an agent with no skills.
+	inlineSkillWrites := map[string]string{}
 	keepSkillDirs := map[string]struct{}{}
 	for _, rs := range resolvedSkills {
-		// Path is relative to the workspace dir; the seed script
-		// does mkdir -p on the parent before writing.
-		fname := fmt.Sprintf("skills/%s/SKILL.md", rs.Skill.Name)
-		writes[fname] = rs.Rendered
+		inlineSkillWrites[fmt.Sprintf("skills/%s/SKILL.md", rs.Skill.Name)] = rs.Rendered
 		keepSkillDirs[rs.Skill.Name] = struct{}{}
 	}
 
 	writesJSON, _ := json.Marshal(writes)
+	inlineSkillJSON, _ := json.Marshal(inlineSkillWrites)
 	keepJSON, _ := json.Marshal(keepSkillDirs)
 
 	seedScript := fmt.Sprintf(`
@@ -225,38 +226,65 @@ const fs = require("fs"); const path = require("path");
 const dir = "/home/node/.openclaw/workspaces/" + %[1]q;
 fs.mkdirSync(dir, { recursive: true });
 const writes = %[2]s;
-const keepSkillDirs = %[3]s;
+const inlineSkillWrites = %[3]s;
+const keepSkillDirs = %[4]s;
+const catalogDir = %[5]q;
+
+// 1. Non-skill files (IDENTITY/SOUL/WIKI) — write-if-changed.
 let touched = 0;
 for (const [f, content] of Object.entries(writes)) {
   const p = path.join(dir, f);
-  // Ensure parent directory exists — for folder-per-skill the
-  // path is skills/<name>/SKILL.md, so we need mkdir -p on
-  // dir/skills/<name> before the writeFileSync.
   fs.mkdirSync(path.dirname(p), { recursive: true });
-  let cur = "";
-  try { cur = fs.readFileSync(p, "utf8"); } catch (e) {}
+  let cur = ""; try { cur = fs.readFileSync(p, "utf8"); } catch (e) {}
   if (cur !== content) { fs.writeFileSync(p, content); touched++; }
 }
 
-// GC #1: revoked skills. Walk dir/skills/ and remove any subfolder
-// whose name isn't in keepSkillDirs. Safe to call when the dir
-// doesn't exist yet (no skills bound) — readdirSync throws ENOENT
-// which we swallow.
-let gcd = 0;
+// 2. Skills. Prefer the mounted catalog image (full folders, incl.
+//    bundled resources). Fall back to inline SKILL.md only if the
+//    mount isn't present yet.
 const skillsRoot = path.join(dir, "skills");
+let keep = {};
+let skillSrc = "none";
+let catalogNames = [];
+try {
+  catalogNames = fs.readdirSync(catalogDir).filter(n => {
+    try { return fs.statSync(path.join(catalogDir, n)).isDirectory(); }
+    catch (e) { return false; }
+  });
+} catch (e) {}
+
+if (catalogNames.length > 0) {
+  skillSrc = "image";
+  fs.mkdirSync(skillsRoot, { recursive: true });
+  for (const name of catalogNames) {
+    // cpSync(recursive) brings SKILL.md + scripts/ + references/ etc.
+    fs.cpSync(path.join(catalogDir, name), path.join(skillsRoot, name),
+      { recursive: true, force: true });
+    keep[name] = true;
+    touched++;
+  }
+} else {
+  skillSrc = "inline-fallback";
+  for (const [f, content] of Object.entries(inlineSkillWrites)) {
+    const p = path.join(dir, f);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    let cur = ""; try { cur = fs.readFileSync(p, "utf8"); } catch (e) {}
+    if (cur !== content) { fs.writeFileSync(p, content); touched++; }
+  }
+  keep = keepSkillDirs;
+}
+
+// GC #1: remove workspace skill folders not in the current source set.
+let gcd = 0;
 try {
   for (const name of fs.readdirSync(skillsRoot)) {
-    if (Object.prototype.hasOwnProperty.call(keepSkillDirs, name)) continue;
+    if (Object.prototype.hasOwnProperty.call(keep, name)) continue;
     fs.rmSync(path.join(skillsRoot, name), { recursive: true, force: true });
     gcd++;
   }
 } catch (e) {}
 
-// GC #2: legacy SKILL_<name>.md files left in the workspace root by
-// pre-v1.6.0 reconciles. One-time cleanup so existing agents migrate
-// to the folder layout without manual intervention. Cheap to run
-// every reconcile — readdir on dir is fast and the prefix check
-// short-circuits.
+// GC #2: legacy SKILL_<name>.md flat files from pre-v1.6.0 reconciles.
 let legacyGcd = 0;
 try {
   for (const f of fs.readdirSync(dir)) {
@@ -269,9 +297,11 @@ try {
 
 console.log("SEEDED dir=" + dir +
   " touched=" + touched +
+  " skillSrc=" + skillSrc +
+  " skills=" + Object.keys(keep).length +
   " gcd=" + gcd +
   " legacy_gcd=" + legacyGcd);
-`, agentID, string(writesJSON), string(keepJSON))
+`, agentID, string(writesJSON), string(inlineSkillJSON), string(keepJSON), skillsCatalogMountPath)
 
 	if _, err := r.execInPod(ctx, gwPod, []string{"node", "-e", seedScript}); err != nil {
 		return ctrl.Result{}, fmt.Errorf("seed agent workspace: %w", err)
