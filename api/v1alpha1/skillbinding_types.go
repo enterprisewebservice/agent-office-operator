@@ -163,14 +163,39 @@ type SkillBindingStatus struct {
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
 // SkillBinding grants a Skill to one or more AgentWorkstations,
-// RBAC-style. The AW does not list its skills inline — instead,
-// the AgentWorkstation reconciler queries the SkillBindings in
-// its namespace at reconcile time to discover what skills apply.
+// RBAC-style.
 //
-// This decouples skill *authorship* (who writes the Skill CR)
-// from skill *grants* (who decides which agents get it). Useful
-// for platform setups where a security/platform team curates
-// skills and a separate team authors agents.
+// DEPRECATED (v1.6.0): SkillBinding is no longer the mechanism that
+// delivers skills to agents. As of v1.6.0 the AgentWorkstation
+// reconciler renders the FULL local skill catalog into every agent's
+// workspace (folder layout: skills/<name>/SKILL.md) and the agent's
+// runtime decides which skills to use at runtime via progressive
+// disclosure (the Anthropic Skills Open Standard pattern: scan
+// frontmatter for metadata, load body only on trigger).
+//
+// SkillBinding is kept for backward compatibility:
+//   - The SkillBinding controller still reconciles existing bindings
+//     and maintains their status fields (appliedTo, resolvedSkillVersion,
+//     conflicts).
+//   - AWs authored before v1.6.0 keep working — they just see MORE
+//     skills than they used to (every catalog entry, not just the
+//     bound ones).
+//
+// Likely future role (post-v1.6): SkillBinding may be repurposed to
+// mark "always-on essentials" — a small per-agent subset of skills
+// the agent should reference by name in its system prompt regardless
+// of runtime discovery. That use is additive, not the old binding
+// semantics.
+//
+// Historical context (pre-v1.6.0): the AW did not list its skills
+// inline; the AgentWorkstation reconciler queried SkillBindings in
+// its namespace at reconcile time to discover what skills apply.
+// This decoupled skill authorship (who writes the Skill CR) from
+// skill grants (who decides which agents get it). The discovery
+// model in v1.6.0 makes that decoupling moot — every agent sees
+// every Skill in the catalog by default — but the same decoupling
+// can be reinstated by narrowing the catalog (which Skill CRs exist
+// in the namespace).
 type SkillBinding struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
