@@ -157,10 +157,21 @@ func (r *AgentWorkstationReconciler) reconcileSharedFull(ctx context.Context, aw
 
 	// Resolve skills granted to this AW via SkillBindings. We
 	// always render IDENTITY.md / SOUL.md; we render at most one
-	// SKILL_<name>.md per granted skill (Anthropic Skills Open
-	// Standard filename pattern). Skill files NOT in the granted
-	// set are deleted on each reconcile so revoking a binding
-	// removes the skill from the agent's workspace cleanly.
+	// skills/<name>/SKILL.md per granted skill (the Anthropic Skills
+	// Open Standard folder layout, as adopted by Claude Code,
+	// Claude.ai, Claude Agent SDK, and the wider ecosystem). The
+	// legacy flat-file SKILL_<name>.md form is also garbage-collected
+	// from the workspace root on every reconcile so older agents
+	// migrate cleanly.
+	//
+	// Folder-per-skill earns its keep two ways:
+	//   1) Bundled scripts/references/assets that real Anthropic
+	//      Skills carry have a natural home (skills/<name>/scripts/
+	//      etc.) — the flat-file layout couldn't represent them.
+	//   2) Runtimes that support Anthropic-native progressive
+	//      disclosure (scan dir + read frontmatter only at session
+	//      start; lazy-load body on trigger) find the files in the
+	//      shape they expect — no rework when OpenClaw catches up.
 	resolvedSkills, skillResolveErr := r.listAppliedSkills(ctx, aw)
 	if skillResolveErr != nil {
 		log.Info("skill resolution failed; proceeding without skills",
@@ -185,40 +196,73 @@ func (r *AgentWorkstationReconciler) reconcileSharedFull(ctx context.Context, aw
 	if wikiMd != "" {
 		writes["WIKI.md"] = wikiMd
 	}
-	keepSkillFiles := map[string]struct{}{}
+	// Folder-per-skill: each granted skill renders at
+	// skills/<name>/SKILL.md. keepSkillDirs is the set of skill
+	// folder names this AW should currently have (used by the
+	// seed script to garbage-collect revoked skills).
+	keepSkillDirs := map[string]struct{}{}
 	for _, rs := range resolvedSkills {
-		fname := fmt.Sprintf("SKILL_%s.md", rs.Skill.Name)
+		// Path is relative to the workspace dir; the seed script
+		// does mkdir -p on the parent before writing.
+		fname := fmt.Sprintf("skills/%s/SKILL.md", rs.Skill.Name)
 		writes[fname] = rs.Rendered
-		keepSkillFiles[fname] = struct{}{}
+		keepSkillDirs[rs.Skill.Name] = struct{}{}
 	}
 
 	writesJSON, _ := json.Marshal(writes)
-	keepJSON, _ := json.Marshal(keepSkillFiles)
+	keepJSON, _ := json.Marshal(keepSkillDirs)
 
 	seedScript := fmt.Sprintf(`
 const fs = require("fs"); const path = require("path");
 const dir = "/home/node/.openclaw/workspaces/" + %[1]q;
 fs.mkdirSync(dir, { recursive: true });
 const writes = %[2]s;
-const keepSkillFiles = %[3]s;
+const keepSkillDirs = %[3]s;
 let touched = 0;
 for (const [f, content] of Object.entries(writes)) {
   const p = path.join(dir, f);
+  // Ensure parent directory exists — for folder-per-skill the
+  // path is skills/<name>/SKILL.md, so we need mkdir -p on
+  // dir/skills/<name> before the writeFileSync.
+  fs.mkdirSync(path.dirname(p), { recursive: true });
   let cur = "";
   try { cur = fs.readFileSync(p, "utf8"); } catch (e) {}
   if (cur !== content) { fs.writeFileSync(p, content); touched++; }
 }
-// Garbage-collect SKILL_*.md files that no current binding grants.
+
+// GC #1: revoked skills. Walk dir/skills/ and remove any subfolder
+// whose name isn't in keepSkillDirs. Safe to call when the dir
+// doesn't exist yet (no skills bound) — readdirSync throws ENOENT
+// which we swallow.
 let gcd = 0;
+const skillsRoot = path.join(dir, "skills");
 try {
-  for (const f of fs.readdirSync(dir)) {
-    if (!f.startsWith("SKILL_") || !f.endsWith(".md")) continue;
-    if (Object.prototype.hasOwnProperty.call(keepSkillFiles, f)) continue;
-    fs.unlinkSync(path.join(dir, f));
+  for (const name of fs.readdirSync(skillsRoot)) {
+    if (Object.prototype.hasOwnProperty.call(keepSkillDirs, name)) continue;
+    fs.rmSync(path.join(skillsRoot, name), { recursive: true, force: true });
     gcd++;
   }
 } catch (e) {}
-console.log("SEEDED dir=" + dir + " touched=" + touched + " gcd=" + gcd);
+
+// GC #2: legacy SKILL_<name>.md files left in the workspace root by
+// pre-v1.6.0 reconciles. One-time cleanup so existing agents migrate
+// to the folder layout without manual intervention. Cheap to run
+// every reconcile — readdir on dir is fast and the prefix check
+// short-circuits.
+let legacyGcd = 0;
+try {
+  for (const f of fs.readdirSync(dir)) {
+    if (f.startsWith("SKILL_") && f.endsWith(".md")) {
+      fs.unlinkSync(path.join(dir, f));
+      legacyGcd++;
+    }
+  }
+} catch (e) {}
+
+console.log("SEEDED dir=" + dir +
+  " touched=" + touched +
+  " gcd=" + gcd +
+  " legacy_gcd=" + legacyGcd);
 `, agentID, string(writesJSON), string(keepJSON))
 
 	if _, err := r.execInPod(ctx, gwPod, []string{"node", "-e", seedScript}); err != nil {
