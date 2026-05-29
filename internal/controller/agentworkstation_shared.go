@@ -301,7 +301,7 @@ console.log("SEEDED dir=" + dir +
   " skills=" + Object.keys(keep).length +
   " gcd=" + gcd +
   " legacy_gcd=" + legacyGcd);
-`, agentID, string(writesJSON), string(inlineSkillJSON), string(keepJSON), skillsCatalogMountPath)
+`, agentID, string(writesJSON), string(inlineSkillJSON), string(keepJSON), skillsCatalogSkillsDir)
 
 	if _, err := r.execInPod(ctx, gwPod, []string{"node", "-e", seedScript}); err != nil {
 		return ctrl.Result{}, fmt.Errorf("seed agent workspace: %w", err)

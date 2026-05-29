@@ -219,8 +219,17 @@ func gatewayVolumeMounts(gw *agentofficev1alpha1.AgentGateway, attachedKBs []age
 // Bump the tag here + re-release the operator to roll a new skill
 // catalog (incl. bundled scripts/references) into agents.
 const (
-	defaultSkillsImage     = "quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-skills:v0.0.1"
-	skillsCatalogMountPath = "/home/node/.openclaw/skills-catalog"
+	defaultSkillsImage = "quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-skills:v0.0.1"
+	// MUST be a top-level path, NOT under /home/node/.openclaw. The
+	// workspace PVC mounts at /home/node/.openclaw; a nested image
+	// volume there gets shadowed by the PVC mount (the PVC mounts at
+	// the parent AFTER the image volume mounts at the child, hiding
+	// it — confirmed via /proc/mounts in v1.6.1). A sibling top-level
+	// path avoids the shadowing.
+	skillsCatalogMountPath = "/skills-catalog"
+	// The skills image is built with `COPY skills /skills/`, so within
+	// the mounted image rootfs the skill folders live under /skills.
+	skillsCatalogSkillsDir = skillsCatalogMountPath + "/skills"
 	skillsCatalogVolName   = "skills-catalog"
 )
 
