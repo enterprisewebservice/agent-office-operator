@@ -122,6 +122,66 @@ func (r *AgentWorkstationReconciler) listAppliedSkills(ctx context.Context, aw *
 	return resolved, nil
 }
 
+// listAllCatalogSkills returns every Skill CR in the namespace as a
+// []ResolvedSkill, rendered into SKILL.md form ready to be written to
+// the agent's workspace.
+//
+// This is the v1.6.0 "discovery" path. Unlike listAppliedSkills (the
+// binding path), it does NOT filter by SkillBinding — every agent
+// gets the FULL local catalog rendered into its workspace. The
+// runtime then chooses at runtime via progressive disclosure on the
+// directory: scan SKILL.md frontmatter for metadata, load full body
+// only on trigger.
+//
+// Why "render everything to every agent" doesn't blow up:
+//   - The disk cost is small (each SKILL.md is markdown, kilobytes).
+//   - The runtime's discovery model means most skills are never
+//     loaded into context — they sit on disk as available reference.
+//   - The alternative (filter at render-time via SkillBinding) is
+//     the pre-discovery binding model we're explicitly moving away
+//     from.
+//
+// SkillBinding's Overrides field is intentionally ignored here:
+// overrides are a per-binding concept that doesn't fit the catalog
+// model. If/when per-agent skill customization is needed again,
+// it'll be added as a different mechanism (probably an annotation on
+// the AW pointing at an overlay ConfigMap).
+//
+// Errors loading individual Skill content are non-fatal — the
+// offending skill is skipped so one misconfigured Skill can't
+// prevent the rest of the catalog from rendering.
+func (r *AgentWorkstationReconciler) listAllCatalogSkills(ctx context.Context, namespace string) ([]ResolvedSkill, error) {
+	var skills agentofficev1alpha1.SkillList
+	if err := r.List(ctx, &skills, client.InNamespace(namespace)); err != nil {
+		return nil, fmt.Errorf("listing Skills: %w", err)
+	}
+
+	resolved := make([]ResolvedSkill, 0, len(skills.Items))
+	for i := range skills.Items {
+		skill := skills.Items[i]
+		// Resolve content from source. Failure is non-fatal.
+		base, _ := r.resolveSkillContent(ctx, &skill)
+		// No SkillBinding overrides in the catalog model — pass nil.
+		rendered := renderSkill(skill, base, nil)
+		resolved = append(resolved, ResolvedSkill{
+			Skill:    skill,
+			Version:  skill.Spec.Version,
+			Rendered: rendered,
+			// BindingName + Overrides intentionally empty — this
+			// skill was sourced from the catalog, not granted via
+			// any specific binding.
+		})
+	}
+
+	// Stable order so the workspace seed map produces consistent
+	// hashes and reconciles are no-ops when the catalog hasn't
+	// changed.
+	sort.Slice(resolved, func(i, j int) bool {
+		return resolved[i].Skill.Name < resolved[j].Skill.Name
+	})
+	return resolved, nil
+}
+
 // resolveSkillContent reads the skill's `SKILL.md` source.
 // configMapRef wins over inline. If neither is set, returns
 // empty + an error so the caller can decide whether to fall

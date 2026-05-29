@@ -155,16 +155,24 @@ func (r *AgentWorkstationReconciler) reconcileSharedFull(ctx context.Context, aw
 	identityMd := fmt.Sprintf("# %s\n\n%s %s\n", identity, emoji, identity)
 	soulMd := fmt.Sprintf("# %s\n\n%s\n", identity, aw.Spec.SystemPrompt)
 
-	// Resolve skills granted to this AW via SkillBindings. We
-	// always render IDENTITY.md / SOUL.md; we render at most one
-	// skills/<name>/SKILL.md per granted skill (the Anthropic Skills
-	// Open Standard folder layout, as adopted by Claude Code,
-	// Claude.ai, Claude Agent SDK, and the wider ecosystem). The
-	// legacy flat-file SKILL_<name>.md form is also garbage-collected
-	// from the workspace root on every reconcile so older agents
-	// migrate cleanly.
+	// Render the FULL local skill catalog into the agent's workspace
+	// (v1.6.0 discovery model). Every Skill CR in the namespace lands
+	// at skills/<name>/SKILL.md — the Anthropic Skills Open Standard
+	// folder layout, as adopted by Claude Code, Claude.ai, Claude
+	// Agent SDK, and the wider ecosystem.
 	//
-	// Folder-per-skill earns its keep two ways:
+	// "Render everything" instead of "render what SkillBinding grants"
+	// is the discovery shift v1.6.0 establishes. The agent's runtime
+	// decides at runtime which skills are relevant to the current
+	// task — scans frontmatter for metadata, loads body only on
+	// trigger. Pre-deciding via SkillBinding was the binding model
+	// we're explicitly moving away from. SkillBinding still exists
+	// for backward compat (the binding controller still updates
+	// status fields; AWs authored before v1.6.0 keep working) but
+	// the AW reconciler no longer consults it.
+	//
+	// Folder-per-skill (vs the legacy SKILL_<name>.md flat-file
+	// pattern that's GC'd below) earns its keep:
 	//   1) Bundled scripts/references/assets that real Anthropic
 	//      Skills carry have a natural home (skills/<name>/scripts/
 	//      etc.) — the flat-file layout couldn't represent them.
@@ -172,9 +180,9 @@ func (r *AgentWorkstationReconciler) reconcileSharedFull(ctx context.Context, aw
 	//      disclosure (scan dir + read frontmatter only at session
 	//      start; lazy-load body on trigger) find the files in the
 	//      shape they expect — no rework when OpenClaw catches up.
-	resolvedSkills, skillResolveErr := r.listAppliedSkills(ctx, aw)
+	resolvedSkills, skillResolveErr := r.listAllCatalogSkills(ctx, aw.Namespace)
 	if skillResolveErr != nil {
-		log.Info("skill resolution failed; proceeding without skills",
+		log.Info("skill catalog list failed; proceeding without skills",
 			"err", skillResolveErr, "aw", aw.Name)
 	}
 
