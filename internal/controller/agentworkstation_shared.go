@@ -533,6 +533,71 @@ func (r *AgentWorkstationReconciler) gcDedicatedResources(ctx context.Context, a
 	return nil
 }
 
+// deregisterSharedAgent removes a shared-runtime agent's entire
+// footprint from its gateway — the inverse of the merge in
+// reconcileSharedFull. Without this, deleting a shared AgentWorkstation
+// orphaned its agents.list[] entry, its browser-proxy allowProfiles[]
+// entry, any bindings, and its whole workspace dir (the bug the
+// integration suite caught). Best-effort: returns errGatewayUnavailable
+// when the gateway or a ready pod is already gone (nothing left to
+// clean), so the finalizer can be removed without wedging deletion.
+func (r *AgentWorkstationReconciler) deregisterSharedAgent(ctx context.Context, aw *agentofficev1alpha1.AgentWorkstation) error {
+	if aw.Spec.Runtime == nil || aw.Spec.Runtime.Shared == nil {
+		return nil // not a shared agent — nothing registered in a gateway
+	}
+	if r.RestConfig == nil {
+		return errGatewayUnavailable // can't exec
+	}
+	gwRef := aw.Spec.Runtime.Shared.GatewayRef
+	if gwRef == "" {
+		return nil
+	}
+	var gw agentofficev1alpha1.AgentGateway
+	if err := r.Get(ctx, client.ObjectKey{Namespace: aw.Namespace, Name: gwRef}, &gw); err != nil {
+		return errGatewayUnavailable // gateway deleted — its openclaw.json went with it
+	}
+	gwPod, err := r.findReadyGatewayPod(ctx, &gw)
+	if err != nil {
+		return errGatewayUnavailable // no ready pod to exec into
+	}
+
+	agentID := aw.Name
+	profile := aw.Spec.Runtime.Shared.BrowserProfile
+	if profile == "" {
+		profile = agentID
+	}
+
+	// Read → mutate-in-memory → write-only-if-changed (same loop-safety
+	// contract as the merge: the gateway watches this file). Then remove
+	// the agent's workspace dir.
+	script := fmt.Sprintf(`
+const fs = require("fs");
+const p = "/home/node/.openclaw/openclaw.json";
+const agentId = %[1]q;
+const profile = %[2]q;
+const cfg = JSON.parse(fs.readFileSync(p, "utf8"));
+const before = JSON.stringify(cfg);
+if (cfg.agents && Array.isArray(cfg.agents.list))
+  cfg.agents.list = cfg.agents.list.filter(a => !a || a.id !== agentId);
+if (cfg.nodeHost && cfg.nodeHost.browserProxy && Array.isArray(cfg.nodeHost.browserProxy.allowProfiles))
+  cfg.nodeHost.browserProxy.allowProfiles = cfg.nodeHost.browserProxy.allowProfiles.filter(x => x !== profile);
+if (Array.isArray(cfg.bindings))
+  cfg.bindings = cfg.bindings.filter(b => !b || b.agentId !== agentId);
+if (JSON.stringify(cfg) !== before) {
+  fs.writeFileSync(p, JSON.stringify(cfg, null, 2));
+  console.log("de-registered " + agentId);
+} else {
+  console.log("noop (already absent)");
+}
+try { fs.rmSync("/home/node/.openclaw/workspaces/" + agentId, { recursive: true, force: true }); } catch (e) {}
+`, agentID, profile)
+
+	if _, err := r.execInPod(ctx, gwPod, []string{"node", "-e", script}); err != nil {
+		return fmt.Errorf("de-register exec on gateway pod %s: %w", gwPod.Name, err)
+	}
+	return nil
+}
+
 // findReadyGatewayPod returns the name of a Ready pod for the given
 // AgentGateway. The gateway's Deployment selector matches all of its
 // pods; we pick the first Ready one.

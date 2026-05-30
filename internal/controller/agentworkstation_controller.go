@@ -18,7 +18,9 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -31,6 +33,7 @@ import (
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -62,9 +65,25 @@ type AgentWorkstationReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=route.openshift.io,resources=routes,verbs=get;list;watch;create;update;patch;delete
 
+// awSharedGatewayFinalizer guards shared-runtime AgentWorkstations.
+// A shared agent is registered into the gateway's openclaw.json via
+// exec (agents.list[], browser allowProfiles[], bindings) plus a seeded
+// workspace dir — NONE of which are owned resources, so ownerReference
+// cascade does not clean them up on delete. The finalizer de-registers
+// the agent before the CR is removed (the bug the integration suite
+// caught). Dedicated-runtime AWs don't carry it — their Pod/PVC/Service
+// children cascade via ownerReferences.
+const awSharedGatewayFinalizer = "agentoffice.ai/shared-gateway-deregister"
+
+// errGatewayUnavailable signals the gateway (or a ready pod) is already
+// gone, so there's nothing left to de-register — the finalizer can be
+// dropped without blocking deletion forever.
+var errGatewayUnavailable = errors.New("shared gateway unavailable — nothing to de-register")
+
 // Reconcile renders all child resources from the AW spec and patches
-// status. Deletion is implicit: ownerReferences cascade when the AW
-// CR is removed.
+// status. For DEDICATED runtime, deletion is implicit (ownerReferences
+// cascade). For SHARED runtime, a finalizer de-registers the agent from
+// the gateway on delete (see awSharedGatewayFinalizer).
 func (r *AgentWorkstationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -74,6 +93,35 @@ func (r *AgentWorkstationReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
+	}
+
+	// --- Deletion: run the de-register finalizer for shared agents. ---
+	if !aw.DeletionTimestamp.IsZero() {
+		if controllerutil.ContainsFinalizer(&aw, awSharedGatewayFinalizer) {
+			if err := r.deregisterSharedAgent(ctx, &aw); err != nil {
+				if errors.Is(err, errGatewayUnavailable) {
+					log.Info("gateway gone on delete; nothing to de-register", "aw", aw.Name)
+				} else {
+					log.Error(err, "de-register from shared gateway failed; will retry", "aw", aw.Name)
+					return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+				}
+			}
+			controllerutil.RemoveFinalizer(&aw, awSharedGatewayFinalizer)
+			if err := r.Update(ctx, &aw); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{}, nil
+	}
+
+	// --- Ensure the de-register finalizer on shared-runtime AWs. ---
+	if aw.Spec.Runtime != nil && aw.Spec.Runtime.Shared != nil &&
+		!controllerutil.ContainsFinalizer(&aw, awSharedGatewayFinalizer) {
+		controllerutil.AddFinalizer(&aw, awSharedGatewayFinalizer)
+		if err := r.Update(ctx, &aw); err != nil {
+			return ctrl.Result{}, err
+		}
+		// The Update re-enqueues; fall through and reconcile this pass too.
 	}
 
 	// Dispatch on spec.runtime. Default (nil or runtime.dedicated)
