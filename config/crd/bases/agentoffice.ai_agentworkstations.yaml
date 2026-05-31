@@ -332,14 +332,14 @@ spec:
                   openclaw agent (multi-agent-in-one-pod model).
                 properties:
                   dedicated:
-                    description: 'Dedicated runtime: own Pod, own PVC, own Service,
-                      own Route.'
+                    description: |-
+                      Dedicated is DEPRECATED and ignored as of v1.6.6 — see
+                      DedicatedRuntime. Use Shared.GatewayRef.
                     type: object
                   shared:
                     description: |-
-                      Shared runtime: logical openclaw agent inside the referenced
-                      AgentGateway's pod, sharing the gateway's paired node-host
-                      browser via a per-agent profile.
+                      Shared selects the AgentGateway this agent registers on as a
+                      logical openclaw persona (its own per-agent browser profile).
                     properties:
                       browserProfile:
                         description: |-

@@ -18,11 +18,7 @@ import (
 	"strings"
 	"time"
 
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/remotecommand"
@@ -74,16 +70,6 @@ func (r *AgentWorkstationReconciler) reconcileSharedFull(ctx context.Context, aw
 	gwRef := effectiveGatewayRef(aw)
 	if gwRef == "" {
 		return ctrl.Result{}, fmt.Errorf("could not determine gateway for agent %s", aw.Name)
-	}
-
-	// 0. GC any leftover dedicated-runtime resources from a previous
-	//    spec.runtime: dedicated state. When the user flips an AW
-	//    from dedicated → shared, the old per-agent Pod, Service,
-	//    Route, PVC, ConfigMap, and gateway-token Secret should be
-	//    removed so they don't sit idle. (ownerReferences would only
-	//    GC on AW delete, not on a runtime-mode change.)
-	if err := r.gcDedicatedResources(ctx, aw); err != nil {
-		log.Info("dedicated GC partial", "err", err)
 	}
 
 	// 1. Look up the AgentGateway.
@@ -494,42 +480,6 @@ if (after === before) {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
-}
-
-// gcDedicatedResources removes the per-AW Pod / Service / Route /
-// PVC / ConfigMap / gateway-token Secret created by the dedicated
-// runtime path. Idempotent — silently skips anything already gone.
-// Called when an AW transitions to runtime.shared so the dedicated
-// resources don't linger.
-func (r *AgentWorkstationReconciler) gcDedicatedResources(ctx context.Context, aw *agentofficev1alpha1.AgentWorkstation) error {
-	ns := aw.Namespace
-	type tgt struct {
-		obj  client.Object
-		name string
-	}
-	targets := []tgt{
-		{&appsv1.Deployment{}, deployName(aw.Name)},
-		{&corev1.Service{}, serviceName(aw.Name)},
-		{&corev1.ConfigMap{}, cmName(aw.Name)},
-		{&corev1.Secret{}, tokenName(aw.Name)},
-		{&corev1.PersistentVolumeClaim{}, pvcName(aw.Name)},
-	}
-	for _, t := range targets {
-		t.obj.SetNamespace(ns)
-		t.obj.SetName(t.name)
-		if err := r.Delete(ctx, t.obj); err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("delete %T %s/%s: %w", t.obj, ns, t.name, err)
-		}
-	}
-	// Route is unstructured — match the generic delete shape.
-	rt := &unstructured.Unstructured{}
-	rt.SetGroupVersionKind(schema.GroupVersionKind{Group: "route.openshift.io", Version: "v1", Kind: "Route"})
-	rt.SetNamespace(ns)
-	rt.SetName(routeName(aw.Name))
-	if err := r.Delete(ctx, rt); err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("delete Route %s/%s: %w", ns, routeName(aw.Name), err)
-	}
-	return nil
 }
 
 // deregisterSharedAgent removes a shared-runtime agent's entire

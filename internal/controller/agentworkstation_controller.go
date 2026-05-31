@@ -19,7 +19,6 @@ package controller
 import (
 	"context"
 	"errors"
-	"fmt"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -79,10 +78,12 @@ const awSharedGatewayFinalizer = "agentoffice.ai/shared-gateway-deregister"
 // dropped without blocking deletion forever.
 var errGatewayUnavailable = errors.New("shared gateway unavailable — nothing to de-register")
 
-// Reconcile renders all child resources from the AW spec and patches
-// status. For DEDICATED runtime, deletion is implicit (ownerReferences
-// cascade). For SHARED runtime, a finalizer de-registers the agent from
-// the gateway on delete (see awSharedGatewayFinalizer).
+// Reconcile registers the agent as a persona on its
+// runtime.shared.gatewayRef AgentGateway (reconcileSharedFull). On
+// delete, a finalizer de-registers it from that gateway — the same for
+// every agent, since a gateway can outlive any one agent it hosts (see
+// awSharedGatewayFinalizer). The gateway itself is a declarative
+// resource the operator never creates or owns.
 func (r *AgentWorkstationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -113,9 +114,11 @@ func (r *AgentWorkstationReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, nil
 	}
 
-	// --- Ensure the de-register finalizer on shared-runtime AWs. ---
-	if aw.Spec.Runtime != nil && aw.Spec.Runtime.Shared != nil &&
-		!controllerutil.ContainsFinalizer(&aw, awSharedGatewayFinalizer) {
+	// --- Ensure the de-register finalizer on EVERY AW. ---
+	// All agents register a persona on a gateway, so all need to
+	// de-register on delete (the gateway may outlive the agent — a
+	// shared gateway, or a dedicated one others have joined).
+	if !controllerutil.ContainsFinalizer(&aw, awSharedGatewayFinalizer) {
 		controllerutil.AddFinalizer(&aw, awSharedGatewayFinalizer)
 		if err := r.Update(ctx, &aw); err != nil {
 			return ctrl.Result{}, err
@@ -123,22 +126,14 @@ func (r *AgentWorkstationReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		// The Update re-enqueues; fall through and reconcile this pass too.
 	}
 
-	// Runtime dispatch — UNIFIED. Every agent is a logical openclaw
-	// persona registered on an AgentGateway. A DEDICATED agent gets its
-	// OWN gateway (minted here, owned by the AW so it cascades on
-	// delete); a SHARED agent joins an existing one. Both then flow
-	// through reconcileSharedFull, which targets the effective gateway.
-	//
-	// This replaces the old divergent per-AW Pod path
-	// (reconcileChildren / internal/templates/render.go) — a stale
-	// reimplementation of the gateway pod that silently lacked Codex
-	// auth and the skills image volume. Dedicated agents now get the
-	// SAME feature-complete gateway pod shared agents run on.
-	if isDedicated(&aw) {
-		if err := r.reconcileDedicatedGateway(ctx, &aw); err != nil {
-			return ctrl.Result{}, fmt.Errorf("dedicated gateway: %w", err)
-		}
-	}
+	// Runtime — UNIFIED, ONE PATH. Every agent is a logical openclaw
+	// persona registered on the AgentGateway named by its
+	// runtime.shared.gatewayRef. The operator never mints or owns a
+	// gateway: a "dedicated" agent simply has gatewayRef pointing at an
+	// AgentGateway that its OWN gitops repo also declares (see the
+	// scaffolder template), so there is no shared-vs-dedicated branch
+	// here at all. reconcileSharedFull surfaces a clear status if the
+	// referenced gateway isn't present yet and requeues.
 	return r.reconcileShared(ctx, &aw)
 }
 

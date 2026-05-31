@@ -30,15 +30,6 @@ const DefaultOpenClawImage = "quay-quay-quay-test.apps.salamander.aimlworkbench.
 // operator falls back to localhost-only allowedOrigins.
 func appsDomain() string { return os.Getenv("CLUSTER_APPS_DOMAIN") }
 
-// resource names — agent-office-server's existing convention so we
-// can adopt the existing 5 agents without renaming anything.
-func cmName(awName string) string      { return "agent-" + awName + "-config" }
-func tokenName(awName string) string   { return "agent-" + awName + "-token" }
-func pvcName(awName string) string     { return "agent-" + awName + "-workspace" }
-func deployName(awName string) string  { return "agent-" + awName }
-func serviceName(awName string) string { return "agent-" + awName }
-func routeName(awName string) string   { return "agent-" + awName }
-
 // agentLabels are stamped onto every owned resource. The set MUST
 // match the existing label set on the cluster (see the 5 pre-slice-4
 // agents) because Deployment.spec.selector is immutable — changing

@@ -187,13 +187,16 @@ type DiscordChannelSpec struct {
 	URL string `json:"url,omitempty"`
 }
 
-// DedicatedRuntime is the default runtime mode: the operator
-// reconciles a per-AgentWorkstation Pod, ConfigMap, Secret, PVC,
-// Service, and Route (slice-4 behavior). Suitable for agents that
-// need a unique image, security context, or full isolation.
+// DedicatedRuntime is DEPRECATED and ignored by the operator as of
+// v1.6.6. The old per-AgentWorkstation Pod path it selected was removed
+// in the runtime unify: every agent now runs as a persona on an
+// AgentGateway named by runtime.shared.gatewayRef, and "dedicated" is a
+// packaging choice in the scaffolder template (the agent's gitops repo
+// declares its own AgentGateway and points gatewayRef at it). Setting
+// runtime.dedicated has no effect — set runtime.shared.gatewayRef
+// instead. Kept only so manifests that still carry the field validate.
 type DedicatedRuntime struct {
-	// (no fields today; reserved for future per-AW dedicated-runtime
-	// tunables like sidecar config, network policies, etc.)
+	// (deprecated; no fields)
 }
 
 // SharedRuntime slots this AgentWorkstation into an existing
@@ -219,18 +222,19 @@ type SharedRuntime struct {
 	BrowserProfile string `json:"browserProfile,omitempty"`
 }
 
-// RuntimeSpec selects HOW this AgentWorkstation is materialized.
-// Exactly one of `dedicated` or `shared` should be set. If both are
-// omitted, the operator defaults to `dedicated{}` — preserving
-// slice-4 behavior for AWs that pre-date this field.
+// RuntimeSpec selects which AgentGateway this AgentWorkstation runs on.
+// Set runtime.shared.gatewayRef — every agent (whether you think of it
+// as "shared" or "dedicated") is a logical openclaw persona on a
+// gateway; the operator has one path. A "dedicated" agent simply points
+// gatewayRef at an AgentGateway its own gitops repo also declares.
 type RuntimeSpec struct {
-	// Dedicated runtime: own Pod, own PVC, own Service, own Route.
+	// Dedicated is DEPRECATED and ignored as of v1.6.6 — see
+	// DedicatedRuntime. Use Shared.GatewayRef.
 	// +optional
 	Dedicated *DedicatedRuntime `json:"dedicated,omitempty"`
 
-	// Shared runtime: logical openclaw agent inside the referenced
-	// AgentGateway's pod, sharing the gateway's paired node-host
-	// browser via a per-agent profile.
+	// Shared selects the AgentGateway this agent registers on as a
+	// logical openclaw persona (its own per-agent browser profile).
 	// +optional
 	Shared *SharedRuntime `json:"shared,omitempty"`
 }
