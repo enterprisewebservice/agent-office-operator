@@ -29,7 +29,6 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -148,58 +147,6 @@ func (r *AgentWorkstationReconciler) Reconcile(ctx context.Context, req ctrl.Req
 // dispatcher in this file readable.
 func (r *AgentWorkstationReconciler) reconcileShared(ctx context.Context, aw *agentofficev1alpha1.AgentWorkstation) (ctrl.Result, error) {
 	return r.reconcileSharedFull(ctx, aw)
-}
-
-// reconcileStatus reads the owned Deployment + Route and patches
-// status.phase / status.gatewayEndpoint. Same logic as slice 3, just
-// extracted for clarity.
-func (r *AgentWorkstationReconciler) reconcileStatus(ctx context.Context, aw *agentofficev1alpha1.AgentWorkstation) error {
-	log := logf.FromContext(ctx)
-	depName := deployName(aw.Name)
-
-	var dep appsv1.Deployment
-	depErr := r.Get(ctx, types.NamespacedName{Namespace: aw.Namespace, Name: depName}, &dep)
-
-	phase := agentofficev1alpha1.AgentWorkstationPhasePending
-	message := "no Deployment yet"
-	switch {
-	case depErr == nil && dep.Status.ReadyReplicas >= 1:
-		phase = agentofficev1alpha1.AgentWorkstationPhaseRunning
-		message = fmt.Sprintf("Deployment ready (%d/%d)", dep.Status.ReadyReplicas, dep.Status.Replicas)
-	case depErr == nil:
-		phase = agentofficev1alpha1.AgentWorkstationPhaseCreating
-		message = fmt.Sprintf("Deployment present but not ready (%d/%d)", dep.Status.ReadyReplicas, dep.Status.Replicas)
-	case apierrors.IsNotFound(depErr):
-		// keep Pending
-	default:
-		return fmt.Errorf("get Deployment %s/%s: %w", aw.Namespace, depName, depErr)
-	}
-
-	endpoint := ""
-	route := &unstructured.Unstructured{}
-	route.SetGroupVersionKind(schema.GroupVersionKind{
-		Group: "route.openshift.io", Version: "v1", Kind: "Route",
-	})
-	if err := r.Get(ctx, types.NamespacedName{Namespace: aw.Namespace, Name: routeName(aw.Name)}, route); err == nil {
-		host, _, _ := unstructured.NestedString(route.Object, "spec", "host")
-		if host != "" {
-			endpoint = "https://" + host
-		}
-	} else if !apierrors.IsNotFound(err) {
-		log.Info("get Route", "name", routeName(aw.Name), "error", err)
-	}
-
-	if aw.Status.Phase == phase && aw.Status.Message == message && aw.Status.GatewayEndpoint == endpoint {
-		return nil
-	}
-	aw.Status.Phase = phase
-	aw.Status.Message = message
-	aw.Status.GatewayEndpoint = endpoint
-	if err := r.Status().Update(ctx, aw); err != nil {
-		return err
-	}
-	log.Info("status updated", "name", aw.Name, "phase", phase, "endpoint", endpoint)
-	return nil
 }
 
 // SetupWithManager wires the controller. Owns() handles the cascade —
