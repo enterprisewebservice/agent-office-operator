@@ -518,14 +518,18 @@ func (r *AgentGatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// sync with the union of AWs targeting this gateway.
 	mapAW := func(ctx context.Context, obj client.Object) []reconcile.Request {
 		aw, ok := obj.(*agentofficev1alpha1.AgentWorkstation)
-		if !ok || aw.Spec.Runtime == nil || aw.Spec.Runtime.Shared == nil {
+		if !ok {
 			return nil
 		}
-		if aw.Spec.Runtime.Shared.GatewayRef == "" {
+		// Re-reconcile the agent's gateway when the AW changes — the
+		// referenced one for shared, the minted per-agent one for
+		// dedicated (so e.g. its MCP env-from-secrets get re-collected).
+		gwRef := effectiveGatewayRef(aw)
+		if gwRef == "" {
 			return nil
 		}
 		return []reconcile.Request{{NamespacedName: types.NamespacedName{
-			Namespace: aw.Namespace, Name: aw.Spec.Runtime.Shared.GatewayRef,
+			Namespace: aw.Namespace, Name: gwRef,
 		}}}
 	}
 

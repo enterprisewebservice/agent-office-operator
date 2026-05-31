@@ -69,9 +69,11 @@ func (r *AgentWorkstationReconciler) reconcileSharedFull(ctx context.Context, aw
 		return ctrl.Result{}, fmt.Errorf("RestConfig not set on reconciler — cannot exec into gateway pod")
 	}
 
-	gwRef := aw.Spec.Runtime.Shared.GatewayRef
+	// Effective gateway: the referenced one for shared agents, the
+	// per-agent minted one (== aw.Name) for dedicated agents.
+	gwRef := effectiveGatewayRef(aw)
 	if gwRef == "" {
-		return ctrl.Result{}, fmt.Errorf("runtime.shared.gatewayRef must be set")
+		return ctrl.Result{}, fmt.Errorf("could not determine gateway for agent %s", aw.Name)
 	}
 
 	// 0. GC any leftover dedicated-runtime resources from a previous
@@ -114,10 +116,7 @@ func (r *AgentWorkstationReconciler) reconcileSharedFull(ctx context.Context, aw
 	// systemPromptOverride field — persona comes from the
 	// IDENTITY.md / SOUL.md files in the agent's workspace dir.
 	agentID := aw.Name
-	profile := aw.Spec.Runtime.Shared.BrowserProfile
-	if profile == "" {
-		profile = agentID
-	}
+	profile := effectiveProfile(aw)
 	model := "openai/gpt-5.4"
 	if aw.Spec.Model.ModelName != "" {
 		model = string(aw.Spec.Model.Provider) + "/" + aw.Spec.Model.ModelName

@@ -602,10 +602,9 @@ func (r *AgentGatewayReconciler) collectMCPEnvFromSecrets(ctx context.Context, g
 	}
 	set := map[string]struct{}{}
 	for _, aw := range awList.Items {
-		if aw.Spec.Runtime == nil || aw.Spec.Runtime.Shared == nil {
-			continue
-		}
-		if aw.Spec.Runtime.Shared.GatewayRef != gw.Name {
+		// Include every agent on THIS gateway — shared agents that
+		// reference it AND a dedicated agent whose own gateway this is.
+		if effectiveGatewayRef(&aw) != gw.Name {
 			continue
 		}
 		if aw.Spec.Tools == nil {

@@ -113,19 +113,17 @@ func (r *AutoResearchProjectReconciler) findGatewayPodForAgent(
 		selector map[string]string
 		descr    string
 	)
-	if aw.Spec.Runtime != nil && aw.Spec.Runtime.Shared != nil {
-		gwName := aw.Spec.Runtime.Shared.GatewayRef
-		if gwName == "" {
-			return nil, fmt.Errorf("AgentWorkstation %s has spec.runtime.shared but no gatewayRef", agentName)
-		}
-		selector = map[string]string{"agentoffice.ai/gateway": gwName}
-		descr = fmt.Sprintf("AgentGateway %s/%s", namespace, gwName)
-	} else {
-		// Default (nil runtime OR explicit runtime.dedicated): the AW
-		// has its own Deployment + Pod, labeled by agentLabels().
-		selector = map[string]string{"agentoffice.ai/agent": agentName}
-		descr = fmt.Sprintf("AgentWorkstation %s/%s (dedicated)", namespace, agentName)
+	// Unified runtime: every agent (shared OR dedicated) runs on an
+	// AgentGateway pod labeled agentoffice.ai/gateway=<effective gateway>.
+	// Dedicated agents get a minted gateway named after the agent; shared
+	// agents use the referenced one. (Old dedicated agents had their own
+	// agentoffice.ai/agent-labeled pod — that path is gone.)
+	gwName := effectiveGatewayRef(&aw)
+	if gwName == "" {
+		return nil, fmt.Errorf("could not determine gateway for AgentWorkstation %s", agentName)
 	}
+	selector = map[string]string{"agentoffice.ai/gateway": gwName}
+	descr = fmt.Sprintf("AgentGateway %s/%s", namespace, gwName)
 
 	pods := &corev1.PodList{}
 	if err := r.List(ctx, pods,

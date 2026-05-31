@@ -124,27 +124,23 @@ func (r *AgentWorkstationReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		// The Update re-enqueues; fall through and reconcile this pass too.
 	}
 
-	// Dispatch on spec.runtime. Default (nil or runtime.dedicated)
-	// preserves the slice-4 path: own Pod / PVC / Service / Route /
-	// CM / Secret. The runtime.shared path defers to step-3 logic
-	// which slots the AW as a logical agent inside a shared
-	// AgentGateway runtime.
-	if aw.Spec.Runtime != nil && aw.Spec.Runtime.Shared != nil {
-		return r.reconcileShared(ctx, &aw)
+	// Runtime dispatch — UNIFIED. Every agent is a logical openclaw
+	// persona registered on an AgentGateway. A DEDICATED agent gets its
+	// OWN gateway (minted here, owned by the AW so it cascades on
+	// delete); a SHARED agent joins an existing one. Both then flow
+	// through reconcileSharedFull, which targets the effective gateway.
+	//
+	// This replaces the old divergent per-AW Pod path
+	// (reconcileChildren / internal/templates/render.go) — a stale
+	// reimplementation of the gateway pod that silently lacked Codex
+	// auth and the skills image volume. Dedicated agents now get the
+	// SAME feature-complete gateway pod shared agents run on.
+	if isDedicated(&aw) {
+		if err := r.reconcileDedicatedGateway(ctx, &aw); err != nil {
+			return ctrl.Result{}, fmt.Errorf("dedicated gateway: %w", err)
+		}
 	}
-
-	// 1. Materialize the per-agent dedicated runtime.
-	if err := r.reconcileChildren(ctx, &aw); err != nil {
-		log.Error(err, "reconcileChildren")
-		return ctrl.Result{}, err
-	}
-
-	// 2. Observe Deployment + Route → status.
-	if err := r.reconcileStatus(ctx, &aw); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	return ctrl.Result{}, nil
+	return r.reconcileShared(ctx, &aw)
 }
 
 // reconcileShared dispatches to the full implementation in
@@ -304,8 +300,7 @@ func (r *AgentWorkstationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		}
 		out := make([]reconcile.Request, 0)
 		for _, aw := range aws.Items {
-			if aw.Spec.Runtime != nil && aw.Spec.Runtime.Shared != nil &&
-				aw.Spec.Runtime.Shared.GatewayRef == kb.Spec.GatewayRef.Name {
+			if effectiveGatewayRef(&aw) == kb.Spec.GatewayRef.Name {
 				out = append(out, reconcile.Request{NamespacedName: client.ObjectKey{
 					Namespace: aw.Namespace, Name: aw.Name,
 				}})
