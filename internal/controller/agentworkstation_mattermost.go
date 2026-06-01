@@ -150,13 +150,22 @@ func (r *AgentWorkstationReconciler) reconcileMattermost(ctx context.Context, aw
 	mmAPI("POST", base, token, "/api/v4/teams/"+teamID+"/members",
 		map[string]interface{}{"team_id": teamID, "user_id": userID})
 
-	// channel
-	st, ch := mmAPI("GET", base, token, "/api/v4/teams/"+teamID+"/channels/name/"+agent, nil)
-	if st != 200 {
+	// channel — find (including archived). If it was archived (e.g. the agent
+	// was deleted + recreated with the same name), RESTORE it rather than
+	// trying to create (Mattermost rejects creating a channel whose name
+	// matches an archived one) — so re-provisioning is idempotent.
+	st, ch := mmAPI("GET", base, token, "/api/v4/teams/"+teamID+"/channels/name/"+agent+"?include_deleted=true", nil)
+	chID := mmStr(ch, "id")
+	if st == 200 && chID != "" {
+		if del, _ := ch["delete_at"].(float64); del != 0 {
+			mmAPI("POST", base, token, "/api/v4/channels/"+chID+"/restore", nil)
+		}
+	} else {
 		_, ch = mmAPI("POST", base, token, "/api/v4/channels",
 			map[string]interface{}{"team_id": teamID, "name": agent, "display_name": display, "type": "O"})
+		chID = mmStr(ch, "id")
 	}
-	if chID := mmStr(ch, "id"); chID != "" {
+	if chID != "" {
 		mmAPI("POST", base, token, "/api/v4/channels/"+chID+"/members", map[string]interface{}{"user_id": userID})
 	}
 	logf.FromContext(ctx).Info("mattermost presence ensured", "agent", agent)
