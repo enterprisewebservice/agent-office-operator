@@ -615,3 +615,5 @@ install-hooks: ## Install git pre-commit hook that runs `make preflight` on ever
 	ln -s ../../hack/pre-commit.sh .git/hooks/pre-commit; \
 	echo "installed .git/hooks/pre-commit -> hack/pre-commit.sh"
 
+
+# rebuild-trigger: v1.6.7 bundle (prior build hit ExceededNodeResources)
