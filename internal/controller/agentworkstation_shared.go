@@ -698,13 +698,24 @@ func (r *AgentWorkstationReconciler) reconcileMCPServers(
 
 	// Step 1: openclaw mcp set per server.
 	for _, srv := range aw.Spec.Tools.MCPServers {
-		mcpType := srv.Type
-		if mcpType == "" {
-			mcpType = "http"
+		// Translate the CRD transport to openclaw's config value.
+		//
+		// The CRD's "http" means "modern Streamable HTTP". But openclaw's
+		// "http" value selects its LEGACY GET-first SSE client, which
+		// CANNOT talk to a Streamable-HTTP gateway: it opens GET /mcp as
+		// the primary connection and either blocks on the broker's silent
+		// 200 stream (30s timeout) or fatals on a 405 — either way it
+		// fails to start the server and the agent loads ZERO tools.
+		// openclaw's value for the POST-first transport (initialize via
+		// POST, optional/graceful notification stream) is "streamable-http".
+		// So map "http"/"" → "streamable-http"; pass "sse" through.
+		openclawType := "streamable-http"
+		if srv.Type == "sse" {
+			openclawType = "sse"
 		}
 		cfg := map[string]interface{}{
 			"url":  srv.URL,
-			"type": mcpType,
+			"type": openclawType,
 		}
 		if len(srv.Headers) > 0 {
 			cfg["headers"] = srv.Headers
@@ -722,7 +733,7 @@ func (r *AgentWorkstationReconciler) reconcileMCPServers(
 		}
 		log.Info("mcp server registered with openclaw",
 			"name", srv.Name, "agent", aw.Name,
-			"url", srv.URL, "type", mcpType)
+			"url", srv.URL, "type", openclawType)
 	}
 
 	// Step 2: any EnvFromSecret declared? Touch the AgentGateway so
