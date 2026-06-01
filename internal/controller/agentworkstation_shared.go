@@ -713,9 +713,17 @@ func (r *AgentWorkstationReconciler) reconcileMCPServers(
 		if srv.Type == "sse" {
 			openclawType = "sse"
 		}
+		// openclaw selects its MCP client from the "transport" field, NOT
+		// "type" (verified in /app/dist: `else if (config.transport)
+		// transport = config.transport`). Writing "type" was silently
+		// ignored — openclaw fell back to its legacy SSE client, which
+		// can't talk to the Streamable-HTTP gateway, so agents loaded ZERO
+		// tools. Write "transport"; openclaw infers the http server kind
+		// from the URL. (Proven: with transport=streamable-http an agent
+		// loaded github_/projectboard_ tools and created a real board.)
 		cfg := map[string]interface{}{
-			"url":  srv.URL,
-			"type": openclawType,
+			"url":       srv.URL,
+			"transport": openclawType,
 		}
 		if len(srv.Headers) > 0 {
 			cfg["headers"] = srv.Headers
