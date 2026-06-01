@@ -75,6 +75,17 @@ func mmSlug(name string) string {
 	return prefix + "-" + hex.EncodeToString(sum[:])[:8]
 }
 
+// mmDisplay clamps a human-friendly string to Mattermost's 64-char limit for
+// channel display names + user nicknames (rune-safe). Longer DisplayNames
+// (e.g. "AutoResearch [Registry] …") otherwise make the create/patch 400.
+func mmDisplay(s string) string {
+	r := []rune(s)
+	if len(r) <= 64 {
+		return s
+	}
+	return strings.TrimRight(string(r[:64]), " ")
+}
+
 // mmAdminToken returns the Mattermost admin PAT from a Secret in ns, or ""
 // (⇒ Mattermost integration disabled — skip silently).
 func (r *AgentWorkstationReconciler) mmAdminToken(ctx context.Context, ns string) string {
@@ -165,7 +176,7 @@ func (r *AgentWorkstationReconciler) reconcileMattermost(ctx context.Context, aw
 		userID = mmStr(u, "id")
 		mmAPI("PUT", base, token, "/api/v4/users/"+userID+"/active", map[string]interface{}{"active": true})
 	}
-	mmAPI("PUT", base, token, "/api/v4/users/"+userID+"/patch", map[string]interface{}{"nickname": display})
+	mmAPI("PUT", base, token, "/api/v4/users/"+userID+"/patch", map[string]interface{}{"nickname": mmDisplay(display)})
 	mmAPI("POST", base, token, "/api/v4/teams/"+teamID+"/members",
 		map[string]interface{}{"team_id": teamID, "user_id": userID})
 
@@ -180,9 +191,12 @@ func (r *AgentWorkstationReconciler) reconcileMattermost(ctx context.Context, aw
 			mmAPI("POST", base, token, "/api/v4/channels/"+chID+"/restore", nil)
 		}
 	} else {
-		_, ch = mmAPI("POST", base, token, "/api/v4/channels",
-			map[string]interface{}{"team_id": teamID, "name": slug, "display_name": display, "type": "O"})
-		chID = mmStr(ch, "id")
+		cst, cch := mmAPI("POST", base, token, "/api/v4/channels",
+			map[string]interface{}{"team_id": teamID, "name": slug, "display_name": mmDisplay(display), "type": "O"})
+		if cst != 201 {
+			return fmt.Errorf("mattermost: create channel %s: %v", slug, cch["message"])
+		}
+		chID = mmStr(cch, "id")
 	}
 	if chID != "" {
 		mmAPI("POST", base, token, "/api/v4/channels/"+chID+"/members", map[string]interface{}{"user_id": userID})
