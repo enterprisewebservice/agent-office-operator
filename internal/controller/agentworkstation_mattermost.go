@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
@@ -25,6 +26,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -55,6 +57,22 @@ func randString(n int) string {
 	b := make([]byte, n)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// mmSlug derives a Mattermost-safe handle (used for both the username and the
+// channel name) from an agent name. Mattermost caps usernames at 22 chars, so
+// longer names are deterministically shortened to "<first 13>-<sha256[:8]>"
+// (== 22 chars) — keeping it unique + stable across reconciles. Names that
+// already fit are returned unchanged (so existing short-named agents keep their
+// readable @name / #name). MUST stay byte-for-byte identical to mm_slug() in
+// cluster/mattermost/bridge/bridge.py and the slug() helper in the beats.
+func mmSlug(name string) string {
+	if len(name) <= 22 {
+		return name
+	}
+	sum := sha256.Sum256([]byte(name))
+	prefix := strings.TrimRight(name[:13], "-._")
+	return prefix + "-" + hex.EncodeToString(sum[:])[:8]
 }
 
 // mmAdminToken returns the Mattermost admin PAT from a Secret in ns, or ""
@@ -107,6 +125,7 @@ func (r *AgentWorkstationReconciler) reconcileMattermost(ctx context.Context, aw
 	}
 	base := mmURL()
 	agent := aw.Name
+	slug := mmSlug(agent) // Mattermost handle (username + channel name); == agent for names <= 22 chars
 	display := aw.Spec.DisplayName
 	if display == "" {
 		display = agent
@@ -125,11 +144,11 @@ func (r *AgentWorkstationReconciler) reconcileMattermost(ctx context.Context, aw
 
 	// user (find-or-create). A legacy auto-provisioned BOT owning the name is
 	// renamed away (bots get no presence dot; agents must be real users).
-	st, u := mmAPI("GET", base, token, "/api/v4/users/username/"+agent, nil)
+	st, u := mmAPI("GET", base, token, "/api/v4/users/username/"+slug, nil)
 	if st == 200 {
 		if isBot, _ := u["is_bot"].(bool); isBot {
 			id := mmStr(u, "id")
-			mmAPI("PUT", base, token, "/api/v4/bots/"+id, map[string]interface{}{"username": "zz-" + agent + "-bot"})
+			mmAPI("PUT", base, token, "/api/v4/bots/"+id, map[string]interface{}{"username": "zz-" + slug + "-bot"})
 			mmAPI("POST", base, token, "/api/v4/bots/"+id+"/disable", nil)
 			st = 404
 		}
@@ -137,9 +156,9 @@ func (r *AgentWorkstationReconciler) reconcileMattermost(ctx context.Context, aw
 	var userID string
 	if st != 200 {
 		cst, cu := mmAPI("POST", base, token, "/api/v4/users", map[string]interface{}{
-			"email": agent + "@agents.local", "username": agent, "password": "Aa1!" + randString(12)})
+			"email": slug + "@agents.local", "username": slug, "password": "Aa1!" + randString(12)})
 		if cst != 201 {
-			return fmt.Errorf("mattermost: create user %s: %v", agent, cu["message"])
+			return fmt.Errorf("mattermost: create user %s (slug %s): %v", agent, slug, cu["message"])
 		}
 		userID = mmStr(cu, "id")
 	} else {
@@ -154,7 +173,7 @@ func (r *AgentWorkstationReconciler) reconcileMattermost(ctx context.Context, aw
 	// was deleted + recreated with the same name), RESTORE it rather than
 	// trying to create (Mattermost rejects creating a channel whose name
 	// matches an archived one) — so re-provisioning is idempotent.
-	st, ch := mmAPI("GET", base, token, "/api/v4/teams/"+teamID+"/channels/name/"+agent+"?include_deleted=true", nil)
+	st, ch := mmAPI("GET", base, token, "/api/v4/teams/"+teamID+"/channels/name/"+slug+"?include_deleted=true", nil)
 	chID := mmStr(ch, "id")
 	if st == 200 && chID != "" {
 		if del, _ := ch["delete_at"].(float64); del != 0 {
@@ -162,7 +181,7 @@ func (r *AgentWorkstationReconciler) reconcileMattermost(ctx context.Context, aw
 		}
 	} else {
 		_, ch = mmAPI("POST", base, token, "/api/v4/channels",
-			map[string]interface{}{"team_id": teamID, "name": agent, "display_name": display, "type": "O"})
+			map[string]interface{}{"team_id": teamID, "name": slug, "display_name": display, "type": "O"})
 		chID = mmStr(ch, "id")
 	}
 	if chID != "" {
@@ -180,13 +199,14 @@ func (r *AgentWorkstationReconciler) cleanupMattermost(ctx context.Context, aw *
 	}
 	base := mmURL()
 	agent := aw.Name
+	slug := mmSlug(agent) // same handle reconcile provisioned under
 	if st, team := mmAPI("GET", base, token, "/api/v4/teams/name/"+mmTeam, nil); st == 200 {
 		teamID := mmStr(team, "id")
-		if cst, ch := mmAPI("GET", base, token, "/api/v4/teams/"+teamID+"/channels/name/"+agent, nil); cst == 200 {
+		if cst, ch := mmAPI("GET", base, token, "/api/v4/teams/"+teamID+"/channels/name/"+slug, nil); cst == 200 {
 			mmAPI("DELETE", base, token, "/api/v4/channels/"+mmStr(ch, "id"), nil)
 		}
 	}
-	if st, u := mmAPI("GET", base, token, "/api/v4/users/username/"+agent, nil); st == 200 {
+	if st, u := mmAPI("GET", base, token, "/api/v4/users/username/"+slug, nil); st == 200 {
 		if isBot, _ := u["is_bot"].(bool); !isBot {
 			mmAPI("DELETE", base, token, "/api/v4/users/"+mmStr(u, "id"), nil)
 		}
