@@ -106,6 +106,10 @@ func (r *AgentWorkstationReconciler) Reconcile(ctx context.Context, req ctrl.Req
 					return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 				}
 			}
+			// Tear down the agent's Mattermost presence (no-op if disabled).
+			if err := r.cleanupMattermost(ctx, &aw); err != nil {
+				log.Error(err, "mattermost cleanup failed (continuing)", "aw", aw.Name)
+			}
 			controllerutil.RemoveFinalizer(&aw, awSharedGatewayFinalizer)
 			if err := r.Update(ctx, &aw); err != nil {
 				return ctrl.Result{}, err
@@ -134,6 +138,14 @@ func (r *AgentWorkstationReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// scaffolder template), so there is no shared-vs-dedicated branch
 	// here at all. reconcileSharedFull surfaces a clear status if the
 	// referenced gateway isn't present yet and requeues.
+
+	// Auto-provision the agent's Mattermost presence (user @<name> + #<name>
+	// channel) so it's chat-reachable the moment it exists. Best-effort: a
+	// Mattermost hiccup must never block the core agent reconcile.
+	if err := r.reconcileMattermost(ctx, &aw); err != nil {
+		log.Error(err, "mattermost provisioning failed (non-fatal)", "aw", aw.Name)
+	}
+
 	return r.reconcileShared(ctx, &aw)
 }
 

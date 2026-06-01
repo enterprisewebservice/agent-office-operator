@@ -6,4 +6,4 @@ kind: Kustomization
 images:
 - name: controller
   newName: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-operator
-  newTag: v1.6.8
+  newTag: v1.7.0
