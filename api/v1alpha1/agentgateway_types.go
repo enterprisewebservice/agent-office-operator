@@ -50,6 +50,17 @@ type AgentGatewaySpec struct {
 	// +optional
 	Image string `json:"image,omitempty"`
 
+	// SkillsImage overrides the OCI skills-catalog image mounted into
+	// this gateway's pods — the image whose /skills/<name>/SKILL.md
+	// folders are seeded into every agent's workspace. Bump this to roll
+	// out a NEW VERSION of the skill catalog (rebuild + push the skills
+	// image under a new tag, then set it here) without an operator
+	// release: the operator re-creates the gateway pod, which pulls the
+	// new tag and re-seeds the agents. Empty ⇒ the operator's built-in
+	// default.
+	// +optional
+	SkillsImage string `json:"skillsImage,omitempty"`
+
 	// NodeHostRef points at the paired node-host (KubeVirt VM today).
 	// The node-host hosts the real browser; the gateway routes
 	// browser tool calls through to it.

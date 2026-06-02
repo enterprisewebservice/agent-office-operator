@@ -299,11 +299,20 @@ func gatewayVolumes(gw *agentofficev1alpha1.AgentGateway, dshmSize resource.Quan
 	// copies skill folders from skillsCatalogMountPath into each
 	// agent's per-workspace skills/ dir. Requires the ImageVolume
 	// feature gate (GA on OCP 4.20+; verified enabled on this cluster).
+	// The skills-catalog image is configurable per-gateway via
+	// spec.skillsImage, so a new catalog version is rolled out by bumping
+	// the gateway CR — no operator release. Empty ⇒ built-in default.
+	// PullIfNotPresent suffices because each new catalog is a new tag (a
+	// changed Reference ⇒ a fresh pull when the gateway pod is re-created).
+	skillsImg := gw.Spec.SkillsImage
+	if skillsImg == "" {
+		skillsImg = defaultSkillsImage
+	}
 	vols = append(vols, corev1.Volume{
 		Name: skillsCatalogVolName,
 		VolumeSource: corev1.VolumeSource{
 			Image: &corev1.ImageVolumeSource{
-				Reference:  defaultSkillsImage,
+				Reference:  skillsImg,
 				PullPolicy: corev1.PullIfNotPresent,
 			},
 		},
