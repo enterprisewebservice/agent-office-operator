@@ -34,12 +34,41 @@ import (
 // gw* helpers — name conventions for resources owned by an
 // AgentGateway. Distinct from the agent-* convention used by
 // dedicated AgentWorkstations.
-func gwCMName(gwName string)      string { return gwName + "-config" }
-func gwTokenName(gwName string)   string { return gwName + "-token" }
-func gwPVCName(gwName string)     string { return gwName + "-workspace" }
-func gwDeployName(gwName string)  string { return gwName }
+func gwCMName(gwName string) string      { return gwName + "-config" }
+func gwTokenName(gwName string) string   { return gwName + "-token" }
+func gwPVCName(gwName string) string     { return gwName + "-workspace" }
+func gwDeployName(gwName string) string  { return gwName }
 func gwServiceName(gwName string) string { return gwName }
-func gwRouteName(gwName string)   string { return gwName }
+func gwRouteName(gwName string) string   { return gwName }
+
+// gatewayRuntimeEnv returns the HOME/cache env the OpenClaw image
+// needs to start under OpenShift's restricted SCC.
+//
+// OpenShift runs the container as an arbitrary UID with no /etc/passwd
+// entry, so HOME resolves to "/". OpenClaw 2026.7.x then tries to
+// create its state dir at /.openclaw and dies with
+// `EACCES: permission denied, mkdir '/.openclaw'` before the gateway
+// ever listens. The XDG + npm cache vars have the same root cause:
+// they default under $HOME, and only /home/node/.openclaw (the PVC) is
+// writable — not /home/node itself — so anything writing beside the
+// state dir fails too.
+//
+// These are properties of the image + platform, not user
+// configuration, so the operator owns them. They were previously
+// hand-added to the user's spec.envFromSecretRef Secret to unblock the
+// 7.x upgrade, which meant a freshly created gateway (or one with no
+// envFromSecretRef) silently failed to boot.
+//
+// Set as explicit container env, which takes precedence over envFrom,
+// so a stale copy left behind in a user Secret can't override them.
+func gatewayRuntimeEnv() []corev1.EnvVar {
+	return []corev1.EnvVar{
+		{Name: "HOME", Value: "/home/node"},
+		{Name: "XDG_CACHE_HOME", Value: "/tmp/.cache"},
+		{Name: "XDG_STATE_HOME", Value: "/tmp/.state"},
+		{Name: "npm_config_cache", Value: "/tmp/.npm"},
+	}
+}
 
 // gatewayEnvFrom builds the gateway container's envFrom list. Always
 // includes the gateway's own token Secret; optionally adds an
@@ -652,6 +681,7 @@ func gatewayContainers(image string, gw *agentofficev1alpha1.AgentGateway, token
 		Ports: []corev1.ContainerPort{{
 			Name: "gateway", ContainerPort: 18789, Protocol: corev1.ProtocolTCP,
 		}},
+		Env:          gatewayRuntimeEnv(),
 		EnvFrom:      gatewayEnvFrom(gw, tokenSecretName, mcpExtraSecrets),
 		VolumeMounts: gatewayVolumeMounts(gw, attachedKBs),
 	}}

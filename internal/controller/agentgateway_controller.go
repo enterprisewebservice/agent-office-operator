@@ -59,6 +59,14 @@ type AgentGatewayReconciler struct {
 // +kubebuilder:rbac:groups=agentoffice.ai,resources=agentgateways/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=agentoffice.ai,resources=agentgateways/finalizers,verbs=update
 
+// Pod delete is required by restartGatewayPods: openclaw.json is read
+// at process start, so a converged config change is inert until the
+// gateway process restarts. Without this verb the operator writes the
+// right config and then silently fails to apply it —
+// `cannot delete resource "pods"` — leaving the gateway on its old
+// credential route until something else happens to bounce the pod.
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;delete
+
 func (r *AgentGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
