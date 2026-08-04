@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -288,34 +289,47 @@ type authProfileListing struct {
 // account does. The credential itself arrives via
 // spec.codexCredentialsSecretRef → ~/.codex/auth.json, which OpenClaw
 // imports on startup.
+// Returns the preferred profile id plus EVERY id that matches the
+// mode. The full set matters: the caller pins one, but any of them is
+// an acceptable pin, and treating them as interchangeable is what
+// keeps the operator from fighting itself (see reconcile stickiness
+// below).
 func (r *AgentGatewayReconciler) discoverOpenAIAuthProfile(
 	ctx context.Context, pod *corev1.Pod, mode agentofficev1alpha1.ModelAuthMode,
-) (string, error) {
+) (string, []string, error) {
 	out, err := r.execInGatewayPod(ctx, pod, []string{
 		"openclaw", "models", "auth", "list", "--provider", "openai", "--json",
 	})
 	if err != nil {
-		return "", fmt.Errorf("models auth list: %w (out=%s)", err, out)
+		return "", nil, fmt.Errorf("models auth list: %w (out=%s)", err, out)
 	}
 	doc := extractJSONDocument(out)
 	if doc == "" {
-		return "", fmt.Errorf("no JSON document in auth list output (out=%s)", out)
+		return "", nil, fmt.Errorf("no JSON document in auth list output (out=%s)", out)
 	}
 	var listing authProfileListing
 	if err := json.Unmarshal([]byte(doc), &listing); err != nil {
-		return "", fmt.Errorf("parse auth list: %w (out=%s)", err, out)
+		return "", nil, fmt.Errorf("parse auth list: %w (out=%s)", err, out)
 	}
 	// OpenClaw types: "oauth" (subscription), "api_key", "token".
 	want := "oauth"
 	if mode == agentofficev1alpha1.ModelAuthModeAPIKey {
 		want = "api_key"
 	}
+	var matching []string
 	for _, p := range listing.Profiles {
 		if p.Type == want {
-			return p.ID, nil
+			matching = append(matching, p.ID)
 		}
 	}
-	return "", fmt.Errorf("no %q auth profile for provider openai (have %d profiles)", want, len(listing.Profiles))
+	if len(matching) == 0 {
+		return "", nil, fmt.Errorf("no %q auth profile for provider openai (have %d profiles)", want, len(listing.Profiles))
+	}
+	// Sort so the PREFERRED pick doesn't depend on the CLI's listing
+	// order — an unstable choice here would rewrite auth.order (and
+	// therefore restart the gateway) on alternating reconciles.
+	sort.Strings(matching)
+	return matching[0], matching, nil
 }
 
 // desiredOpenAIConfig is the JSON contract handed to the in-pod node
@@ -325,6 +339,25 @@ type desiredOpenAIConfig struct {
 	Provider map[string]interface{}       `json:"provider"`
 	Profiles map[string]map[string]string `json:"profiles"`
 	Order    map[string][]string          `json:"order"`
+
+	// AcceptableOrder lists, per provider, every profile id that would
+	// satisfy the requested mode. When the config already pins one of
+	// these, the script KEEPS it instead of rewriting to our preferred
+	// pick.
+	//
+	// This stickiness prevents a restart loop. A config change
+	// restarts the gateway, so if discovery ever returned a different
+	// (but equally valid) id on alternating reconciles, the operator
+	// would bounce the pod forever. OpenClaw can legitimately expose
+	// two OAuth profiles at once — the bootstrapOnly `openai:default`
+	// imported from ~/.codex/auth.json, and a managed
+	// `openai:<email>` — and which are visible shifts as it takes
+	// ownership of the credential. Any of them bills the same
+	// subscription, so once pinned, leave it pinned.
+	//
+	// Empty for a provider ⇒ no stickiness; Order is authoritative
+	// (that's the spec.modelAuth.order escape hatch).
+	AcceptableOrder map[string][]string `json:"acceptableOrder"`
 }
 
 // reconcileModelProvidersAndAuth converges the gateway's openclaw.json
@@ -398,24 +431,27 @@ func (r *AgentGatewayReconciler) reconcileModelProvidersAndAuth(ctx context.Cont
 	provider["models"] = models
 
 	desired := desiredOpenAIConfig{
-		Provider: provider,
-		Profiles: map[string]map[string]string{},
-		Order:    map[string][]string{},
+		Provider:        provider,
+		Profiles:        map[string]map[string]string{},
+		Order:           map[string][]string{},
+		AcceptableOrder: map[string][]string{},
 	}
 
-	// Pin the credential. Explicit spec.modelAuth.order wins outright;
-	// otherwise pin the single profile matching the mode.
+	// Pin the credential. Explicit spec.modelAuth.order wins outright
+	// (and is deliberately NOT sticky — the author asked for exactly
+	// that order).
 	if gw.Spec.ModelAuth != nil && len(gw.Spec.ModelAuth.Order) > 0 {
 		for prov, ids := range gw.Spec.ModelAuth.Order {
 			desired.Order[prov] = ids
 		}
 	} else {
 		profileID := ""
+		var acceptable []string
 		if gw.Spec.ModelAuth != nil {
 			profileID = gw.Spec.ModelAuth.ProfileID
 		}
 		if profileID == "" {
-			profileID, err = r.discoverOpenAIAuthProfile(ctx, pod, mode)
+			profileID, acceptable, err = r.discoverOpenAIAuthProfile(ctx, pod, mode)
 			if err != nil {
 				// In apiKey mode a stored profile is optional — the
 				// config-level apiKey is credential enough, so don't
@@ -433,6 +469,7 @@ func (r *AgentGatewayReconciler) reconcileModelProvidersAndAuth(ctx context.Cont
 			}
 			desired.Profiles[profileID] = map[string]string{"provider": "openai", "mode": profMode}
 			desired.Order["openai"] = []string{profileID}
+			desired.AcceptableOrder["openai"] = acceptable
 		}
 	}
 
@@ -505,7 +542,17 @@ for (const [id, prof] of Object.entries(desired.profiles || {})) {
   }
 }
 for (const [prov, ids] of Object.entries(desired.order || {})) {
-  if (!eq(cfg.auth.order[prov], ids)) {
+  // Stickiness: if the config already pins profile ids that all still
+  // satisfy the requested mode, keep them. Rewriting to an equally
+  // valid alternative would change the config, which restarts the
+  // gateway — on every reconcile, forever.
+  const acceptable = (desired.acceptableOrder || {})[prov] || [];
+  const current = cfg.auth.order[prov];
+  if (acceptable.length && Array.isArray(current) && current.length &&
+      current.every((id) => acceptable.includes(id))) {
+    continue;
+  }
+  if (!eq(current, ids)) {
     cfg.auth.order[prov] = ids;
     changed = true;
   }
