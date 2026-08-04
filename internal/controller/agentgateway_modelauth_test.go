@@ -17,10 +17,70 @@ limitations under the License.
 package controller
 
 import (
+	"encoding/json"
+	"os"
+	"strings"
 	"testing"
 
 	agentofficev1alpha1 "github.com/enterprisewebservice/agent-office-operator/api/v1alpha1"
 )
+
+// TestExtractJSONDocumentOnRealCLIOutput uses REAL captured stdout from
+// `openclaw models auth list --provider openai --json` on the running
+// gateway (testdata/models_auth_list.raw).
+//
+// The trap this guards: that output opens with a colorized
+// `[state-migrations]` banner, so the first '[' in the stream is inside
+// the ANSI escape \x1b[32m at byte offset 1 — long before any JSON.
+// The pre-existing extractJSON helper returns from that offset and
+// yields "[32m[state-migrations]...", which never parses. Credential
+// discovery would then fail on every reconcile and the gateway would
+// silently keep whatever billing route it already had.
+func TestExtractJSONDocumentOnRealCLIOutput(t *testing.T) {
+	raw, err := os.ReadFile("testdata/models_auth_list.raw")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+
+	// Guard the premise: the naive scan really is wrong here.
+	if naive := extractJSON(string(raw)); json.Valid([]byte(naive)) {
+		t.Fatalf("fixture no longer reproduces the ANSI trap; naive extractJSON parsed cleanly")
+	}
+
+	doc := extractJSONDocument(string(raw))
+	if doc == "" {
+		t.Fatal("extractJSONDocument found no JSON document in real CLI output")
+	}
+	var listing authProfileListing
+	if err := json.Unmarshal([]byte(doc), &listing); err != nil {
+		t.Fatalf("unmarshal extracted doc: %v (doc=%s)", err, doc)
+	}
+	if len(listing.Profiles) == 0 {
+		t.Fatal("no profiles parsed from real CLI output")
+	}
+	foundOAuth := false
+	for _, p := range listing.Profiles {
+		if p.Type == "oauth" {
+			foundOAuth = true
+			if !strings.HasPrefix(p.ID, "openai:") {
+				t.Errorf("oauth profile id %q does not look like an openai profile id", p.ID)
+			}
+		}
+	}
+	if !foundOAuth {
+		t.Error("no oauth profile parsed; subscription pinning would fail")
+	}
+}
+
+// TestExtractJSONDocumentRejectsGarbage asserts we return "" (so the
+// caller raises a real error) rather than handing back a bogus string.
+func TestExtractJSONDocumentRejectsGarbage(t *testing.T) {
+	for _, in := range []string{"", "no json here", "\x1b[32m[warn]\x1b[39m still nothing"} {
+		if got := extractJSONDocument(in); got != "" {
+			t.Errorf("extractJSONDocument(%q) = %q, want empty", in, got)
+		}
+	}
+}
 
 // TestCanonicalProviderID guards the regression that made every agent
 // turn fail silently on OpenClaw 2026.7.x: emitting

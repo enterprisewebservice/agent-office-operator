@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -231,6 +232,39 @@ func resolveModelAuthMode(gw *agentofficev1alpha1.AgentGateway) agentofficev1alp
 	return agentofficev1alpha1.ModelAuthModeAPIKey
 }
 
+// ansiEscape matches the SGR color sequences the openclaw CLI emits
+// even under --json.
+var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
+
+// extractJSONDocument pulls the first well-formed JSON document out of
+// noisy CLI output.
+//
+// It exists because extractJSON (which returns from the first '[' or
+// '{') cannot handle this command: `openclaw models auth list --json`
+// prefixes its output with a colorized `[state-migrations]` banner, so
+// the first '[' in the stream sits INSIDE the ANSI escape `\x1b[32m` —
+// several characters before any JSON. Naive scanning yields
+// "[32m[state-migrations]..." and fails to parse every time.
+//
+// Strategy: strip ANSI, then try each '{'/'[' as a start offset and
+// return the first substring that actually unmarshals. Returns "" when
+// no candidate parses, so callers can report a real error rather than
+// silently treating garbage as an empty result.
+func extractJSONDocument(s string) string {
+	clean := ansiEscape.ReplaceAllString(s, "")
+	for i, c := range clean {
+		if c != '{' && c != '[' {
+			continue
+		}
+		candidate := clean[i:]
+		var probe json.RawMessage
+		if json.Unmarshal([]byte(candidate), &probe) == nil {
+			return candidate
+		}
+	}
+	return ""
+}
+
 // authProfileRow is one entry from `openclaw models auth list --json`.
 type authProfileRow struct {
 	ID       string `json:"id"`
@@ -263,8 +297,12 @@ func (r *AgentGatewayReconciler) discoverOpenAIAuthProfile(
 	if err != nil {
 		return "", fmt.Errorf("models auth list: %w (out=%s)", err, out)
 	}
+	doc := extractJSONDocument(out)
+	if doc == "" {
+		return "", fmt.Errorf("no JSON document in auth list output (out=%s)", out)
+	}
 	var listing authProfileListing
-	if err := json.Unmarshal([]byte(extractJSON(out)), &listing); err != nil {
+	if err := json.Unmarshal([]byte(doc), &listing); err != nil {
 		return "", fmt.Errorf("parse auth list: %w (out=%s)", err, out)
 	}
 	// OpenClaw types: "oauth" (subscription), "api_key", "token".

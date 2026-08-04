@@ -1,0 +1,24 @@
+[32m[state-migrations][39m [33mLegacy state migration warnings:[39m
+[33m- Left legacy update-check state in place because shared SQLite state already differs: /home/node/.openclaw/update-check.json[39m
+{
+  "agentId": "main",
+  "agentDir": "~/.openclaw/agents/main/agent",
+  "authStatePath": "~/.openclaw/agents/main/agent/openclaw-agent.sqlite",
+  "provider": "openai",
+  "profiles": [
+    {
+      "id": "openai-codex:codex-sync",
+      "provider": "openai",
+      "type": "token",
+      "label": "openai-codex:codex-sync"
+    },
+    {
+      "id": "openai:peterson.dean@gmail.com",
+      "provider": "openai",
+      "type": "oauth",
+      "label": "openai:peterson.dean@gmail.com (peterson.dean@gmail.com)",
+      "email": "peterson.dean@gmail.com",
+      "expiresAt": "2026-08-13T21:55:00.207Z"
+    }
+  ]
+}
