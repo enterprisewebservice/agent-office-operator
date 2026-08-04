@@ -103,9 +103,13 @@ func (r *AgentWorkstationReconciler) reconcileSharedFull(ctx context.Context, aw
 	// IDENTITY.md / SOUL.md files in the agent's workspace dir.
 	agentID := aw.Name
 	profile := effectiveProfile(aw)
+	// Provider goes through CanonicalProviderID: `openai-codex` is a
+	// legacy provider id in OpenClaw 2026.7.x and must be emitted as
+	// `openai` (the subscription vs api-key choice is made by the
+	// gateway's auth.order, not by the model string).
 	model := "openai/gpt-5.4"
 	if aw.Spec.Model.ModelName != "" {
-		model = string(aw.Spec.Model.Provider) + "/" + aw.Spec.Model.ModelName
+		model = agentofficev1alpha1.CanonicalProviderID(aw.Spec.Model.Provider) + "/" + aw.Spec.Model.ModelName
 	}
 	agentEntry := map[string]interface{}{
 		"id":        agentID,

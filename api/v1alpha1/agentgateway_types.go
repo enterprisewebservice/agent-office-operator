@@ -123,6 +123,24 @@ type AgentGatewaySpec struct {
 	// +optional
 	CodexCredentialsSecretRef string `json:"codexCredentialsSecretRef,omitempty"`
 
+	// ModelAuth pins WHICH stored credential OpenClaw uses for the
+	// canonical `openai` provider — i.e. whether agent turns are
+	// billed against your ChatGPT/Codex subscription (OAuth) or
+	// against a pay-per-request API key.
+	//
+	// This exists because OpenClaw 2026.7.x collapsed `openai-codex`
+	// into the canonical `openai` provider: one gateway config can
+	// only describe ONE OpenAI route (one baseUrl + one credential
+	// order), so the billing route is a gateway-level property, not a
+	// per-agent one. Leaving it unset and relying on OpenClaw's
+	// implicit precedence is what silently fell back to API-key
+	// billing.
+	//
+	// Defaults to `subscription` when CodexCredentialsSecretRef is
+	// set, otherwise `apiKey`.
+	// +optional
+	ModelAuth *ModelAuthSpec `json:"modelAuth,omitempty"`
+
 	// AllowedUsers pre-approves channel senders so they skip the
 	// "OpenClaw: access not configured" pairing prompt on first
 	// contact. The operator merges these into the gateway's
@@ -137,6 +155,71 @@ type AgentGatewaySpec struct {
 	//       id: "745444500335231169"
 	// +optional
 	AllowedUsers []AllowedUser `json:"allowedUsers,omitempty"`
+}
+
+// ModelAuthMode selects which credential the canonical `openai`
+// provider is wired to.
+//
+// +kubebuilder:validation:Enum=subscription;apiKey
+type ModelAuthMode string
+
+const (
+	// ModelAuthModeSubscription routes agent turns through your
+	// ChatGPT/Codex plan: baseUrl https://chatgpt.com/backend-api,
+	// api `openai-chatgpt-responses`, NO apiKey in config, and
+	// auth.order pinned to the OAuth profile synced from
+	// ~/.codex/auth.json. Flat-rate — no per-token charges.
+	ModelAuthModeSubscription ModelAuthMode = "subscription"
+	// ModelAuthModeAPIKey routes agent turns through the metered
+	// OpenAI API: baseUrl https://api.openai.com/v1, api
+	// `openai-completions`, apiKey ${OPENAI_API_KEY}. Billed per
+	// token.
+	ModelAuthModeAPIKey ModelAuthMode = "apiKey"
+)
+
+// ModelCatalogEntry is one model advertised to agents on the
+// canonical `openai` provider.
+type ModelCatalogEntry struct {
+	// ID is the provider-side model id (e.g. "gpt-5.6-sol").
+	ID string `json:"id"`
+	// Name is the human-readable label. Defaults to ID.
+	// +optional
+	Name string `json:"name,omitempty"`
+}
+
+// ModelAuthSpec declares the gateway's model billing route and,
+// optionally, an exact credential pin and model catalog.
+type ModelAuthSpec struct {
+	// Mode selects the billing route. Empty ⇒ `subscription` when
+	// CodexCredentialsSecretRef is set, else `apiKey`.
+	// +optional
+	Mode ModelAuthMode `json:"mode,omitempty"`
+
+	// ProfileID pins an exact OpenClaw auth-profile id (e.g.
+	// "openai:you@example.com"). Empty ⇒ the operator discovers the
+	// profile at reconcile time by asking the running gateway
+	// (`openclaw models auth list --provider openai --json`) and
+	// picking the first one whose type matches Mode. Discovery is
+	// preferred: OAuth profile ids are derived from the account
+	// email, so they differ per user and change if the account does.
+	// +optional
+	ProfileID string `json:"profileId,omitempty"`
+
+	// Order is a full escape hatch: provider id ⇒ ordered auth
+	// profile ids, written verbatim to openclaw.json `auth.order`.
+	// Overrides Mode/ProfileID for any provider it names. Note
+	// OpenClaw treats an explicit order as EXCLUSIVE — profiles not
+	// listed are dropped from consideration entirely.
+	// +optional
+	Order map[string][]string `json:"order,omitempty"`
+
+	// Models overrides the model catalog seeded onto the canonical
+	// `openai` provider. Set this to advertise a newly released
+	// model without waiting for an operator release (same escape
+	// hatch as SkillsImage). Empty ⇒ the operator's built-in
+	// defaults for the selected Mode.
+	// +optional
+	Models []ModelCatalogEntry `json:"models,omitempty"`
 }
 
 // AllowedUser is one entry in AgentGatewaySpec.AllowedUsers — a

@@ -167,6 +167,78 @@ spec:
                 default: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/openclaw:latest
                 description: Image is the container image for the gateway runtime.
                 type: string
+              modelAuth:
+                description: |-
+                  ModelAuth pins WHICH stored credential OpenClaw uses for the
+                  canonical `openai` provider — i.e. whether agent turns are
+                  billed against your ChatGPT/Codex subscription (OAuth) or
+                  against a pay-per-request API key.
+
+                  This exists because OpenClaw 2026.7.x collapsed `openai-codex`
+                  into the canonical `openai` provider: one gateway config can
+                  only describe ONE OpenAI route (one baseUrl + one credential
+                  order), so the billing route is a gateway-level property, not a
+                  per-agent one. Leaving it unset and relying on OpenClaw's
+                  implicit precedence is what silently fell back to API-key
+                  billing.
+
+                  Defaults to `subscription` when CodexCredentialsSecretRef is
+                  set, otherwise `apiKey`.
+                properties:
+                  mode:
+                    description: |-
+                      Mode selects the billing route. Empty ⇒ `subscription` when
+                      CodexCredentialsSecretRef is set, else `apiKey`.
+                    enum:
+                    - subscription
+                    - apiKey
+                    type: string
+                  models:
+                    description: |-
+                      Models overrides the model catalog seeded onto the canonical
+                      `openai` provider. Set this to advertise a newly released
+                      model without waiting for an operator release (same escape
+                      hatch as SkillsImage). Empty ⇒ the operator's built-in
+                      defaults for the selected Mode.
+                    items:
+                      description: |-
+                        ModelCatalogEntry is one model advertised to agents on the
+                        canonical `openai` provider.
+                      properties:
+                        id:
+                          description: ID is the provider-side model id (e.g. "gpt-5.6-sol").
+                          type: string
+                        name:
+                          description: Name is the human-readable label. Defaults
+                            to ID.
+                          type: string
+                      required:
+                      - id
+                      type: object
+                    type: array
+                  order:
+                    additionalProperties:
+                      items:
+                        type: string
+                      type: array
+                    description: |-
+                      Order is a full escape hatch: provider id ⇒ ordered auth
+                      profile ids, written verbatim to openclaw.json `auth.order`.
+                      Overrides Mode/ProfileID for any provider it names. Note
+                      OpenClaw treats an explicit order as EXCLUSIVE — profiles not
+                      listed are dropped from consideration entirely.
+                    type: object
+                  profileId:
+                    description: |-
+                      ProfileID pins an exact OpenClaw auth-profile id (e.g.
+                      "openai:you@example.com"). Empty ⇒ the operator discovers the
+                      profile at reconcile time by asking the running gateway
+                      (`openclaw models auth list --provider openai --json`) and
+                      picking the first one whose type matches Mode. Discovery is
+                      preferred: OAuth profile ids are derived from the account
+                      email, so they differ per user and change if the account does.
+                    type: string
+                type: object
               nodeHostRef:
                 description: |-
                   NodeHostRef points at the paired node-host (KubeVirt VM today).

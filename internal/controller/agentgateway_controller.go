@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -84,12 +85,23 @@ func (r *AgentGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}
 
-	// 3. Ensure the gateway's openclaw.json has models.providers
-	//    declared. The init container is seed-only, so existing PVCs
-	//    that pre-date the providers field need an in-place merge.
-	//    Idempotent: if the provider already exists, this is a no-op.
-	if err := r.maybeMergeModelsProviders(ctx, &gw); err != nil {
-		log.Info("models.providers merge skipped", "err", err)
+	// 3. Converge the gateway's openclaw.json onto one canonical
+	//    `openai` provider pinned to the credential spec.modelAuth
+	//    asks for (subscription vs metered API key). The init
+	//    container is seed-only, so existing PVCs need this in-place.
+	//    Idempotent: a converged config reports NO_CHANGE and we
+	//    leave the pod alone.
+	if changed, err := r.reconcileModelProvidersAndAuth(ctx, &gw); err != nil {
+		log.Info("model provider/auth reconcile skipped", "err", err)
+	} else if changed {
+		// openclaw.json is read at process start — the write above is
+		// inert until the gateway restarts.
+		log.Info("model auth config changed; restarting gateway pods")
+		if err := r.restartGatewayPods(ctx, &gw); err != nil {
+			log.Error(err, "restart gateway pods after model auth change")
+		}
+		// Come back once the new pod is Ready to verify convergence.
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
 	// 4. Pre-approve channel senders listed in spec.allowedUsers by
@@ -184,20 +196,213 @@ if (added > 0) {
 	return nil
 }
 
-// maybeMergeModelsProviders ensures models.providers.openai exists in
-// the gateway's openclaw.json. Existing PVCs created before the
-// providers feature don't have it; without it, agents fail with
-// "No API key found for provider openai" even when OPENAI_API_KEY is
-// in the pod env. Idempotent — only writes when the field is absent
-// or shape-incomplete.
-func (r *AgentGatewayReconciler) maybeMergeModelsProviders(ctx context.Context, gw *agentofficev1alpha1.AgentGateway) error {
+// defaultSubscriptionModels is the catalog advertised when the
+// gateway is on the ChatGPT/Codex subscription route. These resolve
+// against chatgpt.com/backend-api and are only reachable with an
+// OAuth credential — gpt-5.6-sol in particular does NOT exist on the
+// metered API endpoint, so declaring it under an api-key provider
+// yields a silent lane rather than an error.
+var defaultSubscriptionModels = []agentofficev1alpha1.ModelCatalogEntry{
+	{ID: "gpt-5.6-sol", Name: "GPT-5.6 Sol"},
+	{ID: "gpt-5.6", Name: "GPT-5.6"},
+	{ID: "gpt-5.5", Name: "GPT-5.5"},
+	{ID: "gpt-5.4", Name: "GPT-5.4"},
+}
+
+// defaultAPIKeyModels is the catalog advertised on the metered API
+// route.
+var defaultAPIKeyModels = []agentofficev1alpha1.ModelCatalogEntry{
+	{ID: "gpt-5.5", Name: "GPT-5.5"},
+	{ID: "gpt-5.4", Name: "GPT-5.4"},
+	{ID: "gpt-4o-mini", Name: "gpt-4o-mini"},
+	{ID: "gpt-4o", Name: "gpt-4o"},
+}
+
+// resolveModelAuthMode returns the gateway's effective billing route.
+// Explicit spec wins; otherwise the presence of codex subscription
+// credentials implies the subscription route.
+func resolveModelAuthMode(gw *agentofficev1alpha1.AgentGateway) agentofficev1alpha1.ModelAuthMode {
+	if gw.Spec.ModelAuth != nil && gw.Spec.ModelAuth.Mode != "" {
+		return gw.Spec.ModelAuth.Mode
+	}
+	if gw.Spec.CodexCredentialsSecretRef != "" {
+		return agentofficev1alpha1.ModelAuthModeSubscription
+	}
+	return agentofficev1alpha1.ModelAuthModeAPIKey
+}
+
+// authProfileRow is one entry from `openclaw models auth list --json`.
+type authProfileRow struct {
+	ID       string `json:"id"`
+	Provider string `json:"provider"`
+	Type     string `json:"type"`
+	Email    string `json:"email"`
+}
+
+// authProfileListing is the envelope that command returns.
+type authProfileListing struct {
+	Profiles []authProfileRow `json:"profiles"`
+}
+
+// discoverOpenAIAuthProfile asks the running gateway which credentials
+// it actually holds for provider `openai` and returns the profile id
+// matching the desired mode.
+//
+// Discovery (rather than a hardcoded id) is required because OpenClaw
+// derives OAuth profile ids from the account email —
+// `openai:you@example.com` — so the id is per-user and changes if the
+// account does. The credential itself arrives via
+// spec.codexCredentialsSecretRef → ~/.codex/auth.json, which OpenClaw
+// imports on startup.
+func (r *AgentGatewayReconciler) discoverOpenAIAuthProfile(
+	ctx context.Context, pod *corev1.Pod, mode agentofficev1alpha1.ModelAuthMode,
+) (string, error) {
+	out, err := r.execInGatewayPod(ctx, pod, []string{
+		"openclaw", "models", "auth", "list", "--provider", "openai", "--json",
+	})
+	if err != nil {
+		return "", fmt.Errorf("models auth list: %w (out=%s)", err, out)
+	}
+	var listing authProfileListing
+	if err := json.Unmarshal([]byte(extractJSON(out)), &listing); err != nil {
+		return "", fmt.Errorf("parse auth list: %w (out=%s)", err, out)
+	}
+	// OpenClaw types: "oauth" (subscription), "api_key", "token".
+	want := "oauth"
+	if mode == agentofficev1alpha1.ModelAuthModeAPIKey {
+		want = "api_key"
+	}
+	for _, p := range listing.Profiles {
+		if p.Type == want {
+			return p.ID, nil
+		}
+	}
+	return "", fmt.Errorf("no %q auth profile for provider openai (have %d profiles)", want, len(listing.Profiles))
+}
+
+// desiredOpenAIConfig is the JSON contract handed to the in-pod node
+// script: the exact provider block + auth wiring the gateway should
+// converge on.
+type desiredOpenAIConfig struct {
+	Provider map[string]interface{}       `json:"provider"`
+	Profiles map[string]map[string]string `json:"profiles"`
+	Order    map[string][]string          `json:"order"`
+}
+
+// reconcileModelProvidersAndAuth converges the gateway's openclaw.json
+// onto exactly ONE canonical `openai` provider wired to the credential
+// the spec asks for, and pins auth.order so OpenClaw cannot silently
+// pick a different one.
+//
+// Why this is not a simple "seed if absent" merge any more:
+//
+//  1. OpenClaw 2026.7.x folded provider `openai-codex` INTO canonical
+//     `openai`. Keeping both blocks meant the subscription models
+//     (gpt-5.6-sol) were declared under the legacy id while the
+//     canonical block supplied baseUrl api.openai.com + an API key —
+//     so a ChatGPT OAuth token got sent to the metered endpoint and
+//     every agent turn died silently. The legacy block must be
+//     DELETED, not merged alongside.
+//  2. The api id `openai-codex-responses` was REMOVED in 7.x; the
+//     replacement is `openai-chatgpt-responses`.
+//  3. With no auth.order, OpenClaw picks a credential implicitly. A
+//     stale `token`-type profile or a config-level apiKey can win over
+//     the subscription, which is how agent turns ended up on
+//     pay-per-token billing without anyone choosing that. An explicit
+//     auth.order is EXCLUSIVE in OpenClaw — profiles not listed are
+//     dropped — so pinning it makes the billing route deterministic.
+//
+// Returns true when it changed the config (caller must restart the
+// gateway: openclaw.json is read at process start).
+func (r *AgentGatewayReconciler) reconcileModelProvidersAndAuth(ctx context.Context, gw *agentofficev1alpha1.AgentGateway) (bool, error) {
 	if r.RestConfig == nil {
-		return fmt.Errorf("RestConfig not set; cannot exec")
+		return false, fmt.Errorf("RestConfig not set; cannot exec")
 	}
 	pod, err := r.findReadyGatewayPod(ctx, gw)
 	if err != nil {
-		return err
+		return false, err
 	}
+
+	mode := resolveModelAuthMode(gw)
+
+	// Model catalog: spec override, else built-in default for the mode.
+	catalog := defaultSubscriptionModels
+	if mode == agentofficev1alpha1.ModelAuthModeAPIKey {
+		catalog = defaultAPIKeyModels
+	}
+	if gw.Spec.ModelAuth != nil && len(gw.Spec.ModelAuth.Models) > 0 {
+		catalog = gw.Spec.ModelAuth.Models
+	}
+
+	// Provider block. The two routes differ in baseUrl, api, and
+	// whether an apiKey is present at all — a subscription gateway
+	// must NOT carry `apiKey`, or OpenClaw has a metered credential
+	// available to fall back to.
+	provider := map[string]interface{}{}
+	models := make([]map[string]interface{}, 0, len(catalog))
+	switch mode {
+	case agentofficev1alpha1.ModelAuthModeAPIKey:
+		provider["baseUrl"] = "https://api.openai.com/v1"
+		provider["api"] = "openai-completions"
+		provider["apiKey"] = "${OPENAI_API_KEY}"
+		for _, m := range catalog {
+			models = append(models, map[string]interface{}{"id": m.ID, "name": defaultIfEmpty(m.Name, m.ID)})
+		}
+	default: // subscription
+		provider["baseUrl"] = "https://chatgpt.com/backend-api"
+		provider["api"] = "openai-chatgpt-responses"
+		for _, m := range catalog {
+			models = append(models, map[string]interface{}{
+				"id": m.ID, "name": defaultIfEmpty(m.Name, m.ID), "api": "openai-chatgpt-responses",
+			})
+		}
+	}
+	provider["models"] = models
+
+	desired := desiredOpenAIConfig{
+		Provider: provider,
+		Profiles: map[string]map[string]string{},
+		Order:    map[string][]string{},
+	}
+
+	// Pin the credential. Explicit spec.modelAuth.order wins outright;
+	// otherwise pin the single profile matching the mode.
+	if gw.Spec.ModelAuth != nil && len(gw.Spec.ModelAuth.Order) > 0 {
+		for prov, ids := range gw.Spec.ModelAuth.Order {
+			desired.Order[prov] = ids
+		}
+	} else {
+		profileID := ""
+		if gw.Spec.ModelAuth != nil {
+			profileID = gw.Spec.ModelAuth.ProfileID
+		}
+		if profileID == "" {
+			profileID, err = r.discoverOpenAIAuthProfile(ctx, pod, mode)
+			if err != nil {
+				// In apiKey mode a stored profile is optional — the
+				// config-level apiKey is credential enough, so don't
+				// block the provider write on it.
+				if mode != agentofficev1alpha1.ModelAuthModeAPIKey {
+					return false, fmt.Errorf("pin subscription credential: %w", err)
+				}
+				logf.FromContext(ctx).V(1).Info("no stored api_key profile; relying on config apiKey", "err", err)
+			}
+		}
+		if profileID != "" {
+			profMode := "oauth"
+			if mode == agentofficev1alpha1.ModelAuthModeAPIKey {
+				profMode = "api_key"
+			}
+			desired.Profiles[profileID] = map[string]string{"provider": "openai", "mode": profMode}
+			desired.Order["openai"] = []string{profileID}
+		}
+	}
+
+	desiredJSON, err := json.Marshal(desired)
+	if err != nil {
+		return false, fmt.Errorf("marshal desired openai config: %w", err)
+	}
+
 	script := `
 const fs = require("fs");
 const p = "/home/node/.openclaw/openclaw.json";
@@ -227,55 +432,87 @@ if (envTok && cfg.gateway.remote.token !== envTok) {
   changed = true;
 }
 
-// Pay-per-request OpenAI provider (uses OPENAI_API_KEY env).
-if (!cfg.models.providers.openai || !cfg.models.providers.openai.apiKey) {
-  cfg.models.providers.openai = {
-    baseUrl: "https://api.openai.com/v1",
-    api: "openai-completions",
-    apiKey: "${OPENAI_API_KEY}",
-    models: [
-      { id: "gpt-5.5", name: "GPT-5.5" },
-      { id: "gpt-5.4", name: "gpt-5.4" },
-      { id: "gpt-4o-mini", name: "gpt-4o-mini" },
-      { id: "gpt-4o", name: "gpt-4o" }
-    ]
-  };
+// Desired state computed by the operator from the AgentGateway spec.
+const desired = JSON.parse(process.argv[1]);
+const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+// ONE canonical openai provider, wired to exactly one credential
+// route. Declarative overwrite (not seed-if-absent): a drifted or
+// hand-edited block must converge back, and the api-key vs
+// subscription shapes are mutually exclusive.
+if (!eq(cfg.models.providers.openai, desired.provider)) {
+  cfg.models.providers.openai = desired.provider;
   changed = true;
 }
 
-// ChatGPT Pro / Codex provider (OAuth via ~/.codex/auth.json).
-// pi-ai's stock model catalog is outdated and only goes up to
-// gpt-5.3-codex; declare current models here so users can ask for
-// gpt-5.4/5.5 without OpenClaw silently falling back to the
-// rate-limited openai/gpt-X path.
-const codexNeedsSeed = !cfg.models.providers["openai-codex"]
-  || !Array.isArray(cfg.models.providers["openai-codex"].models)
-  || cfg.models.providers["openai-codex"].models.length === 0;
-if (codexNeedsSeed) {
-  cfg.models.providers["openai-codex"] = {
-    baseUrl: "https://chatgpt.com/backend-api",
-    api: "openai-codex-responses",
-    models: [
-      { id: "gpt-5.5", name: "GPT-5.5", api: "openai-codex-responses" },
-      { id: "gpt-5.4", name: "GPT-5.4", api: "openai-codex-responses" },
-      { id: "gpt-5.3-codex", name: "GPT-5.3 Codex", api: "openai-codex-responses" }
-    ]
-  };
+// Delete the legacy provider id. OpenClaw 2026.7.x folds
+// "openai-codex" into "openai" and rejects it as a legacy id; leaving
+// it in place is what let subscription-only models resolve against
+// the metered api.openai.com block.
+if (cfg.models.providers["openai-codex"]) {
+  delete cfg.models.providers["openai-codex"];
+  changed = true;
+}
+
+// auth.profiles carries routing metadata only (provider + mode) —
+// never secret material. Credentials live in the agent auth store,
+// seeded from the mounted ~/.codex/auth.json.
+cfg.auth = cfg.auth || {};
+cfg.auth.profiles = cfg.auth.profiles || {};
+cfg.auth.order = cfg.auth.order || {};
+for (const [id, prof] of Object.entries(desired.profiles || {})) {
+  if (!eq(cfg.auth.profiles[id], prof)) {
+    cfg.auth.profiles[id] = prof;
+    changed = true;
+  }
+}
+for (const [prov, ids] of Object.entries(desired.order || {})) {
+  if (!eq(cfg.auth.order[prov], ids)) {
+    cfg.auth.order[prov] = ids;
+    changed = true;
+  }
+}
+// An order keyed by the legacy provider id validates but is silently
+// ignored for provider "openai" — drop it so it can't mislead.
+if (cfg.auth.order["openai-codex"]) {
+  delete cfg.auth.order["openai-codex"];
   changed = true;
 }
 
 if (changed) {
   fs.writeFileSync(p, JSON.stringify(cfg, null, 2));
-  console.log("MERGED_MODELS_PROVIDERS");
+  console.log("RECONCILED_MODEL_AUTH");
 } else {
   console.log("NO_CHANGE");
 }
 `
-	out, err := r.execInGatewayPod(ctx, pod, []string{"node", "-e", script})
+	out, err := r.execInGatewayPod(ctx, pod, []string{"node", "-e", script, string(desiredJSON)})
 	if err != nil {
-		return fmt.Errorf("merge models.providers: %w (out=%s)", err, out)
+		return false, fmt.Errorf("reconcile model providers/auth: %w (out=%s)", err, out)
 	}
-	logf.FromContext(ctx).V(1).Info("models.providers merge", "result", strings.TrimSpace(out))
+	result := strings.TrimSpace(out)
+	logf.FromContext(ctx).V(1).Info("model provider/auth reconcile", "mode", mode, "result", result)
+	return strings.Contains(result, "RECONCILED_MODEL_AUTH"), nil
+}
+
+// restartGatewayPods deletes the gateway's pods so a changed
+// openclaw.json takes effect — OpenClaw reads its config at process
+// start, so an in-place PVC write is inert until the process restarts.
+// Safe to call repeatedly only because its caller gates on an
+// idempotent "config actually changed" signal.
+func (r *AgentGatewayReconciler) restartGatewayPods(ctx context.Context, gw *agentofficev1alpha1.AgentGateway) error {
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods,
+		client.InNamespace(gw.Namespace),
+		client.MatchingLabels{"agentoffice.ai/gateway": gw.Name},
+	); err != nil {
+		return err
+	}
+	for i := range pods.Items {
+		if err := r.Delete(ctx, &pods.Items[i]); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -435,7 +672,6 @@ func (r *AgentGatewayReconciler) execInGatewayPod(ctx context.Context, pod *core
 	}
 	return stdout.String(), nil
 }
-
 
 // reconcileGatewayStatus reads the owned Deployment + Route and
 // counts how many AgentWorkstations reference this gateway. Updates

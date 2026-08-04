@@ -34,19 +34,42 @@ const (
 	// ModelProviderOpenAI talks to OpenAI's pay-per-request API
 	// using an OPENAI_API_KEY (rate-limited).
 	ModelProviderOpenAI ModelProvider = "openai"
-	// ModelProviderOpenAICodex routes through a ChatGPT/Codex
-	// subscription via OAuth — uses your existing Pro/Team plan
-	// quota instead of the API tier. Requires the gateway pod to
-	// have ~/.codex/auth.json populated; set
-	// AgentGateway.spec.codexCredentialsSecretRef so the operator
-	// mounts your codex-subscription-credentials secret there.
-	// OpenClaw natively syncs the file into its own auth-profiles
-	// store on agent startup (see pi-ai
-	// readCodexCliCredentials / syncExternalCliCredentialsForProvider).
+	// ModelProviderOpenAICodex expresses INTENT: "bill this agent
+	// against my ChatGPT/Codex subscription, not the metered API".
+	//
+	// It is NOT written through to OpenClaw verbatim. As of OpenClaw
+	// 2026.7.x, `openai-codex` is a *legacy provider id* that the
+	// runtime folds into canonical `openai` (it errors with
+	// `"openai-codex" is a legacy provider ID. Run
+	// `openclaw doctor --fix``). So the operator normalizes this to
+	// `openai` when rendering the agent's model string — see
+	// CanonicalProviderID.
+	//
+	// The subscription actually takes effect at the GATEWAY level:
+	// set AgentGateway.spec.codexCredentialsSecretRef (mounts your
+	// ~/.codex/auth.json, which OpenClaw imports as an OAuth auth
+	// profile) and the gateway's ModelAuth mode resolves to
+	// `subscription`, which pins auth.order to that OAuth profile.
+	// Because a gateway config describes only one OpenAI route,
+	// agents sharing a gateway share its billing route.
 	ModelProviderOpenAICodex ModelProvider = "openai-codex"
 	// ModelProviderCustom is for any other endpoint.
 	ModelProviderCustom ModelProvider = "custom"
 )
+
+// CanonicalProviderID maps an AgentWorkstation-facing provider value
+// to the provider id OpenClaw actually accepts in a model string.
+//
+// Only `openai-codex` is remapped: OpenClaw 2026.7.x collapsed it
+// into canonical `openai` and rejects the old id as legacy. Emitting
+// `openai-codex/gpt-5.6-sol` produced an agent that resolved against
+// a legacy provider block and silently failed every turn.
+func CanonicalProviderID(p ModelProvider) string {
+	if p == ModelProviderOpenAICodex {
+		return string(ModelProviderOpenAI)
+	}
+	return string(p)
+}
 
 // ModelSpec selects the LLM backend the agent uses.
 type ModelSpec struct {
