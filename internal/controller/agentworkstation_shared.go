@@ -35,22 +35,22 @@ import (
 // reconcileSharedFull is the real implementation of runtime.shared.
 // Step-3 deliverable: when an AgentWorkstation has
 // `spec.runtime.shared.gatewayRef: <name>`, the operator:
-//   1. Looks up the AgentGateway by name in the same namespace.
-//   2. Waits for the gateway pod to be Ready.
-//   3. Builds the agent's openclaw `agents.list[]` entry from the AW
-//      spec (id, displayName, model, systemPromptOverride,
-//      workspace path).
-//   4. Renders the per-agent SOUL.md / IDENTITY.md / TOOLS.md /
-//      AGENTS.md files into the gateway's PVC at
-//      ~/.openclaw/workspaces/<aw>/  via `kubectl exec`.
-//   5. Runs `openclaw config set agents.list[]` against the gateway
-//      pod via the same exec channel — appending the new agent.
-//   6. If channels.discord.url is set, parses out the channel ID and
-//      adds a `bindings[]` entry routing that Discord channel to
-//      this agent.
-//   7. Adds this agent's browser profile to the gateway's
-//      nodeHost.browserProxy.allowProfiles allowlist so the shared
-//      browser VM serves it an isolated Chromium user-data-dir.
+//  1. Looks up the AgentGateway by name in the same namespace.
+//  2. Waits for the gateway pod to be Ready.
+//  3. Builds the agent's openclaw `agents.list[]` entry from the AW
+//     spec (id, displayName, model, systemPromptOverride,
+//     workspace path).
+//  4. Renders the per-agent SOUL.md / IDENTITY.md / TOOLS.md /
+//     AGENTS.md files into the gateway's PVC at
+//     ~/.openclaw/workspaces/<aw>/  via `kubectl exec`.
+//  5. Runs `openclaw config set agents.list[]` against the gateway
+//     pod via the same exec channel — appending the new agent.
+//  6. If channels.discord.url is set, parses out the channel ID and
+//     adds a `bindings[]` entry routing that Discord channel to
+//     this agent.
+//  7. Adds this agent's browser profile to the gateway's
+//     nodeHost.browserProxy.allowProfiles allowlist so the shared
+//     browser VM serves it an isolated Chromium user-data-dir.
 //
 // All operations are idempotent — operator can re-run safely.
 //
@@ -619,9 +619,10 @@ func (r *AgentWorkstationReconciler) execInPod(ctx context.Context, pod *corev1.
 
 // parseDiscordChannelID extracts the channel snowflake from URLs of
 // the shapes:
-//   https://discord.com/channels/<guild>/<channel>
-//   https://discord.com/channels/@me      -> empty (DM landing, no channel)
-//   https://discord.gg/<invite>           -> empty (invite, no channel)
+//
+//	https://discord.com/channels/<guild>/<channel>
+//	https://discord.com/channels/@me      -> empty (DM landing, no channel)
+//	https://discord.gg/<invite>           -> empty (invite, no channel)
 func parseDiscordChannelID(url string) string {
 	const prefix = "https://discord.com/channels/"
 	if !strings.HasPrefix(url, prefix) {

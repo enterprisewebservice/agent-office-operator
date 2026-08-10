@@ -346,6 +346,10 @@ func main() {
 		// (skills + tools + knowledge bases) consumed by the
 		// search-first composer. See catalog_packs.go.
 		mux.Handle("/catalog/packs", catalogSkills)
+		// v1.7.12: POST /catalog/recommend — describe the job, get
+		// identity + pack selection back (model-constrained-to-catalog
+		// with deterministic fallback). See catalog_recommend.go.
+		mux.Handle("/catalog/recommend", catalogSkills)
 		mux.HandleFunc("/healthz/backstage", func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte("ok"))
 		})

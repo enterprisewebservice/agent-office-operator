@@ -65,9 +65,9 @@ const trainerImagePlaceholder = "{{TRAINER_IMAGE}}"
 //
 // Lookup precedence (resolveTrainerImage):
 //
-//   1. p.Spec.Trainer.Image                                — explicit per-project pin
-//   2. ConfigMap autoresearch-defaults.trainerImage         — namespace default
-//   3. defaultTrainerImage const in controller package      — last-resort fallback
+//  1. p.Spec.Trainer.Image                                — explicit per-project pin
+//  2. ConfigMap autoresearch-defaults.trainerImage         — namespace default
+//  3. defaultTrainerImage const in controller package      — last-resort fallback
 const trainerImageDefaultsConfigMap = "autoresearch-defaults"
 
 // dspPipelineName + dspPipelineDescription are constants
@@ -97,7 +97,8 @@ var dspCache = &dspClientCache{clients: map[string]*dsp.Client{}}
 // path. The result is cached per namespace.
 //
 // In-cluster URL pattern from RHOAI:
-//   ds-pipeline-<dspa>.<namespace>.svc.cluster.local:8443
+//
+//	ds-pipeline-<dspa>.<namespace>.svc.cluster.local:8443
 //
 // where <dspa> is the DataSciencePipelinesApplication's name —
 // we hard-code "dspa" because that's the conventional one-per-
@@ -419,7 +420,7 @@ func deriveModelRegistryTarget(ctx context.Context, c client.Client, p *agentoff
 		name string
 		port int
 	}{
-		{instance, 8080},          // current shape (RHOAI 3.3.1 v1beta1)
+		{instance, 8080},           // current shape (RHOAI 3.3.1 v1beta1)
 		{instance + "-rest", 8443}, // legacy shape
 	}
 	for _, cand := range candidates {
@@ -491,17 +492,17 @@ func (r *AutoResearchProjectReconciler) submitDSPRun(ctx context.Context, p *age
 	p.Status.Conditions = mergeARPConditions(p.Status.Conditions, mrCond)
 
 	params := map[string]any{
-		"base_model":              p.Spec.BaseModel.HuggingfaceID,
-		"base_model_revision":     defaultIfEmpty(p.Spec.BaseModel.Revision, "main"),
-		"training_data":           p.Spec.TrainingData.HuggingfaceDataset,
-		"training_split":          defaultIfEmpty(p.Spec.TrainingData.Split, "train"),
-		"training_sample_count":   sampleCount,
-		"qlora_config_json":       string(cfgJSON),
-		"eval_metric":             defaultIfEmpty(p.Spec.Eval.Metric, "eval_loss"),
-		"eval_direction":          defaultIfEmpty(p.Spec.Eval.Direction, "minimize"),
-		"autoresearch_project":    p.Name,
-		"autoresearch_round":      round,
-		"autoresearch_run_id":     runID,
+		"base_model":            p.Spec.BaseModel.HuggingfaceID,
+		"base_model_revision":   defaultIfEmpty(p.Spec.BaseModel.Revision, "main"),
+		"training_data":         p.Spec.TrainingData.HuggingfaceDataset,
+		"training_split":        defaultIfEmpty(p.Spec.TrainingData.Split, "train"),
+		"training_sample_count": sampleCount,
+		"qlora_config_json":     string(cfgJSON),
+		"eval_metric":           defaultIfEmpty(p.Spec.Eval.Metric, "eval_loss"),
+		"eval_direction":        defaultIfEmpty(p.Spec.Eval.Direction, "minimize"),
+		"autoresearch_project":  p.Name,
+		"autoresearch_round":    round,
+		"autoresearch_run_id":   runID,
 		// New in v0.0.43: adapter persistence + registration.
 		"adapter_push_destination": quayDest,
 		"model_registry_url":       mrURL,
@@ -815,4 +816,3 @@ func (r *AutoResearchProjectReconciler) readQuayBasicAuth(ctx context.Context, n
 	}
 	return ""
 }
-

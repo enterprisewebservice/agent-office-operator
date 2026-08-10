@@ -81,12 +81,12 @@ func (r *KnowledgeBaseReconciler) reconcileGitSyncConfigMap(ctx context.Context,
 			"app.kubernetes.io/component":  "git-sync",
 		}
 		cm.Data = map[string]string{
-			"sync.sh":              gitSyncScript,
-			"mkdocs.yml":           renderMkdocsYAML(kb),
-			"catalog-info.yaml":    renderCatalogInfoYAML(kb),
-			"obsidian_link.py":     obsidianLinkHook,
-			"gitignore":            kbGitignore,
-			"README.md":            renderReadme(kb),
+			"sync.sh":           gitSyncScript,
+			"mkdocs.yml":        renderMkdocsYAML(kb),
+			"catalog-info.yaml": renderCatalogInfoYAML(kb),
+			"obsidian_link.py":  obsidianLinkHook,
+			"gitignore":         kbGitignore,
+			"README.md":         renderReadme(kb),
 		}
 
 		// v0.0.53: if this KnowledgeBase is bound to an
@@ -320,29 +320,29 @@ content. You can read it three ways:
   You get graph view, Dataview tables, Marp slides, and the rest of the
   Obsidian feature set against the same Markdown the agents wrote.
 - **The cluster gateway pod** — agents read/write the source files on the
-  wiki PVC at ` + "`/home/node/.openclaw/wiki/" + kb.Name + "/`" + `, which is
+  wiki PVC at `+"`/home/node/.openclaw/wiki/"+kb.Name+"/`"+`, which is
   bidirectionally synced to this git repo every few minutes.
 
 ## Wiki layout
 
-- ` + "`raw/clips/`" + ` — unsorted captures (filed by the ` + "`wiki-clip`" + ` skill)
-- ` + "`topics/<area>/`" + ` — curated articles (filed by the ` + "`wiki-write`" + ` skill)
-- ` + "`concepts/`" + ` — canonical concept pages
-- ` + "`queries/`" + ` — Q&A snapshots from past sessions
-- ` + "`_index.md`" + ` — top-level manifest, kept fresh by the linter
-- ` + "`log.md`" + ` — chronological activity feed,
-  ` + "`## [YYYY-MM-DD] <op> | <subject>`" + ` per entry
+- `+"`raw/clips/`"+` — unsorted captures (filed by the `+"`wiki-clip`"+` skill)
+- `+"`topics/<area>/`"+` — curated articles (filed by the `+"`wiki-write`"+` skill)
+- `+"`concepts/`"+` — canonical concept pages
+- `+"`queries/`"+` — Q&A snapshots from past sessions
+- `+"`_index.md`"+` — top-level manifest, kept fresh by the linter
+- `+"`log.md`"+` — chronological activity feed,
+  `+"`## [YYYY-MM-DD] <op> | <subject>`"+` per entry
 
 ## How to contribute from your laptop
 
-1. ` + "`git clone <this-repo>`" + ` somewhere on your machine.
+1. `+"`git clone <this-repo>`"+` somewhere on your machine.
 2. Open the directory as an Obsidian vault.
 3. Edit, paste, clip — Obsidian saves to the same Markdown files agents
    read.
-4. ` + "`git push`" + ` — within a few minutes the cluster sidecar pulls your
+4. `+"`git push`"+` — within a few minutes the cluster sidecar pulls your
    changes and agents see them on their next session.
 
-The cluster's ` + "`KnowledgeBase/%s`" + ` resource owns this repo. Don't change the
+The cluster's `+"`KnowledgeBase/%s`"+` resource owns this repo. Don't change the
 wiki's structure here without coordinating — agents have skill prompts that
 expect the layout above.
 `, displayName, kb.Spec.Description, kb.Name)
@@ -725,14 +725,14 @@ over many rounds without human intervention.
 `+"```"+`
 
 Every arrow back to **W** lands as an observable artifact in this
-vault: ` + "`proposals/round-N.{yaml,md}`" + ` at submission time,
-` + "`results/round-N.md`" + ` + a new ` + "`log/log.md`" + ` entry
+vault: `+"`proposals/round-N.{yaml,md}`"+` at submission time,
+`+"`results/round-N.md`"+` + a new `+"`log/log.md`"+` entry
 when the round completes.
 
 ## Success criteria
 
 - [ ] First round completes with adapter persisted to Quay
-- [ ] ` + "`%s`" + ` improves over the base-model baseline
+- [ ] `+"`%s`"+` improves over the base-model baseline
 - [ ] Agent-proposed config + reasoning visible in `+"`proposals/`"+`
 - [ ] ModelVersion auto-registered in RHOAI Model Registry
 - [ ] HumanEval (or equivalent) score auto-computed for each kept adapter
@@ -761,7 +761,7 @@ func renderAutoresearchDashboard(projectName string, p *agentofficev1alpha1.Auto
 
 A bird's-eye view of every round this project has run. The table
 below is appended by the operator on each successful drain. The
-agent reasoning links lead to ` + "`proposals/round-N.md`" + `, which
+agent reasoning links lead to `+"`proposals/round-N.md`"+`, which
 the experimenter writes at submission time.
 
 ## Loop settings
@@ -959,4 +959,3 @@ func (r *KnowledgeBaseReconciler) refreshWikiCredentialsSecret(
 	}
 	return nil
 }
-

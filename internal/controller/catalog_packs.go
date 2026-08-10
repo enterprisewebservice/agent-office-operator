@@ -11,6 +11,7 @@ You may obtain a copy of the License at
 package controller
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -94,16 +95,39 @@ func (h *CatalogSkillsHandler) listPacks(w http.ResponseWriter, r *http.Request)
 			typeFilter[strings.TrimSpace(t)] = true
 		}
 	}
-	wantType := func(t string) bool { return len(typeFilter) == 0 || typeFilter[t] }
+	items, err := h.gatherPacks(ctx, typeFilter)
+	if err != nil {
+		writeCatalogJSONError(w, http.StatusInternalServerError, err)
+		return
+	}
 
+	if q != "" {
+		filtered := items[:0]
+		for _, p := range items {
+			hay := strings.ToLower(p.Name + " " + p.DisplayName + " " + p.Description)
+			if strings.Contains(hay, q) {
+				filtered = append(filtered, p)
+			}
+		}
+		items = filtered
+	}
+
+	writeCatalogJSON(w, http.StatusOK, map[string]any{
+		"items": items,
+		"count": len(items),
+	})
+}
+
+// gatherPacks assembles the full typed catalog (already sorted
+// deterministically). typeFilter empty ⇒ all types.
+func (h *CatalogSkillsHandler) gatherPacks(ctx context.Context, typeFilter map[string]bool) ([]catalogPack, error) {
+	wantType := func(t string) bool { return len(typeFilter) == 0 || typeFilter[t] }
 	items := make([]catalogPack, 0, 32)
 
 	if wantType("skill") {
 		var skills agentofficev1alpha1.SkillList
 		if err := h.client.List(ctx, &skills, client.InNamespace(h.namespace)); err != nil {
-			writeCatalogJSONError(w, http.StatusInternalServerError,
-				fmt.Errorf("listing skills: %w", err))
-			return
+			return nil, fmt.Errorf("listing skills: %w", err)
 		}
 		for i := range skills.Items {
 			e := h.toCatalogEntry(ctx, &skills.Items[i])
@@ -167,17 +191,6 @@ func (h *CatalogSkillsHandler) listPacks(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	if q != "" {
-		filtered := items[:0]
-		for _, p := range items {
-			hay := strings.ToLower(p.Name + " " + p.DisplayName + " " + p.Description)
-			if strings.Contains(hay, q) {
-				filtered = append(filtered, p)
-			}
-		}
-		items = filtered
-	}
-
 	// Deterministic: skills, tools, kbs; name asc within type.
 	order := map[string]int{"skill": 0, "tool": 1, "kb": 2}
 	sort.Slice(items, func(i, j int) bool {
@@ -186,9 +199,5 @@ func (h *CatalogSkillsHandler) listPacks(w http.ResponseWriter, r *http.Request)
 		}
 		return items[i].Name < items[j].Name
 	})
-
-	writeCatalogJSON(w, http.StatusOK, map[string]any{
-		"items": items,
-		"count": len(items),
-	})
+	return items, nil
 }

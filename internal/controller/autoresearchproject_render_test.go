@@ -324,7 +324,6 @@ func TestValidateQLoRAConfig(t *testing.T) {
 	}
 }
 
-
 // ---- end of v0.0.52 agent-integration tests ----
 
 // ---- v0.0.53: KnowledgeBase autoresearch-bootstrap tests ----
@@ -355,7 +354,7 @@ func TestRenderAutoresearchGoals(t *testing.T) {
 		"ise-uiuc/Magicoder-OSS-Instruct-75K",
 		"eval_loss",
 		"minimize",
-		"mermaid",       // the loop diagram
+		"mermaid", // the loop diagram
 		"Success criteria",
 	} {
 		if !strings.Contains(out, want) {
@@ -451,16 +450,16 @@ func TestMvToBackstageResource_BaseModel(t *testing.T) {
 		"description": "IBM Granite 4.1-8B Instruct.",
 	}
 	mv := map[string]any{
-		"id":                 "2",
-		"name":               "main",
-		"registeredModelId":  "1",
+		"id":                "2",
+		"name":              "main",
+		"registeredModelId": "1",
 		"customProperties": map[string]any{
 			"uri": map[string]any{
-				"string_value":  "huggingface://ibm-granite/granite-4.1-8b",
+				"string_value": "huggingface://ibm-granite/granite-4.1-8b",
 				"metadataType": "MetadataStringValue",
 			},
 			"kind": map[string]any{
-				"string_value":  "base-model",
+				"string_value": "base-model",
 				"metadataType": "MetadataStringValue",
 			},
 		},
@@ -514,19 +513,19 @@ func TestMvToBackstageResource_FineTuned(t *testing.T) {
 		"registeredModelId": "3",
 		"customProperties": map[string]any{
 			"adapter_uri": map[string]any{
-				"string_value":  "quay-quay.../adapters:round-37",
+				"string_value": "quay-quay.../adapters:round-37",
 				"metadataType": "MetadataStringValue",
 			},
 			"eval_loss": map[string]any{
-				"string_value":  "0.496074",
+				"string_value": "0.496074",
 				"metadataType": "MetadataStringValue",
 			},
 			"kept": map[string]any{
-				"string_value":  "true",
+				"string_value": "true",
 				"metadataType": "MetadataStringValue",
 			},
 			"kind": map[string]any{
-				"string_value":  "fine-tuned-adapter",
+				"string_value": "fine-tuned-adapter",
 				"metadataType": "MetadataStringValue",
 			},
 		},
@@ -545,11 +544,11 @@ func TestMvToBackstageResource_FineTuned(t *testing.T) {
 // trailing dashes, all-bad-chars).
 func TestSanitizeName(t *testing.T) {
 	cases := map[string]string{
-		"ibm-granite/granite-4.1-8b":         "ibm-granite-granite-4-1-8b",
-		"AutoResearch/Granite-8B":            "autoresearch-granite-8b",
-		"foo.bar.baz":                        "foo-bar-baz",
-		"!!@@##":                             "model",
-		"-leading-and-trailing-dashes-":      "leading-and-trailing-dashes",
+		"ibm-granite/granite-4.1-8b":    "ibm-granite-granite-4-1-8b",
+		"AutoResearch/Granite-8B":       "autoresearch-granite-8b",
+		"foo.bar.baz":                   "foo-bar-baz",
+		"!!@@##":                        "model",
+		"-leading-and-trailing-dashes-": "leading-and-trailing-dashes",
 	}
 	for in, want := range cases {
 		if got := sanitizeName(in); got != want {

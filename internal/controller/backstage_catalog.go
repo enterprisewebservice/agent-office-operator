@@ -85,13 +85,14 @@ func NewBackstageCatalogHandler(c client.Client) *BackstageCatalogHandler {
 }
 
 // ServeHTTP is the entry point. Multiplexes:
-//   GET /backstage/catalog.yaml — ModelRegistry/Catalog entities
-//   GET /codex-auth/status      — { ok, lastRefresh, reason } for
-//                                 the cluster's codex-subscription-
-//                                 credentials Secret. Used by the
-//                                 codex-reauth-ui frontend plugin
-//                                 to drive the entity-page pill +
-//                                 the karpathy template pre-flight.
+//
+//	GET /backstage/catalog.yaml — ModelRegistry/Catalog entities
+//	GET /codex-auth/status      — { ok, lastRefresh, reason } for
+//	                              the cluster's codex-subscription-
+//	                              credentials Secret. Used by the
+//	                              codex-reauth-ui frontend plugin
+//	                              to drive the entity-page pill +
+//	                              the karpathy template pre-flight.
 func (h *BackstageCatalogHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/backstage/catalog.yaml", "/backstage/catalog":
@@ -522,9 +523,9 @@ func catalogModelToBackstageResource(m map[string]any) backstageEntity {
 	}
 
 	annos := map[string]string{
-		"agentoffice.ai/model-source":    "model-catalog",
-		"agentoffice.ai/catalog-name":    name,
-		"agentoffice.ai/catalog-source":  sourceID,
+		"agentoffice.ai/model-source":   "model-catalog",
+		"agentoffice.ai/catalog-name":   name,
+		"agentoffice.ai/catalog-source": sourceID,
 		// model-uri: catalog model names usually match the HF id (e.g.
 		// "granite-3.1-8b-lab-v1"). Surface as a candidate URI; the
 		// template's catalog:fetch resolution + the trainer will use

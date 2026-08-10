@@ -135,19 +135,23 @@ type skillCatalogDetail struct {
 }
 
 func (h *CatalogSkillsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	path := strings.Trim(r.URL.Path, "/")
+	parts := strings.Split(path, "/")
+
+	// Patterns recognized:
+	//   /catalog/skills            → 2 parts (GET)
+	//   /catalog/packs             → 2 parts (GET, unified typed search)
+	//   /catalog/recommend         → 2 parts (POST, one-step composer brain)
+	//   /catalog/skills/<name>     → 3 parts (GET)
+	if len(parts) == 2 && parts[0] == "catalog" && parts[1] == "recommend" {
+		h.recommend(w, r)
+		return
+	}
 	if r.Method != http.MethodGet {
 		writeCatalogJSONError(w, http.StatusMethodNotAllowed,
 			fmt.Errorf("only GET is supported"))
 		return
 	}
-
-	path := strings.Trim(r.URL.Path, "/")
-	parts := strings.Split(path, "/")
-
-	// Patterns recognized:
-	//   /catalog/skills            → 2 parts
-	//   /catalog/packs             → 2 parts (unified typed search)
-	//   /catalog/skills/<name>     → 3 parts
 	switch len(parts) {
 	case 2:
 		if parts[0] != "catalog" || (parts[1] != "skills" && parts[1] != "packs") {

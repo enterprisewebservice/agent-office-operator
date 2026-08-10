@@ -220,8 +220,9 @@ func MintInstallationToken(ctx context.Context, creds *githubAppCreds) (string, 
 // memory only — never written to disk, never logged.
 //
 // GitHub accepts installation tokens via either:
-//   Authorization: Bearer <token>    (REST API)
-//   https://x-access-token:<token>@github.com/...   (git over HTTPS)
+//
+//	Authorization: Bearer <token>    (REST API)
+//	https://x-access-token:<token>@github.com/...   (git over HTTPS)
 //
 // go-git's BasicAuth maps to the second form when used over HTTPS,
 // which is what we use everywhere for clone/push.

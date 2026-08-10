@@ -46,15 +46,15 @@ func withFakeSAToken(t *testing.T, token string) func() {
 // can never collide with a Registry-source entity.
 func TestCatalogModelToBackstageResource(t *testing.T) {
 	in := map[string]any{
-		"name":         "granite-3.1-8b-lab-v1",
-		"source_id":    "redhat_ai_models",
-		"description":  "Granite 3.1 8B LAB instruct-tuned model.",
-		"provider":     "Red Hat",
-		"license":      "apache-2.0",
-		"licenseLink":  "https://www.apache.org/licenses/LICENSE-2.0",
-		"logo":         "data:image/svg+xml;base64,...",
-		"tasks":        []any{"text-generation", "instruction-following"},
-		"language":     []any{"en", "es"},
+		"name":        "granite-3.1-8b-lab-v1",
+		"source_id":   "redhat_ai_models",
+		"description": "Granite 3.1 8B LAB instruct-tuned model.",
+		"provider":    "Red Hat",
+		"license":     "apache-2.0",
+		"licenseLink": "https://www.apache.org/licenses/LICENSE-2.0",
+		"logo":        "data:image/svg+xml;base64,...",
+		"tasks":       []any{"text-generation", "instruction-following"},
+		"language":    []any{"en", "es"},
 	}
 	got := catalogModelToBackstageResource(in)
 

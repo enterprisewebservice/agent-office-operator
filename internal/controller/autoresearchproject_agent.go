@@ -87,10 +87,10 @@ const gatewayContainerName = "openclaw"
 // exec into for an agent turn. Handles both runtime modes the AW
 // API supports:
 //
-//   * runtime.shared.gatewayRef set  → look up the AgentGateway's
+//   - runtime.shared.gatewayRef set  → look up the AgentGateway's
 //     Deployment pod (labeled agentoffice.ai/gateway=<name>).
-//   * runtime.dedicated (or runtime nil — same default)
-//                                    → look up the AW's own
+//   - runtime.dedicated (or runtime nil — same default)
+//     → look up the AW's own
 //     Deployment pod (labeled agentoffice.ai/agent=<name>, set by
 //     agentworkstation_resources.agentLabels()).
 //

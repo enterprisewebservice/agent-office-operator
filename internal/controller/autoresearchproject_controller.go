@@ -890,8 +890,8 @@ func (r *AutoResearchProjectReconciler) submitTrainerJob(ctx context.Context, p 
 	}
 
 	labels := map[string]string{
-		autoResearchProjectLabel:    p.Name,
-		autoResearchExperimentLabel: runID,
+		autoResearchProjectLabel:       p.Name,
+		autoResearchExperimentLabel:    runID,
 		"app.kubernetes.io/managed-by": "agent-office-operator",
 	}
 
