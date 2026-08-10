@@ -146,12 +146,17 @@ func (h *CatalogSkillsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 
 	// Patterns recognized:
 	//   /catalog/skills            → 2 parts
+	//   /catalog/packs             → 2 parts (unified typed search)
 	//   /catalog/skills/<name>     → 3 parts
 	switch len(parts) {
 	case 2:
-		if parts[0] != "catalog" || parts[1] != "skills" {
+		if parts[0] != "catalog" || (parts[1] != "skills" && parts[1] != "packs") {
 			writeCatalogJSONError(w, http.StatusBadRequest,
 				fmt.Errorf("unknown path %q", r.URL.Path))
+			return
+		}
+		if parts[1] == "packs" {
+			h.listPacks(w, r)
 			return
 		}
 		h.listSkills(w, r)
@@ -316,9 +321,7 @@ func (h *CatalogSkillsHandler) enrichDependencies(ctx context.Context, deps []ag
 				// per-registration credentials are injected gateway-side
 				// on the tool-call path (Kuadrant model — the same URL
 				// the binder's presets use).
-				cd.GatewayURL = fmt.Sprintf(
-					"http://mcp-gateway-data-science-gateway-class.%s.svc.cluster.local/mcp",
-					h.namespace)
+				cd.GatewayURL = sharedGatewayURL(h.namespace)
 			}
 		case "knowledgeBase":
 			var kb agentofficev1alpha1.KnowledgeBase

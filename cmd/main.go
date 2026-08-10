@@ -342,6 +342,10 @@ func main() {
 		catalogSkills := controller.NewCatalogSkillsHandler(mgr.GetClient())
 		mux.Handle("/catalog/skills", catalogSkills)
 		mux.Handle("/catalog/skills/", catalogSkills)
+		// v1.7.11: /catalog/packs — ONE searchable typed index
+		// (skills + tools + knowledge bases) consumed by the
+		// search-first composer. See catalog_packs.go.
+		mux.Handle("/catalog/packs", catalogSkills)
 		mux.HandleFunc("/healthz/backstage", func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte("ok"))
 		})
