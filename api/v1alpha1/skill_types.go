@@ -112,6 +112,38 @@ type SkillSpec struct {
 	// is Pending.
 	// +optional
 	Requires []string `json:"requires,omitempty"`
+
+	// Dependencies lists the platform resources this skill's
+	// procedure calls for — governed tool registrations behind the
+	// MCP gateway and knowledge bases. Deliberately a separate
+	// field from Requires: Requires names OpenClaw *runtime
+	// capabilities* and gates AW readiness; Dependencies name
+	// *cluster resources* and gate nothing — the skills catalog
+	// serves them enriched with live availability so a composer
+	// (the Dev Hub binder) can pre-wire an agent with everything
+	// the skill needs, or say exactly what is missing.
+	// +optional
+	Dependencies []SkillDependency `json:"dependencies,omitempty"`
+}
+
+// SkillDependency names one platform resource a skill's procedure
+// uses. The same declaration travels on the skill's OCI artifact
+// as the `ai.agentoffice.skill.requires` label, so the artifact,
+// the Skill CR, and the catalog all tell one story.
+type SkillDependency struct {
+	// Kind of resource. `mcpServer` = an MCPServerRegistration
+	// (mcp.kuadrant.io) exposing the skill's governed tools behind
+	// the shared MCP gateway; `knowledgeBase` = a KnowledgeBase CR.
+	// +kubebuilder:validation:Enum=mcpServer;knowledgeBase
+	Kind string `json:"kind"`
+
+	// Name of the depended-on resource, in the skill's namespace.
+	Name string `json:"name"`
+
+	// Optional marks a dependency the skill degrades gracefully
+	// without. Composers should offer it rather than preselect it.
+	// +optional
+	Optional bool `json:"optional,omitempty"`
 }
 
 // SkillCondition is a standard Kubernetes condition entry on the

@@ -21,6 +21,8 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -90,16 +92,37 @@ func NewCatalogSkillsHandler(c client.Client) *CatalogSkillsHandler {
 // list endpoint. Trimmed for token-efficiency — the full SKILL.md
 // body is fetched separately via the by-name endpoint.
 type skillCatalogEntry struct {
-	Name           string `json:"name"`
-	DisplayName    string `json:"displayName,omitempty"`
-	Description    string `json:"description,omitempty"`
-	Version        string `json:"version,omitempty"`
-	Tier           string `json:"tier,omitempty"`
-	SourceRepo     string `json:"sourceRepo,omitempty"`
-	SourceRevision string `json:"sourceRevision,omitempty"`
-	ContentSHA256  string `json:"contentSha256,omitempty"`
-	Tool           string `json:"tool,omitempty"`
+	Name           string   `json:"name"`
+	DisplayName    string   `json:"displayName,omitempty"`
+	Description    string   `json:"description,omitempty"`
+	Version        string   `json:"version,omitempty"`
+	Tier           string   `json:"tier,omitempty"`
+	SourceRepo     string   `json:"sourceRepo,omitempty"`
+	SourceRevision string   `json:"sourceRevision,omitempty"`
+	ContentSHA256  string   `json:"contentSha256,omitempty"`
+	Tool           string   `json:"tool,omitempty"`
 	Requires       []string `json:"requires,omitempty"`
+	// Dependencies mirrors spec.dependencies enriched with live
+	// availability, so a composer can preselect what exists and
+	// name exactly what is missing instead of guessing.
+	Dependencies []catalogDependency `json:"dependencies,omitempty"`
+}
+
+// catalogDependency is a SkillDependency enriched at serve time.
+type catalogDependency struct {
+	Kind     string `json:"kind"`
+	Name     string `json:"name"`
+	Optional bool   `json:"optional,omitempty"`
+	// Available reports whether the depended-on resource exists in
+	// the catalog namespace right now (mcpServer -> an
+	// MCPServerRegistration; knowledgeBase -> a KnowledgeBase CR).
+	Available bool `json:"available"`
+	// GatewayURL is set for available mcpServer deps: the shared
+	// MCP gateway endpoint an AgentWorkstation entry should point
+	// at. Per-registration credentials are injected gateway-side
+	// on the tool-call path, so ONE gateway entry serves every
+	// registration — composers should dedupe on this URL.
+	GatewayURL string `json:"gatewayUrl,omitempty"`
 }
 
 // skillCatalogDetail is the full shape returned by the by-name
@@ -163,7 +186,7 @@ func (h *CatalogSkillsHandler) listSkills(w http.ResponseWriter, r *http.Request
 	items := make([]skillCatalogEntry, 0, len(skills.Items))
 	for i := range skills.Items {
 		s := &skills.Items[i]
-		entry := h.toCatalogEntry(s)
+		entry := h.toCatalogEntry(ctx, s)
 
 		if tierFilter != "" && entry.Tier != tierFilter {
 			continue
@@ -221,7 +244,7 @@ func (h *CatalogSkillsHandler) getSkill(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	entry := h.toCatalogEntry(&s)
+	entry := h.toCatalogEntry(ctx, &s)
 	// ContentSHA256 is only meaningful once the body is resolved;
 	// compute fresh here so it matches the body we're returning.
 	sum := sha256.Sum256([]byte(body))
@@ -237,7 +260,7 @@ func (h *CatalogSkillsHandler) getSkill(w http.ResponseWriter, r *http.Request, 
 // toCatalogEntry projects a Skill CR onto the trimmed catalog
 // metadata shape. Reads tier/source provenance from the standard
 // labels the importer pipeline writes.
-func (h *CatalogSkillsHandler) toCatalogEntry(s *agentofficev1alpha1.Skill) skillCatalogEntry {
+func (h *CatalogSkillsHandler) toCatalogEntry(ctx context.Context, s *agentofficev1alpha1.Skill) skillCatalogEntry {
 	tier := s.Labels["agentoffice.ai/skill-tier"]
 	if tier == "" {
 		// Skills authored locally (no importer involvement) default
@@ -262,7 +285,52 @@ func (h *CatalogSkillsHandler) toCatalogEntry(s *agentofficev1alpha1.Skill) skil
 		ContentSHA256:  s.Status.ContentSHA256,
 		Tool:           s.Spec.Invocation.Tool,
 		Requires:       s.Spec.Requires,
+		Dependencies:   h.enrichDependencies(ctx, s.Spec.Dependencies),
 	}
+}
+
+// enrichDependencies resolves each declared dependency against live
+// cluster state. Failures to look up are reported as unavailable
+// rather than failing the catalog request — the catalog must stay
+// readable even if the kuadrant CRD is absent on a cluster.
+// (RBAC marker for the mcp.kuadrant.io read lives with the Skill
+// controller's markers in skill_controller.go.)
+func (h *CatalogSkillsHandler) enrichDependencies(ctx context.Context, deps []agentofficev1alpha1.SkillDependency) []catalogDependency {
+	if len(deps) == 0 {
+		return nil
+	}
+	out := make([]catalogDependency, 0, len(deps))
+	for _, d := range deps {
+		cd := catalogDependency{Kind: d.Kind, Name: d.Name, Optional: d.Optional}
+		switch d.Kind {
+		case "mcpServer":
+			reg := &unstructured.Unstructured{}
+			reg.SetGroupVersionKind(schema.GroupVersionKind{
+				Group: "mcp.kuadrant.io", Version: "v1alpha1", Kind: "MCPServerRegistration",
+			})
+			if err := h.client.Get(ctx, types.NamespacedName{
+				Namespace: h.namespace, Name: d.Name,
+			}, reg); err == nil {
+				cd.Available = true
+				// One shared gateway endpoint serves every registration;
+				// per-registration credentials are injected gateway-side
+				// on the tool-call path (Kuadrant model — the same URL
+				// the binder's presets use).
+				cd.GatewayURL = fmt.Sprintf(
+					"http://mcp-gateway-data-science-gateway-class.%s.svc.cluster.local/mcp",
+					h.namespace)
+			}
+		case "knowledgeBase":
+			var kb agentofficev1alpha1.KnowledgeBase
+			if err := h.client.Get(ctx, types.NamespacedName{
+				Namespace: h.namespace, Name: d.Name,
+			}, &kb); err == nil {
+				cd.Available = true
+			}
+		}
+		out = append(out, cd)
+	}
+	return out
 }
 
 // resolveSkillMd dereferences spec.source — either inline body or

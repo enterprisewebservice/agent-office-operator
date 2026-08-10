@@ -48,6 +48,10 @@ type SkillReconciler struct {
 
 // +kubebuilder:rbac:groups=agentoffice.ai,resources=skills,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=agentoffice.ai,resources=skills/status,verbs=get;update;patch
+// mcp.kuadrant.io read: the skills catalog endpoint enriches each
+// Skill's spec.dependencies with live availability by looking up
+// MCPServerRegistrations (see catalog_skills.go enrichDependencies).
+// +kubebuilder:rbac:groups=mcp.kuadrant.io,resources=mcpserverregistrations,verbs=get;list;watch
 // +kubebuilder:rbac:groups=agentoffice.ai,resources=skills/finalizers,verbs=update
 // +kubebuilder:rbac:groups=agentoffice.ai,resources=skillbindings,verbs=get;list;watch
 // +kubebuilder:rbac:groups=agentoffice.ai,resources=agentworkstations,verbs=get;list;watch

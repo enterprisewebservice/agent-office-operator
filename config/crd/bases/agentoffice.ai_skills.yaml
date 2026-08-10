@@ -76,6 +76,47 @@ spec:
               `.md` content is the procedure documentation the agent reads at
               session start; the rest is the runtime contract.
             properties:
+              dependencies:
+                description: |-
+                  Dependencies lists the platform resources this skill's
+                  procedure calls for — governed tool registrations behind the
+                  MCP gateway and knowledge bases. Deliberately a separate
+                  field from Requires: Requires names OpenClaw *runtime
+                  capabilities* and gates AW readiness; Dependencies name
+                  *cluster resources* and gate nothing — the skills catalog
+                  serves them enriched with live availability so a composer
+                  (the Dev Hub binder) can pre-wire an agent with everything
+                  the skill needs, or say exactly what is missing.
+                items:
+                  description: |-
+                    SkillDependency names one platform resource a skill's procedure
+                    uses. The same declaration travels on the skill's OCI artifact
+                    as the `ai.agentoffice.skill.requires` label, so the artifact,
+                    the Skill CR, and the catalog all tell one story.
+                  properties:
+                    kind:
+                      description: |-
+                        Kind of resource. `mcpServer` = an MCPServerRegistration
+                        (mcp.kuadrant.io) exposing the skill's governed tools behind
+                        the shared MCP gateway; `knowledgeBase` = a KnowledgeBase CR.
+                      enum:
+                      - mcpServer
+                      - knowledgeBase
+                      type: string
+                    name:
+                      description: Name of the depended-on resource, in the skill's
+                        namespace.
+                      type: string
+                    optional:
+                      description: |-
+                        Optional marks a dependency the skill degrades gracefully
+                        without. Composers should offer it rather than preselect it.
+                      type: boolean
+                  required:
+                  - kind
+                  - name
+                  type: object
+                type: array
               description:
                 description: |-
                   Short description of what the skill does. Surfaced in the
