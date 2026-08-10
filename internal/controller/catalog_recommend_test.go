@@ -66,10 +66,46 @@ func TestRecommendFallback(t *testing.T) {
 	}
 }
 
+// TestRecommendCarriesFullPacks is the guard for the defect that shipped
+// in v1.7.12: a recommendation whose packs are names only forces the
+// client into a second lookup, and a slow or failed lookup silently
+// produces an agent with no tools. Every recommended pack must arrive
+// wired — tool recipe present, skill dependencies present.
+func TestRecommendCarriesFullPacks(t *testing.T) {
+	fixture := recommendFixture()
+	fixture[3].Recipe = &toolRecipe{URL: "http://gw/mcp", Type: "http"}
+	fixture[0].Dependencies = []catalogDependency{
+		{Kind: "mcpServer", Name: "ops-metrics", Available: true, GatewayURL: "http://gw/mcp"},
+	}
+	out := recommendFallback("weekly ops report on orders and stuck shipments", fixture)
+
+	var sawSkillDeps, sawToolRecipe bool
+	for _, p := range out.Packs {
+		if p.Type == "skill" && p.Name == "weekly-ops-report" {
+			if len(p.Dependencies) == 0 {
+				t.Errorf("skill pack arrived without dependencies: %+v", p)
+			}
+			sawSkillDeps = true
+		}
+		if p.Type == "tool" && p.Name == "ops-metrics" {
+			if p.Recipe == nil || p.Recipe.URL == "" {
+				t.Errorf("tool pack arrived without a recipe: %+v", p)
+			}
+			sawToolRecipe = true
+		}
+		if p.Reason == "" {
+			t.Errorf("pack %s has no reason — the UI shows it to the user", p.Name)
+		}
+	}
+	if !sawSkillDeps || !sawToolRecipe {
+		t.Fatalf("expected both the ops skill and ops tool selected, got %d packs", len(out.Packs))
+	}
+}
+
 func TestSanitizeAgentName(t *testing.T) {
 	for in, want := range map[string]string{
-		"Weekly Ops!! Agent":       "weekly-ops-agent",
-		"--foo__bar--":             "foo-bar",
+		"Weekly Ops!! Agent": "weekly-ops-agent",
+		"--foo__bar--":       "foo-bar",
 		"AVeryLongNameThatGoesOnAndOnForeverAndEver": "averylongnamethatgoesonandonfo",
 	} {
 		if got := sanitizeAgentName(in); got != want {
@@ -86,7 +122,7 @@ func TestRecommendViaModel(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sel := map[string]any{
 			"name": "Ops Reporter!", "displayName": "Ops Reporter", "emoji": "📊",
-			"role": "reporter",
+			"role":         "reporter",
 			"systemPrompt": "You produce the weekly ops report. Never fabricate data.",
 			"packs": []map[string]string{
 				{"name": "weekly-ops-report", "reason": "directly matches"},

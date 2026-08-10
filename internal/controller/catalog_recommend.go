@@ -29,7 +29,14 @@ import (
 //	{"description": "I need weekly ops reports from our orders data"}
 //	→ {"source": "model"|"fallback",
 //	   "identity": {name, displayName, emoji, role, systemPrompt},
-//	   "packs":    [{type, name, displayName, reason}]}
+//	   "packs":    [<full catalogPack> + reason]}
+//
+// Each pack is the WHOLE catalog entry — tool recipes and live-enriched
+// skill dependencies included — so the composer wires an agent from
+// this ONE response. An earlier revision returned names only and had
+// the client re-resolve them against /catalog/packs; when that second
+// call lagged, the agent was created with an empty toolset and nothing
+// said so.
 //
 // The caller (the AgentGenesis scaffolder field) turns this into a
 // complete AgentWorkstation: identity from `identity`, compose wiring
@@ -72,11 +79,14 @@ type recommendIdentity struct {
 	SystemPrompt string `json:"systemPrompt"`
 }
 
+// recommendPack is the full catalog entry plus the reason it was
+// chosen. Deliberately the WHOLE pack (recipe, dependencies) rather
+// than a name the client must re-resolve: the one-step composer wires
+// its agent from this single response, so a failed or slow second
+// lookup can never silently produce an agent with no tools.
 type recommendPack struct {
-	Type        string `json:"type"`
-	Name        string `json:"name"`
-	DisplayName string `json:"displayName,omitempty"`
-	Reason      string `json:"reason,omitempty"`
+	catalogPack
+	Reason string `json:"reason,omitempty"`
 }
 
 type recommendResponse struct {
@@ -193,9 +203,7 @@ func recommendViaModel(ctx context.Context, url, desc string, packs []catalogPac
 	var chosen []recommendPack
 	for _, sel := range out.Packs {
 		if p, ok := byName[sel.Name]; ok {
-			chosen = append(chosen, recommendPack{
-				Type: p.Type, Name: p.Name, DisplayName: p.DisplayName, Reason: sel.Reason,
-			})
+			chosen = append(chosen, recommendPack{catalogPack: p, Reason: sel.Reason})
 		}
 	}
 	if len(chosen) == 0 {
@@ -261,9 +269,17 @@ func recommendFallback(desc string, packs []catalogPack) *recommendResponse {
 			continue
 		}
 		perType[s.p.Type]++
+		matched := []string{}
+		nameHay := strings.ToLower(s.p.Name + " " + s.p.DisplayName)
+		descHay := strings.ToLower(s.p.Description)
+		for _, t := range terms {
+			if strings.Contains(nameHay, t) || strings.Contains(descHay, t) {
+				matched = append(matched, t)
+			}
+		}
 		chosen = append(chosen, recommendPack{
-			Type: s.p.Type, Name: s.p.Name, DisplayName: s.p.DisplayName,
-			Reason: fmt.Sprintf("matched %q", strings.Join(terms, " ")),
+			catalogPack: s.p,
+			Reason:      fmt.Sprintf("matched: %s", strings.Join(matched, ", ")),
 		})
 	}
 
