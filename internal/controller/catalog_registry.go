@@ -61,6 +61,10 @@ type registryArtifact struct {
 	Members     []string `json:"members,omitempty"`
 	Skills      []string `json:"skills,omitempty"`
 	Provides    []string `json:"provides,omitempty"`
+	// Tool — present on kind:"tool" artifacts. The MCP server this
+	// artifact registers, so a bundle can carry its own tools instead of
+	// naming ones the cluster is expected to already have.
+	Tool *registryTool `json:"tool,omitempty"`
 	// Requires is heterogeneous across publishers: a list of strings for
 	// pack-level deps, or objects for resource deps. Kept raw and
 	// interpreted by the consumer.
@@ -148,6 +152,29 @@ func fetchRegistryIndex(ctx context.Context, url string) (*registryIndex, error)
 	return &idx, nil
 }
 
+// registryTool mirrors MCPServerRegistration's spec, minus the fields
+// only the gateway sets. `mode` is deliberate:
+//
+//	reference — the workload already runs on the cluster (gitops put it
+//	            there, or an agent built it); this registers it.
+//	bundled   — the artifact also ships the workload. NOT yet installed;
+//	            installTool refuses rather than half-creating one.
+type registryTool struct {
+	Mode          string       `json:"mode,omitempty"`
+	Prefix        string       `json:"prefix,omitempty"`
+	Path          string       `json:"path,omitempty"`
+	Hint          string       `json:"hint,omitempty"`
+	Category      []string     `json:"category,omitempty"`
+	RouteRef      string       `json:"routeRef,omitempty"`
+	CredentialRef *registryRef `json:"credentialRef,omitempty"`
+	Recipe        *toolRecipe  `json:"recipe,omitempty"`
+}
+
+type registryRef struct {
+	Name string `json:"name,omitempty"`
+	Key  string `json:"key,omitempty"`
+}
+
 func remoteToPack(registry, base string, a registryArtifact) catalogPack {
 	abs := func(p string) string {
 		if p == "" || strings.HasPrefix(p, "http") {
@@ -206,8 +233,21 @@ func remoteToPack(registry, base string, a registryArtifact) catalogPack {
 		desc = fmt.Sprintf("%s (meta-pack: %s)", desc, strings.Join(a.Members, ", "))
 	}
 
+	// A tool artifact is a tool everywhere downstream — the composer
+	// wires it as one and install creates a registration, not a Skill.
+	packType := "skill"
+	var recipe *toolRecipe
+	if a.Kind == "tool" {
+		packType = "tool"
+		if a.Tool != nil {
+			recipe = a.Tool.Recipe
+		}
+	}
+
 	return catalogPack{
-		Type:         "skill", // composable unit; kind is carried in Registry/Origin
+		Type:         packType,
+		Recipe:       recipe,
+		Tool:         a.Tool,
 		Name:         a.Name,
 		DisplayName:  a.Name,
 		Description:  desc,

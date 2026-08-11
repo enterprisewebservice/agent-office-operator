@@ -117,12 +117,23 @@ rules:
   - update
   - watch
 - apiGroups:
+  - gateway.networking.k8s.io
+  resources:
+  - httproutes
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - mcp.kuadrant.io
   resources:
   - mcpserverregistrations
   verbs:
+  - create
   - get
   - list
+  - patch
+  - update
   - watch
 - apiGroups:
   - modelregistry.opendatahub.io

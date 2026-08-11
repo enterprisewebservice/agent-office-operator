@@ -103,6 +103,8 @@ type catalogPack struct {
 	// matched to coverage rather than to vocabulary in a description
 	// string, and it was being dropped on the floor.
 	Provides []string `json:"provides,omitempty"`
+	// Tool — the MCP server a federated tool artifact installs.
+	Tool *registryTool `json:"tool,omitempty"`
 	// Manifest/ContentURL/OCI are where an installer fetches from.
 	Manifest   string `json:"manifest,omitempty"`
 	ContentURL string `json:"contentUrl,omitempty"`
