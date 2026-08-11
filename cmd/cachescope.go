@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/rest"
+	toolscache "k8s.io/client-go/tools/cache"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -209,11 +210,11 @@ func coreByObject(namespaces []string) map[client.Object]cache.ByObject {
 // stripManagedFields drops the server-side-apply bookkeeping before an
 // object enters the cache. Nothing here reads it and on busy objects it
 // is a large fraction of the payload.
-func stripManagedFields(obj any) (any, error) {
-	if o, ok := obj.(client.Object); ok {
-		o.SetManagedFields(nil)
-	}
-	return obj, nil
+//
+// Upstream's helper rather than a hand-rolled one: it nil-checks before
+// clearing, which sidesteps kubernetes/kubernetes#124337.
+func stripManagedFields() toolscache.TransformFunc {
+	return cache.TransformStripManagedFields()
 }
 
 // namespaceWatchdog restarts the operator when a CR shows up in a

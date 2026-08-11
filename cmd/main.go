@@ -219,7 +219,7 @@ func main() {
 		Cache: cache.Options{
 			DefaultNamespaces: defaultNamespaces,
 			ByObject:          coreByObject(coreNamespaces),
-			DefaultTransform:  stripManagedFields,
+			DefaultTransform:  stripManagedFields(),
 		},
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the
