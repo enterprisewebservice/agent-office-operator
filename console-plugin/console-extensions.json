@@ -22,7 +22,7 @@
     "properties": {
       "id": "agent-office-agent-workstations",
       "section": "agent-office",
-      "name": "Agent Workstations",
+      "name": "Agents & Teams",
       "href": "/agent-office/agent-workstations",
       "perspective": "admin"
     }
@@ -80,7 +80,7 @@
     "type": "console.tab/horizontalNav",
     "properties": {
       "page": {
-        "name": "Agent Workstations",
+        "name": "Agents & Teams",
         "href": "agent-workstations"
       },
       "model": {
