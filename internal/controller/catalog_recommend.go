@@ -336,6 +336,11 @@ func recommendFallback(desc string, packs []catalogPack) *recommendResponse {
 		})
 	}
 
+	// Same containment rule as the model path: scoring a pack and one of
+	// its skills both highly is easy, and installing the pack already
+	// brings the skill.
+	chosen = dropContained(chosen, packs)
+
 	// Identity from the description itself — plain, predictable.
 	base := terms
 	if len(base) > 3 {

@@ -131,6 +131,12 @@ func (h *CatalogSkillsHandler) recommendViaGateway(
 		return nil, err
 	}
 
+	// Render the CONTAINMENT, not just the names. A flat list makes a
+	// parent and its child look like two unrelated options that merely
+	// share vocabulary, and the model duly picks both — selecting
+	// unreal-scripting AND parkforge-unreal-blueprint-scripting, the one
+	// skill that pack contains. It also cannot weigh a meta-pack as
+	// "the whole family" when nothing says it holds the other packs.
 	var lines []string
 	for _, p := range packs {
 		kind := p.Type
@@ -141,11 +147,37 @@ func (h *CatalogSkillsHandler) recommendViaGateway(
 		if !p.Installed {
 			state = "available from " + p.Registry
 		}
-		lines = append(lines, fmt.Sprintf("- %s %q (%s): %s", kind, p.Name, state, p.Description))
+		line := fmt.Sprintf("- %s %q (%s): %s", kind, p.Name, state, p.Description)
+		switch {
+		case len(p.Members) > 0:
+			line += fmt.Sprintf("\n    CONTAINS packs: %s", strings.Join(p.Members, ", "))
+		case kind == "pack":
+			var kids []string
+			for _, c := range packs {
+				if c.Member == p.Name {
+					kids = append(kids, c.Name)
+				}
+			}
+			if len(kids) > 0 {
+				line += fmt.Sprintf("\n    CONTAINS skills: %s", strings.Join(kids, ", "))
+			}
+		}
+		if p.Member != "" {
+			line += fmt.Sprintf("\n    INSIDE pack: %s", p.Member)
+		}
+		lines = append(lines, line)
 	}
 	prompt := "You compose governed AI agents from a fixed catalog.\n" +
 		"Choose ONLY entries from the catalog below — never invent names — and draft an identity.\n" +
 		"Prefer few, strongly relevant picks over filling a quota; choosing nothing is better than choosing something unrelated.\n" +
+		"\nThe catalog is a HIERARCHY. Selecting a pack installs every skill it contains; " +
+		"selecting a meta-pack installs every skill in all of its packs. Therefore:\n" +
+		"  * NEVER select both a container and something already inside it — pick one.\n" +
+		"  * Pick the SMALLEST container that covers the job: a single skill if one does it; " +
+		"its pack if the job spans several skills in that pack; the meta-pack only if the job " +
+		"spans most of its packs.\n" +
+		"  * A container is worth picking for breadth, not because its name matches — a job about " +
+		"one narrow task takes the one skill, even when a whole family shares its vocabulary.\n" +
 		"Reply with ONE JSON object and no prose, no code fence:\n" +
 		`{"name":"<dns-safe-short-name>","displayName":"...","emoji":"<one emoji>","role":"<one word>",` +
 		`"systemPrompt":"<2-4 sentences: the job, which governed tools/skills to lean on, and: never fabricate data — if a tool cannot answer, say so>",` +
@@ -217,6 +249,7 @@ func (h *CatalogSkillsHandler) recommendViaGateway(
 			chosen = append(chosen, recommendPack{catalogPack: p, Reason: s.Reason})
 		}
 	}
+	chosen = dropContained(chosen, packs)
 	if len(chosen) == 0 {
 		return nil, fmt.Errorf("gateway selected no valid packs")
 	}
@@ -229,4 +262,50 @@ func (h *CatalogSkillsHandler) recommendViaGateway(
 		id.Role = "assistant"
 	}
 	return &recommendResponse{Source: "model:" + model, Identity: id, Packs: chosen}, nil
+}
+
+// dropContained removes any selection that a bigger selection already
+// installs: a skill whose pack was also chosen, and a pack whose
+// meta-pack was also chosen.
+//
+// The prompt now describes the hierarchy, but a prompt is a request,
+// not a guarantee — and a redundant pick is not cosmetic. It bills the
+// user for a container they did not need, and the composer would list
+// the same skill twice, once on its own and once inside the pack's
+// "what's inside".
+//
+// Keeps the container, drops the contained: the container is the
+// superset, so nothing the model asked for is lost.
+func dropContained(chosen []recommendPack, all []catalogPack) []recommendPack {
+	if len(chosen) < 2 {
+		return chosen
+	}
+	picked := map[string]bool{}
+	for _, c := range chosen {
+		picked[c.Name] = true
+	}
+	// pack name -> the meta-pack that lists it.
+	parentOfPack := map[string]string{}
+	for _, p := range all {
+		for _, m := range p.Members {
+			parentOfPack[m] = p.Name
+		}
+	}
+	out := make([]recommendPack, 0, len(chosen))
+	for _, c := range chosen {
+		// A skill inside a chosen pack.
+		if c.Member != "" && picked[c.Member] {
+			continue
+		}
+		// A skill whose pack's meta-pack was chosen.
+		if c.Member != "" && picked[parentOfPack[c.Member]] {
+			continue
+		}
+		// A pack inside a chosen meta-pack.
+		if picked[parentOfPack[c.Name]] {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
 }
