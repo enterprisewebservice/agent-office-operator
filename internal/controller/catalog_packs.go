@@ -79,6 +79,17 @@ type catalogPack struct {
 	ArtifactKind string `json:"artifactKind,omitempty"`
 	// Member — which pack a federated skill belongs to.
 	Member string `json:"member,omitempty"`
+	// Members — the child packs of a meta-pack, straight from the
+	// registry manifest. The registry has always published this; the
+	// operator used to read it only to decorate the description, so a
+	// client could see that parkforge-brain HAD five member packs but
+	// never which. The composer needs the actual tree to show what
+	// selecting a parent pulls in.
+	Members []string `json:"members,omitempty"`
+	// Skills — the leaf skills a pack or meta-pack ships, by short
+	// name. Advisory: the authoritative parent→child edge is Member on
+	// each skill row.
+	Skills []string `json:"skills,omitempty"`
 	// Manifest/ContentURL/OCI are where an installer fetches from.
 	Manifest   string `json:"manifest,omitempty"`
 	ContentURL string `json:"contentUrl,omitempty"`
@@ -146,13 +157,25 @@ func (h *CatalogSkillsHandler) gatherPacks(ctx context.Context, typeFilter map[s
 			return nil, fmt.Errorf("listing skills: %w", err)
 		}
 		for i := range skills.Items {
-			e := h.toCatalogEntry(ctx, &skills.Items[i])
-			items = append(items, catalogPack{
+			sk := &skills.Items[i]
+			e := h.toCatalogEntry(ctx, sk)
+			p := catalogPack{
 				Type: "skill", Name: e.Name, DisplayName: e.DisplayName,
 				Description: e.Description, Version: e.Version, Tier: e.Tier,
 				Requires: e.Requires, Dependencies: e.Dependencies,
-				Installed: true,
-			})
+				Installed: true, ArtifactKind: "skill",
+			}
+			// Read back the provenance installSkill wrote. Without this a
+			// skill DROPS OUT OF ITS PACK the moment it is installed: the
+			// CR keeps the label, the catalog forgot to look, and the
+			// parent showed zero children while plainly owning one.
+			if sk.Labels != nil {
+				p.Member = sk.Labels["agentoffice.ai/pack"]
+			}
+			if sk.Annotations != nil {
+				p.Registry = sk.Annotations["agentoffice.ai/registry"]
+			}
+			items = append(items, p)
 		}
 	}
 

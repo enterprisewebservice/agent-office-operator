@@ -138,9 +138,32 @@ func resolveInstallSet(remote []catalogPack, name string) []catalogPack {
 		}
 		return out
 	case "meta-pack":
+		// Scope to the meta-pack's OWN family. This used to take every
+		// skill sharing the registry, which on a registry hosting more
+		// than one family is badly wrong: picking parkforge-brain
+		// (5 packs, 6 skills, namespace meshforge) also installed all 13
+		// unrelated agent-office skills — openshift-docs, weekly-ops-report
+		// and friends — because they happened to be published to the same
+		// host. A registry with one family in it hid the bug.
+		//
+		// The manifest names its member packs, so use them; the namespace
+		// is the fallback boundary when an older index omits `members`.
+		wanted := map[string]bool{}
+		for _, m := range self.Members {
+			wanted[m] = true
+		}
 		var out []catalogPack
 		for _, p := range remote {
-			if p.ArtifactKind == "skill" && p.Registry == self.Registry && p.ContentURL != "" {
+			if p.ArtifactKind != "skill" || p.ContentURL == "" || p.Registry != self.Registry {
+				continue
+			}
+			if len(wanted) > 0 {
+				if wanted[p.Member] {
+					out = append(out, p)
+				}
+				continue
+			}
+			if p.Namespace == self.Namespace {
 				out = append(out, p)
 			}
 		}
