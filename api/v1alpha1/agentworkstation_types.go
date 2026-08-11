@@ -370,6 +370,20 @@ type AgentWorkstationSpec struct {
 	// +optional
 	Memory *MemorySpec `json:"memory,omitempty"`
 
+	// Team groups agents that work together — the crew an agent
+	// belongs to, shown as a section in the console's Agent Office
+	// view. CONVENTION: one team lives in one namespace (that is the
+	// blast-radius and quota boundary); the console flags a team whose
+	// members are split across namespaces rather than silently
+	// merging them.
+	//
+	// Optional. When empty the console falls back to the
+	// `app.kubernetes.io/part-of` label, then to the namespace — so
+	// crews already labelled that way group correctly without being
+	// edited.
+	// +optional
+	Team string `json:"team,omitempty"`
+
 	// Office carries UI-only metadata for the office Map view.
 	// +optional
 	Office *OfficeSpec `json:"office,omitempty"`

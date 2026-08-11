@@ -102,6 +102,27 @@ func TestRecommendCarriesFullPacks(t *testing.T) {
 	}
 }
 
+// TestRecommendNoMatchEmitsEmptyArray: a description matching nothing
+// must serialize packs as [] — a Go nil slice becomes `null`, and the
+// composer field crashed on it with "null is not an object". Asserted
+// on the JSON, not the struct, because the struct is nil either way.
+func TestRecommendNoMatchEmitsEmptyArray(t *testing.T) {
+	out := recommendFallback("zzzqqq unmatchable xyzzy", recommendFixture())
+	if len(out.Packs) != 0 {
+		t.Fatalf("fixture should not match: %+v", out.Packs)
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(b), `"packs":null`) {
+		t.Errorf("packs serialized as null — clients iterate this: %s", b)
+	}
+	if !strings.Contains(string(b), `"packs":[]`) {
+		t.Errorf("want an empty array, got: %s", b)
+	}
+}
+
 func TestSanitizeAgentName(t *testing.T) {
 	for in, want := range map[string]string{
 		"Weekly Ops!! Agent": "weekly-ops-agent",

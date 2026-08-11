@@ -114,6 +114,13 @@ func (r *AgentGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
+	// 3b. Record per-agent activity so the console shows an operations
+	//     view (who is working) rather than an inventory (who exists).
+	//     Best effort: a gateway mid-restart yields nothing this pass.
+	if err := r.recordAgentActivity(ctx, &gw); err != nil {
+		log.V(1).Info("agent activity skipped", "err", err.Error())
+	}
+
 	// 4. Pre-approve channel senders listed in spec.allowedUsers by
 	//    merging them into <channel>-<accountId>-allowFrom.json.
 	//    Skips the "OpenClaw: access not configured" prompt for those

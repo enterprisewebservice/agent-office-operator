@@ -200,7 +200,9 @@ func recommendViaModel(ctx context.Context, url, desc string, packs []catalogPac
 	for _, p := range packs {
 		byName[p.Name] = p
 	}
-	var chosen []recommendPack
+	// Initialized, never nil: a nil slice marshals to `null` and every
+	// client that iterates the field crashes on it.
+	chosen := []recommendPack{}
 	for _, sel := range out.Packs {
 		if p, ok := byName[sel.Name]; ok {
 			chosen = append(chosen, recommendPack{catalogPack: p, Reason: sel.Reason})
@@ -263,7 +265,7 @@ func recommendFallback(desc string, packs []catalogPack) *recommendResponse {
 
 	perType := map[string]int{}
 	limit := map[string]int{"skill": 2, "tool": 2, "kb": 1}
-	var chosen []recommendPack
+	chosen := []recommendPack{}
 	for _, s := range all {
 		if perType[s.p.Type] >= limit[s.p.Type] {
 			continue

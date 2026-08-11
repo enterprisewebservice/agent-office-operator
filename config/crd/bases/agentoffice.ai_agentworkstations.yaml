@@ -386,6 +386,20 @@ spec:
                   snippet here so the agent actually USES the new bindings
                   without the author hand-editing systemPrompt every time.
                 type: string
+              team:
+                description: |-
+                  Team groups agents that work together — the crew an agent
+                  belongs to, shown as a section in the console's Agent Office
+                  view. CONVENTION: one team lives in one namespace (that is the
+                  blast-radius and quota boundary); the console flags a team whose
+                  members are split across namespaces rather than silently
+                  merging them.
+
+                  Optional. When empty the console falls back to the
+                  `app.kubernetes.io/part-of` label, then to the namespace — so
+                  crews already labelled that way group correctly without being
+                  edited.
+                type: string
               tools:
                 description: Tools is the tool allowlist.
                 properties:
