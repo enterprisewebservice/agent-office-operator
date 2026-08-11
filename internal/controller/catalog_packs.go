@@ -67,6 +67,20 @@ type catalogPack struct {
 	Recipe *toolRecipe `json:"recipe,omitempty"`
 	// GatewayRef — knowledge bases only.
 	GatewayRef string `json:"gatewayRef,omitempty"`
+
+	// ---- registry provenance (federated artifacts only) -------------
+	// Installed distinguishes what exists on THIS cluster from what a
+	// registry merely publishes. Local packs are always true.
+	Installed bool `json:"installed"`
+	// Registry/Namespace/ArtifactKind are the artifact's coordinates —
+	// <registry> <namespace>/<name>:<version>, kind meta-pack|pack|skill.
+	Registry     string `json:"registry,omitempty"`
+	Namespace    string `json:"namespace,omitempty"`
+	ArtifactKind string `json:"artifactKind,omitempty"`
+	// Manifest/ContentURL/OCI are where an installer fetches from.
+	Manifest   string `json:"manifest,omitempty"`
+	ContentURL string `json:"contentUrl,omitempty"`
+	OCI        string `json:"oci,omitempty"`
 }
 
 // toolRecipe mirrors the AgentWorkstation spec.tools.mcpServers entry
@@ -135,6 +149,7 @@ func (h *CatalogSkillsHandler) gatherPacks(ctx context.Context, typeFilter map[s
 				Type: "skill", Name: e.Name, DisplayName: e.DisplayName,
 				Description: e.Description, Version: e.Version, Tier: e.Tier,
 				Requires: e.Requires, Dependencies: e.Dependencies,
+				Installed: true,
 			})
 		}
 	}
@@ -171,6 +186,7 @@ func (h *CatalogSkillsHandler) gatherPacks(ctx context.Context, typeFilter map[s
 				items = append(items, catalogPack{
 					Type: "tool", Name: reg.GetName(),
 					DisplayName: displayName, Description: desc, Recipe: recipe,
+					Installed: true,
 				})
 			}
 		}
@@ -186,7 +202,23 @@ func (h *CatalogSkillsHandler) gatherPacks(ctx context.Context, typeFilter map[s
 					DisplayName: kb.Spec.DisplayName,
 					Description: kb.Spec.Description,
 					GatewayRef:  kb.Spec.GatewayRef.Name,
+					Installed:   true,
 				})
+			}
+		}
+	}
+
+	// Federated registry artifacts — searchable BEFORE installation,
+	// which is the whole point of a registry. A name already present
+	// locally wins: the installed copy is the truth for this cluster.
+	if wantType("skill") {
+		local := map[string]bool{}
+		for _, p := range items {
+			local[p.Name] = true
+		}
+		for _, rp := range registryPacks(ctx) {
+			if !local[rp.Name] {
+				items = append(items, rp)
 			}
 		}
 	}
@@ -194,6 +226,9 @@ func (h *CatalogSkillsHandler) gatherPacks(ctx context.Context, typeFilter map[s
 	// Deterministic: skills, tools, kbs; name asc within type.
 	order := map[string]int{"skill": 0, "tool": 1, "kb": 2}
 	sort.Slice(items, func(i, j int) bool {
+		if items[i].Installed != items[j].Installed {
+			return items[i].Installed // installed first
+		}
 		if order[items[i].Type] != order[items[j].Type] {
 			return order[items[i].Type] < order[items[j].Type]
 		}
