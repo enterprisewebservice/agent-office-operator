@@ -77,6 +77,8 @@ type catalogPack struct {
 	Registry     string `json:"registry,omitempty"`
 	Namespace    string `json:"namespace,omitempty"`
 	ArtifactKind string `json:"artifactKind,omitempty"`
+	// Member — which pack a federated skill belongs to.
+	Member string `json:"member,omitempty"`
 	// Manifest/ContentURL/OCI are where an installer fetches from.
 	Manifest   string `json:"manifest,omitempty"`
 	ContentURL string `json:"contentUrl,omitempty"`

@@ -147,6 +147,10 @@ func (h *CatalogSkillsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		h.recommend(w, r)
 		return
 	}
+	if len(parts) == 2 && parts[0] == "catalog" && parts[1] == "install" {
+		h.install(w, r)
+		return
+	}
 	if r.Method != http.MethodGet {
 		writeCatalogJSONError(w, http.StatusMethodNotAllowed,
 			fmt.Errorf("only GET is supported"))

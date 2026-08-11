@@ -198,6 +198,7 @@ func remoteToPack(registry, base string, a registryArtifact) catalogPack {
 		Registry:     registry,
 		Namespace:    a.Namespace,
 		ArtifactKind: a.Kind,
+		Member:       a.Member,
 		Manifest:     abs(a.Manifest),
 		ContentURL:   abs(a.Content),
 		OCI:          a.OCI,
