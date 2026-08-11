@@ -184,14 +184,16 @@ func (h *CatalogSkillsHandler) recommendViaGateway(
 		"\nThe catalog is a HIERARCHY. Selecting a pack installs every skill it contains; " +
 		"selecting a meta-pack installs every skill in all of its packs. Therefore:\n" +
 		"  * NEVER select both a container and something already inside it — pick one.\n" +
-		"  * Pick the SMALLEST container that covers the job: a single skill if one does it; " +
-		"its pack if the job spans several skills in that pack; the meta-pack only if the job " +
-		"spans most of its packs.\n" +
+		"  * A selection must be DEPENDENCY-COMPLETE. If a pack you would pick has a REQUIRES " +
+		"entry marked missing, that pick is broken on its own — take the self-contained parent " +
+		"(a meta-pack with no REQUIRES carries all of its members' content) instead of the " +
+		"member pack.\n" +
+		"  * Otherwise pick the smallest container that covers the job: a single skill if one " +
+		"does it; its pack if the job spans several skills in that pack.\n" +
 		"  * A container is worth picking for breadth, not because its name matches — a job about " +
 		"one narrow task takes the one skill, even when a whole family shares its vocabulary.\n" +
-		"  * REQUIRES is a separate graph from CONTAINS: a pack that requires another needs it " +
-		"present to work. You do not have to select a requirement — it is reported, not resolved — " +
-		"but prefer a selection whose requirements are already present over one that is not.\n" +
+		"  * REQUIRES is a separate graph from CONTAINS: a pack that requires another needs that " +
+		"one present to function at all. Prefer a selection with nothing missing.\n" +
 		"Reply with ONE JSON object and no prose, no code fence:\n" +
 		`{"name":"<dns-safe-short-name>","displayName":"...","emoji":"<one emoji>","role":"<one word>",` +
 		`"systemPrompt":"<2-4 sentences: the job, which governed tools/skills to lean on, and: never fabricate data — if a tool cannot answer, say so>",` +
@@ -263,7 +265,7 @@ func (h *CatalogSkillsHandler) recommendViaGateway(
 			chosen = append(chosen, recommendPack{catalogPack: p, Reason: s.Reason})
 		}
 	}
-	chosen = dropContained(chosen, packs)
+	chosen = dropContained(completeSelection(chosen, packs), packs)
 	if len(chosen) == 0 {
 		return nil, fmt.Errorf("gateway selected no valid packs")
 	}
@@ -320,6 +322,104 @@ func dropContained(chosen []recommendPack, all []catalogPack) []recommendPack {
 			continue
 		}
 		out = append(out, c)
+	}
+	return out
+}
+
+// completeSelection makes a selection dependency-complete.
+//
+// The catalog has two graphs and honouring only containment produces
+// agents that cannot work. Every parkforge member pack requires another
+// (terrain -> core; characters -> core + unreal-scripting), so picking
+// "the smallest container that covers the job" hands back a pack whose
+// dependencies are absent — correct-looking and broken. Maven does not
+// resolve a dependency by shrugging.
+//
+// A meta-pack that declares no requires is SELF-CONTAINED by mindifact's
+// definition: it carries every member's content. So when a pick has
+// unmet requirements, promoting to that ancestor satisfies them all at
+// once and is what the publisher intended you to install. Only when no
+// such ancestor exists does this pull the missing packs in directly,
+// transitively.
+//
+// dropContained then collapses whatever is now redundant.
+func completeSelection(chosen []recommendPack, all []catalogPack) []recommendPack {
+	if len(chosen) == 0 {
+		return chosen
+	}
+	byName := map[string]catalogPack{}
+	for _, p := range all {
+		byName[p.Name] = p
+	}
+	// pack -> the meta-pack listing it.
+	metaOf := map[string]string{}
+	for _, p := range all {
+		if p.ArtifactKind != "meta-pack" {
+			continue
+		}
+		for _, m := range p.Members {
+			metaOf[m] = p.Name
+		}
+	}
+	// The pack an artifact belongs to (itself, if it IS a pack).
+	packOf := func(p catalogPack) string {
+		if p.ArtifactKind == "pack" {
+			return p.Name
+		}
+		return p.Member
+	}
+
+	picked := map[string]bool{}
+	for _, c := range chosen {
+		picked[c.Name] = true
+	}
+	out := append([]recommendPack(nil), chosen...)
+
+	add := func(name, reason string) {
+		if name == "" || picked[name] {
+			return
+		}
+		p, ok := byName[name]
+		if !ok {
+			return
+		}
+		picked[name] = true
+		out = append(out, recommendPack{catalogPack: p, Reason: reason})
+	}
+
+	// Bounded: each pass can only add catalog entries, and `picked`
+	// makes every addition idempotent.
+	for i := 0; i < 8; i++ {
+		grew := false
+		for _, c := range append([]recommendPack(nil), out...) {
+			pack := packOf(c.catalogPack)
+			if pack == "" {
+				continue
+			}
+			unmet := []string{}
+			for _, r := range byName[pack].PackRequires {
+				if !r.Satisfied && !picked[r.Name] {
+					unmet = append(unmet, r.Name)
+				}
+			}
+			if len(unmet) == 0 {
+				continue
+			}
+			// Prefer the self-contained ancestor.
+			if meta := metaOf[pack]; meta != "" && len(byName[meta].PackRequires) == 0 && !picked[meta] {
+				add(meta, fmt.Sprintf("self-contained parent of %s, which needs %s",
+					pack, strings.Join(unmet, ", ")))
+				grew = true
+				continue
+			}
+			for _, u := range unmet {
+				add(u, fmt.Sprintf("required by %s", pack))
+				grew = true
+			}
+		}
+		if !grew {
+			break
+		}
 	}
 	return out
 }
