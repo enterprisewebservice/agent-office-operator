@@ -98,6 +98,11 @@ type catalogPack struct {
 	// composer surfaces an unsatisfied one instead of quietly widening
 	// the install.
 	PackRequires []catalogRequirement `json:"packRequires,omitempty"`
+	// Provides — the capability vocabulary an artifact claims
+	// (unreal.terrain, unreal.routes, …). This is how a description is
+	// matched to coverage rather than to vocabulary in a description
+	// string, and it was being dropped on the floor.
+	Provides []string `json:"provides,omitempty"`
 	// Manifest/ContentURL/OCI are where an installer fetches from.
 	Manifest   string `json:"manifest,omitempty"`
 	ContentURL string `json:"contentUrl,omitempty"`

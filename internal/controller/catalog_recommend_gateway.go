@@ -165,6 +165,9 @@ func (h *CatalogSkillsHandler) recommendViaGateway(
 		if p.Member != "" {
 			line += fmt.Sprintf("\n    INSIDE pack: %s", p.Member)
 		}
+		if len(p.Provides) > 0 {
+			line += fmt.Sprintf("\n    PROVIDES: %s", strings.Join(p.Provides, ", "))
+		}
 		if len(p.PackRequires) > 0 {
 			var rs []string
 			for _, r := range p.PackRequires {
@@ -180,7 +183,10 @@ func (h *CatalogSkillsHandler) recommendViaGateway(
 	}
 	prompt := "You compose governed AI agents from a fixed catalog.\n" +
 		"Choose ONLY entries from the catalog below — never invent names — and draft an identity.\n" +
-		"Prefer few, strongly relevant picks over filling a quota; choosing nothing is better than choosing something unrelated.\n" +
+		"COVER THE WHOLE JOB. Break the description into the distinct capabilities it calls for " +
+		"and select an artifact for each one — an agent missing a capability the user asked for is " +
+		"a failure, and so is a half-equipped agent. Do not pad with entries the description does " +
+		"not call for; an artifact's PROVIDES list is the evidence that it covers a capability.\n" +
 		"\nThe catalog is a HIERARCHY. Selecting a pack installs every skill it contains; " +
 		"selecting a meta-pack installs every skill in all of its packs. Therefore:\n" +
 		"  * NEVER select both a container and something already inside it — pick one.\n" +

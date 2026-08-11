@@ -60,6 +60,7 @@ type registryArtifact struct {
 	Member      string   `json:"member,omitempty"`
 	Members     []string `json:"members,omitempty"`
 	Skills      []string `json:"skills,omitempty"`
+	Provides    []string `json:"provides,omitempty"`
 	// Requires is heterogeneous across publishers: a list of strings for
 	// pack-level deps, or objects for resource deps. Kept raw and
 	// interpreted by the consumer.
@@ -219,6 +220,7 @@ func remoteToPack(registry, base string, a registryArtifact) catalogPack {
 		Member:       a.Member,
 		Members:      a.Members,
 		Skills:       a.Skills,
+		Provides:     a.Provides,
 		PackRequires: reqs,
 		Manifest:     abs(a.Manifest),
 		ContentURL:   abs(a.Content),

@@ -319,8 +319,13 @@ func recommendFallback(desc string, packs []catalogPack) *recommendResponse {
 		cutoff = all[0].score / 3
 	}
 
+	// Coverage, not a top-2. Every federated mindifact is typed "skill",
+	// so a cap of 2 meant this path could never equip an agent for a job
+	// spanning more than two capabilities no matter how well the rest
+	// scored. The relevance cutoff above is what keeps noise out; the
+	// cap is only a backstop against a pathological catalog.
 	perType := map[string]int{}
-	limit := map[string]int{"skill": 2, "tool": 2, "kb": 1}
+	limit := map[string]int{"skill": 6, "tool": 3, "kb": 2}
 	chosen := []recommendPack{}
 	for _, s := range all {
 		if s.score < cutoff {
