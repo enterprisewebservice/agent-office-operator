@@ -69,8 +69,15 @@ spec:
     - name: workspace
       volumeClaimTemplate:
         spec:
+          # RWX on CephFS, not RWO on RBD. RBD is block storage: one node
+          # at a time, so Tekton's affinity assistant had to pin every pod
+          # of a run to the node holding the workspace — and a build needing
+          # ~4 CPU / 12Gi then waited forever whenever THAT node was full,
+          # while the rest of the cluster sat idle. CephFS mounts on many
+          # nodes, so the run can schedule anywhere there is room.
           accessModes:
-            - ReadWriteOnce
+            - ReadWriteMany
+          storageClassName: ocs-storagecluster-cephfs
           resources:
             requests:
               storage: 1Gi

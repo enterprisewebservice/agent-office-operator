@@ -106,8 +106,13 @@ spec:
     - name: workspace
       volumeClaimTemplate:
         spec:
+          # RWX on CephFS, not RWO on RBD — see the sibling pipelines:
+          # block storage forced Tekton's affinity assistant to pin every
+          # pod of a run to one node, so builds queued while the cluster
+          # sat idle. CephFS mounts on many nodes.
           accessModes:
-            - ReadWriteOnce
+            - ReadWriteMany
+          storageClassName: ocs-storagecluster-cephfs
           resources:
             requests:
               # Bumped from 10 → 50 Gi after v0.0.6 builds repeatedly
