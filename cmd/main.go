@@ -205,9 +205,9 @@ func main() {
 	// cachescope.go — without this the operator caches every ConfigMap
 	// on the cluster and OOMs before it serves anything.
 	restCfg := ctrl.GetConfigOrDie()
-	coreNamespaces := coreCacheNamespaces(context.Background(), restCfg, scheme)
+	coreNamespaces, scopePinned := coreCacheNamespaces(context.Background(), restCfg, scheme)
 	setupLog.Info("caching core types in namespaces (CRDs stay cluster-wide)",
-		"namespaces", coreNamespaces)
+		"namespaces", coreNamespaces, "pinnedByEnv", scopePinned)
 
 	mgr, err := ctrl.NewManager(restCfg, ctrl.Options{
 		Scheme:                 scheme,
@@ -311,13 +311,18 @@ func main() {
 	// A CR created in a namespace this process did not cache can never
 	// be reconciled correctly, so watch for that and restart rather
 	// than silently half-working. See cachescope.go.
-	cachedSet := map[string]struct{}{}
-	for _, ns := range coreNamespaces {
-		cachedSet[ns] = struct{}{}
-	}
-	if err := mgr.Add(&namespaceWatchdog{client: mgr.GetClient(), cached: cachedSet}); err != nil {
-		setupLog.Error(err, "unable to add namespace watchdog")
-		os.Exit(1)
+	// Skipped when the scope was pinned by env: the operator was told
+	// exactly what to cache, and chasing CRs outside that would restart
+	// it forever.
+	if !scopePinned {
+		cachedSet := map[string]struct{}{}
+		for _, ns := range coreNamespaces {
+			cachedSet[ns] = struct{}{}
+		}
+		if err := mgr.Add(&namespaceWatchdog{client: mgr.GetClient(), cached: cachedSet}); err != nil {
+			setupLog.Error(err, "unable to add namespace watchdog")
+			os.Exit(1)
+		}
 	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

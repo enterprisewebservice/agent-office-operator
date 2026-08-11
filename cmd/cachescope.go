@@ -146,23 +146,43 @@ func extractNamespaces(l client.ObjectList) ([]string, error) {
 }
 
 // coreCacheNamespaces resolves the namespace set for the core-type
-// informers. MANAGED_NAMESPACES is an explicit override for the case
-// where a namespace should be cached before any CR lands in it.
-func coreCacheNamespaces(ctx context.Context, cfg *rest.Config, scheme *runtime.Scheme) []string {
+// informers.
+//
+// Two env vars can pin it explicitly: MANAGED_NAMESPACES, for caching a
+// namespace before any CR lands in it, and WATCH_NAMESPACE, which OLM
+// already uses to scope the whole cache. Either one means the scope was
+// stated deliberately, so discovery is skipped and — critically — the
+// watchdog is disabled. Otherwise a deliberately narrow scope with CRs
+// outside it would restart the operator forever chasing namespaces it
+// was told not to cache. `pinned` reports which case this was.
+func coreCacheNamespaces(ctx context.Context, cfg *rest.Config, scheme *runtime.Scheme) (nss []string, pinned bool) {
 	set := map[string]struct{}{operatorNamespace(): {}}
 
-	if explicit := strings.TrimSpace(os.Getenv("MANAGED_NAMESPACES")); explicit != "" {
-		for _, ns := range strings.Split(explicit, ",") {
+	addList := func(v string) bool {
+		added := false
+		for _, ns := range strings.Split(v, ",") {
 			if ns = strings.TrimSpace(ns); ns != "" {
 				set[ns] = struct{}{}
+				added = true
 			}
 		}
-	} else if found, err := crNamespaces(ctx, cfg, scheme); err == nil {
-		for ns := range found {
-			set[ns] = struct{}{}
+		return added
+	}
+
+	switch {
+	case addList(os.Getenv("MANAGED_NAMESPACES")):
+		pinned = true
+	case addList(os.Getenv("WATCH_NAMESPACE")):
+		pinned = true
+	default:
+		if found, err := crNamespaces(ctx, cfg, scheme); err == nil {
+			for ns := range found {
+				set[ns] = struct{}{}
+			}
+		} else {
+			ctrl.Log.WithName("cache-scope").Error(err,
+				"could not discover CR namespaces; caching operator namespace only")
 		}
-	} else {
-		ctrl.Log.WithName("cache-scope").Error(err, "could not discover CR namespaces; caching operator namespace only")
 	}
 
 	out := make([]string, 0, len(set))
@@ -170,7 +190,7 @@ func coreCacheNamespaces(ctx context.Context, cfg *rest.Config, scheme *runtime.
 		out = append(out, ns)
 	}
 	sort.Strings(out)
-	return out
+	return out, pinned
 }
 
 // coreByObject pins the expensive informers to the given namespaces.

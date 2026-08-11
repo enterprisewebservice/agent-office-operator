@@ -16,7 +16,10 @@ COPY go.sum go.sum
 RUN go mod download
 
 # Copy the go source
-COPY cmd/main.go cmd/main.go
+# The whole package, not just main.go — a second file in package main
+# (cachescope.go) is invisible to the build otherwise, and the failure
+# only shows up in the container, never locally.
+COPY cmd/ cmd/
 COPY api/ api/
 COPY internal/ internal/
 
@@ -31,7 +34,7 @@ COPY internal/ internal/
 # k8s.io transitive dep tree every push. Plain `go build` honors Go's content-
 # addressed cache when the layer cache survives, and even cold-from-scratch is
 # 3-4x faster without `-a`.
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o manager cmd/main.go
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o manager ./cmd
 
 # Use distroless as minimal base image to package the manager binary
 # Refer to https://github.com/GoogleContainerTools/distroless for more details

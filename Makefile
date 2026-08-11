@@ -581,6 +581,14 @@ preflight: verify-version preflight-unit-tests ## Run all structural sanity chec
 	    BAD=1; \
 	  fi; \
 	fi; \
+	CMD_GO=$$(ls cmd/*.go 2>/dev/null | wc -l | tr -d ' '); \
+	if [ "$$CMD_GO" -gt 1 ] && ! grep -q '^COPY cmd/ cmd/' Dockerfile; then \
+	  echo "  ERR cmd/ has $$CMD_GO .go files but Dockerfile does not 'COPY cmd/ cmd/'"; \
+	  echo "      a second file in package main compiles locally and vanishes in the image"; \
+	  BAD=1; \
+	else \
+	  echo "  OK  Dockerfile copies all $$CMD_GO file(s) in cmd/"; \
+	fi; \
 	if [ $$BAD -ne 0 ]; then echo "PREFLIGHT FAIL — see ERR lines above"; exit 1; else echo "All preflight checks passed"; fi
 
 # preflight-unit-tests: run ONLY the fast, no-cluster-needed unit tests

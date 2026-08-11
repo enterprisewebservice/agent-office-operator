@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -49,14 +50,16 @@ import (
 //	AGENT_RECOMMENDER_GATEWAY  AgentGateway name (e.g. research-gateway)
 //	AGENT_RECOMMENDER_AGENT    logical agent id to run the turn as
 //	AGENT_RECOMMENDER_MODEL    e.g. openai/gpt-5.6-sol
+//	AGENT_RECOMMENDER_TIMEOUT  budget for the turn (default 20s)
 //
 // Unset ⇒ this path is skipped entirely and the deterministic scorer
 // answers, so a cluster with no gateway still works.
 //
-// The turn is bounded (the CLI's own --timeout plus the request
-// context) and its output is validated against the live catalog exactly
-// like the HTTP model path: a name the catalog does not contain is
-// dropped, and zero survivors counts as failure and falls back.
+// The turn is bounded by that budget — chosen to stay inside the 30s
+// OpenShift route timeout this request arrives through — and its output
+// is validated against the live catalog exactly like the HTTP model
+// path: a name the catalog does not contain is dropped, and zero
+// survivors counts as failure and falls back.
 
 // execInPod runs a command in the named container and returns stdout.
 // Mirrors AgentGatewayReconciler.execInGatewayPod; kept separate so the
@@ -158,10 +161,34 @@ func (h *CatalogSkillsHandler) recommendViaGateway(
 	if model != "" {
 		modelArg = "--model " + model + " "
 	}
+
+	// Hard budget. This request is answering a browser: it reaches the
+	// operator through the RHDH route, and an OpenShift route gives up
+	// at 30s by default — that route is Helm-managed, so raising it
+	// would drift on the next upgrade. A turn measures ~14s, which
+	// leaves little room, so cap the model at a budget that always
+	// returns in time and let the deterministic scorer answer if the
+	// model is slower. A useful answer late is a 504.
+	budget := 20 * time.Second
+	if v := strings.TrimSpace(os.Getenv("AGENT_RECOMMENDER_TIMEOUT")); v != "" {
+		if d, perr := time.ParseDuration(v); perr == nil && d > 0 {
+			budget = d
+		}
+	}
+	ctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+
+	// Give the CLI a slightly shorter deadline so it exits on its own
+	// and we see its output, rather than having the exec stream torn
+	// out from under it.
+	cliTimeout := int(budget.Seconds()) - 2
+	if cliTimeout < 5 {
+		cliTimeout = 5
+	}
 	script := fmt.Sprintf(
 		`cd /home/node && printf %%s '%s' | base64 -d > /tmp/rec-prompt.txt && `+
-			`openclaw agent --agent %s %s-m "$(cat /tmp/rec-prompt.txt)" --timeout 120 2>/dev/null`,
-		b64, agent, modelArg)
+			`openclaw agent --agent %s %s-m "$(cat /tmp/rec-prompt.txt)" --timeout %d 2>/dev/null`,
+		b64, agent, modelArg, cliTimeout)
 
 	out, err := h.execInPod(ctx, pod, "openclaw", []string{"sh", "-c", script})
 	if err != nil {
