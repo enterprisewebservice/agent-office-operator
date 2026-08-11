@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"net/http"
@@ -199,7 +200,16 @@ func main() {
 		setupLog.Info("scoping watch to namespaces", "namespaces", defaultNamespaces)
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	// Core-type informers get pinned to the namespaces that actually
+	// hold agent-office CRs; the CRDs stay cluster-wide. See
+	// cachescope.go — without this the operator caches every ConfigMap
+	// on the cluster and OOMs before it serves anything.
+	restCfg := ctrl.GetConfigOrDie()
+	coreNamespaces := coreCacheNamespaces(context.Background(), restCfg, scheme)
+	setupLog.Info("caching core types in namespaces (CRDs stay cluster-wide)",
+		"namespaces", coreNamespaces)
+
+	mgr, err := ctrl.NewManager(restCfg, ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
@@ -208,6 +218,8 @@ func main() {
 		LeaderElectionID:       "80a9df54.ai",
 		Cache: cache.Options{
 			DefaultNamespaces: defaultNamespaces,
+			ByObject:          coreByObject(coreNamespaces),
+			DefaultTransform:  stripManagedFields,
 		},
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the
@@ -294,6 +306,18 @@ func main() {
 			setupLog.Error(err, "unable to add webhook certificate watcher to manager")
 			os.Exit(1)
 		}
+	}
+
+	// A CR created in a namespace this process did not cache can never
+	// be reconciled correctly, so watch for that and restart rather
+	// than silently half-working. See cachescope.go.
+	cachedSet := map[string]struct{}{}
+	for _, ns := range coreNamespaces {
+		cachedSet[ns] = struct{}{}
+	}
+	if err := mgr.Add(&namespaceWatchdog{client: mgr.GetClient(), cached: cachedSet}); err != nil {
+		setupLog.Error(err, "unable to add namespace watchdog")
+		os.Exit(1)
 	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
