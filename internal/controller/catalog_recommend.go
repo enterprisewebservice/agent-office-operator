@@ -22,6 +22,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"time"
 )
 
@@ -121,13 +123,22 @@ func (h *CatalogSkillsHandler) recommend(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// 1. A real model turn through the gateway, on the ChatGPT/Codex
+	//    subscription — no API key, no per-token billing.
+	if resp, err := h.recommendViaGateway(r.Context(), desc, packs); err == nil {
+		writeCatalogJSON(w, http.StatusOK, resp)
+		return
+	} else if !strings.Contains(err.Error(), "not configured") {
+		logf.FromContext(r.Context()).V(1).Info("gateway recommender failed", "err", err.Error())
+	}
+	// 2. An OpenAI-compatible endpoint, if one is configured.
 	if url := os.Getenv("AGENT_RECOMMENDER_URL"); url != "" {
 		if resp, err := recommendViaModel(r.Context(), url, desc, packs); err == nil {
 			writeCatalogJSON(w, http.StatusOK, resp)
 			return
 		}
-		// fall through to the deterministic engine on ANY model failure
 	}
+	// 3. Deterministic scoring — always available.
 	writeCatalogJSON(w, http.StatusOK, recommendFallback(desc, packs))
 }
 

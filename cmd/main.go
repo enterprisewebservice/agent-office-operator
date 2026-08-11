@@ -339,7 +339,8 @@ func main() {
 		// at /catalog/skills and the full SKILL.md body at
 		// /catalog/skills/<name>. See
 		// internal/controller/catalog_skills.go for the route table.
-		catalogSkills := controller.NewCatalogSkillsHandler(mgr.GetClient())
+		catalogSkills := controller.NewCatalogSkillsHandler(mgr.GetClient()).
+			WithRestConfig(mgr.GetConfig())
 		mux.Handle("/catalog/skills", catalogSkills)
 		mux.Handle("/catalog/skills/", catalogSkills)
 		// v1.7.11: /catalog/packs — ONE searchable typed index

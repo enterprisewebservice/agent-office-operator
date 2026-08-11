@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentofficev1alpha1 "github.com/enterprisewebservice/agent-office-operator/api/v1alpha1"
@@ -76,6 +77,10 @@ import (
 type CatalogSkillsHandler struct {
 	client    client.Client
 	namespace string // agent-office; could be made configurable later
+	// restConfig powers exec into a gateway pod, which is how the
+	// recommender runs a real model turn on the ChatGPT/Codex
+	// subscription without holding credentials of its own.
+	restConfig *rest.Config
 }
 
 // NewCatalogSkillsHandler returns a handler ready to register against
@@ -86,6 +91,14 @@ func NewCatalogSkillsHandler(c client.Client) *CatalogSkillsHandler {
 		client:    c,
 		namespace: "agent-office",
 	}
+}
+
+// WithRestConfig enables the gateway-backed recommender. Optional: with
+// no RestConfig the handler still serves the catalog and falls back to
+// deterministic scoring.
+func (h *CatalogSkillsHandler) WithRestConfig(cfg *rest.Config) *CatalogSkillsHandler {
+	h.restConfig = cfg
+	return h
 }
 
 // skillCatalogEntry is the metadata-only shape returned by the
