@@ -164,19 +164,37 @@ func remoteToPack(registry, base string, a registryArtifact) catalogPack {
 		return base + "/" + p
 	}
 
-	// Pack-level `requires` naming a resource becomes a dependency the
-	// composer already knows how to render (available=false: a remote
-	// artifact's needs are, by definition, not verified on this cluster).
+	// `requires` carries TWO different graphs and the shape tells them
+	// apart. Objects with a `kind` are cluster RESOURCES a skill needs
+	// (mcpServer, knowledgeBase). Objects with a `name` and no kind — or
+	// bare strings — are other PACKS, the Maven-style dependency graph
+	// with its version range. Only the first was ever parsed, so every
+	// pack→pack edge in the registry was read and silently discarded.
 	var deps []catalogDependency
+	var reqs []catalogRequirement
 	if len(a.Requires) > 0 {
 		var objs []struct {
-			Kind string `json:"kind"`
-			Name string `json:"name"`
+			Kind  string `json:"kind"`
+			Name  string `json:"name"`
+			Range string `json:"range"`
 		}
 		if err := json.Unmarshal(a.Requires, &objs); err == nil {
 			for _, o := range objs {
-				if o.Kind != "" && o.Name != "" {
+				switch {
+				case o.Kind != "" && o.Name != "":
 					deps = append(deps, catalogDependency{Kind: o.Kind, Name: o.Name})
+				case o.Name != "":
+					reqs = append(reqs, catalogRequirement{Name: o.Name, Range: o.Range})
+				}
+			}
+		} else {
+			// Older publishers emitted bare names with no range.
+			var names []string
+			if err := json.Unmarshal(a.Requires, &names); err == nil {
+				for _, n := range names {
+					if n != "" {
+						reqs = append(reqs, catalogRequirement{Name: n})
+					}
 				}
 			}
 		}
@@ -201,6 +219,7 @@ func remoteToPack(registry, base string, a registryArtifact) catalogPack {
 		Member:       a.Member,
 		Members:      a.Members,
 		Skills:       a.Skills,
+		PackRequires: reqs,
 		Manifest:     abs(a.Manifest),
 		ContentURL:   abs(a.Content),
 		OCI:          a.OCI,

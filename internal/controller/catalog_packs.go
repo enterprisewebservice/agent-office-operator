@@ -90,10 +90,28 @@ type catalogPack struct {
 	// name. Advisory: the authoritative parent→child edge is Member on
 	// each skill row.
 	Skills []string `json:"skills,omitempty"`
+	// PackRequires — the Maven-style pack→pack dependency graph, with the
+	// publisher's version range. DISTINCT from Dependencies, which are
+	// cluster resources (an mcpServer, a knowledgeBase) a skill needs.
+	// These are other packs, and mindifact's own CLI treats them as a
+	// PRESENCE CHECK rather than something to auto-resolve — so the
+	// composer surfaces an unsatisfied one instead of quietly widening
+	// the install.
+	PackRequires []catalogRequirement `json:"packRequires,omitempty"`
 	// Manifest/ContentURL/OCI are where an installer fetches from.
 	Manifest   string `json:"manifest,omitempty"`
 	ContentURL string `json:"contentUrl,omitempty"`
 	OCI        string `json:"oci,omitempty"`
+}
+
+// catalogRequirement is one edge of the pack dependency graph.
+// Satisfied reports whether that pack's content is already on this
+// cluster, so the UI can say "needs parkforge-core" rather than
+// implying everything is wired.
+type catalogRequirement struct {
+	Name      string `json:"name"`
+	Range     string `json:"range,omitempty"`
+	Satisfied bool   `json:"satisfied"`
 }
 
 // toolRecipe mirrors the AgentWorkstation spec.tools.mcpServers entry
@@ -245,6 +263,26 @@ func (h *CatalogSkillsHandler) gatherPacks(ctx context.Context, typeFilter map[s
 			if !local[rp.Name] {
 				items = append(items, rp)
 			}
+		}
+	}
+
+	// Resolve the pack dependency graph against what is actually here.
+	// mindifact's CLI treats `requires` as a presence check and resolves
+	// nothing; the cluster analogue is to report satisfaction honestly
+	// and let the composer show an unmet edge, rather than silently
+	// widening an install the user never asked for.
+	//
+	// A pack counts as present when any skill belonging to it is
+	// installed — the pack itself is never a Skill CR, its skills are.
+	packPresent := map[string]bool{}
+	for _, p := range items {
+		if p.Installed && p.Member != "" {
+			packPresent[p.Member] = true
+		}
+	}
+	for i := range items {
+		for j := range items[i].PackRequires {
+			items[i].PackRequires[j].Satisfied = packPresent[items[i].PackRequires[j].Name]
 		}
 	}
 

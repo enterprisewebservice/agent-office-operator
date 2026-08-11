@@ -165,6 +165,17 @@ func (h *CatalogSkillsHandler) recommendViaGateway(
 		if p.Member != "" {
 			line += fmt.Sprintf("\n    INSIDE pack: %s", p.Member)
 		}
+		if len(p.PackRequires) > 0 {
+			var rs []string
+			for _, r := range p.PackRequires {
+				state := "missing"
+				if r.Satisfied {
+					state = "present"
+				}
+				rs = append(rs, fmt.Sprintf("%s %s (%s)", r.Name, r.Range, state))
+			}
+			line += fmt.Sprintf("\n    REQUIRES packs: %s", strings.Join(rs, ", "))
+		}
 		lines = append(lines, line)
 	}
 	prompt := "You compose governed AI agents from a fixed catalog.\n" +
@@ -178,6 +189,9 @@ func (h *CatalogSkillsHandler) recommendViaGateway(
 		"spans most of its packs.\n" +
 		"  * A container is worth picking for breadth, not because its name matches — a job about " +
 		"one narrow task takes the one skill, even when a whole family shares its vocabulary.\n" +
+		"  * REQUIRES is a separate graph from CONTAINS: a pack that requires another needs it " +
+		"present to work. You do not have to select a requirement — it is reported, not resolved — " +
+		"but prefer a selection whose requirements are already present over one that is not.\n" +
 		"Reply with ONE JSON object and no prose, no code fence:\n" +
 		`{"name":"<dns-safe-short-name>","displayName":"...","emoji":"<one emoji>","role":"<one word>",` +
 		`"systemPrompt":"<2-4 sentences: the job, which governed tools/skills to lean on, and: never fabricate data — if a tool cannot answer, say so>",` +
