@@ -188,3 +188,63 @@ func TestRecommendViaModel_AllHallucinated(t *testing.T) {
 		t.Fatal("want error when every selected pack is invalid")
 	}
 }
+
+// TestRecommendRejectsWeakMatches is the regression for the complaint that
+// Suggest "picks the wrong ones". With flat substring scoring, a single
+// common word dragged in an unrelated pack: "weekly ops report" pulled
+// genesis-train on the word "report" alone, and "reviews pull requests"
+// pulled a newsroom skill on "reviews". Rare terms must outweigh common
+// ones, and a runner-up far below the best hit must be dropped rather
+// than used to fill the quota.
+func TestRecommendRejectsWeakMatches(t *testing.T) {
+	catalog := []catalogPack{
+		{Type: "skill", Name: "weekly-ops-report", DisplayName: "Weekly Ops Report",
+			Description: "Produce the weekly ops report: orders, revenue, stuck orders."},
+		{Type: "skill", Name: "genesis-train", DisplayName: "Genesis Train",
+			Description: "Run the genesis demo train and report progress for each beat."},
+		{Type: "skill", Name: "nl2sql-ranking-edition", DisplayName: "Ranking Edition",
+			Description: "Editorial reviews and ranking for the newsroom edition."},
+		{Type: "skill", Name: "parkforge-terrain-strokes", DisplayName: "Terrain Strokes",
+			Description: "Sculpt terrain and build paths in the Unreal park."},
+		{Type: "tool", Name: "github", DisplayName: "GitHub",
+			Description: "Create issues and pull requests as a governed identity."},
+	}
+
+	names := func(r *recommendResponse) []string {
+		var out []string
+		for _, p := range r.Packs {
+			out = append(out, p.Name)
+		}
+		return out
+	}
+	has := func(list []string, n string) bool {
+		for _, x := range list {
+			if x == n {
+				return true
+			}
+		}
+		return false
+	}
+
+	got := names(recommendFallback("weekly ops report on orders and revenue", catalog))
+	if !has(got, "weekly-ops-report") {
+		t.Errorf("lost the obvious hit: %v", got)
+	}
+	if has(got, "genesis-train") {
+		t.Errorf(`"report" alone must not pull in genesis-train: %v`, got)
+	}
+
+	got = names(recommendFallback("an agent that reviews pull requests on github", catalog))
+	if !has(got, "github") {
+		t.Errorf("lost the obvious hit: %v", got)
+	}
+	if has(got, "nl2sql-ranking-edition") {
+		t.Errorf(`"reviews" alone must not pull in the newsroom skill: %v`, got)
+	}
+
+	// A genuinely multi-signal query should still return its real matches.
+	got = names(recommendFallback("sculpt terrain and build paths in unreal", catalog))
+	if !has(got, "parkforge-terrain-strokes") {
+		t.Errorf("strong multi-term match lost: %v", got)
+	}
+}

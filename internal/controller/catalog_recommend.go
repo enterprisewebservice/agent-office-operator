@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"regexp"
@@ -234,54 +235,93 @@ var stopwords = map[string]bool{
 func recommendFallback(desc string, packs []catalogPack) *recommendResponse {
 	words := regexp.MustCompile(`[a-zA-Z][a-zA-Z-]+`).FindAllString(strings.ToLower(desc), -1)
 	var terms []string
+	seenTerm := map[string]bool{}
 	for _, w := range words {
-		if len(w) > 2 && !stopwords[w] {
+		if len(w) > 2 && !stopwords[w] && !seenTerm[w] {
+			seenTerm[w] = true
 			terms = append(terms, w)
 		}
 	}
 
+	// Weight each term by how RARE it is in this catalog (inverse document
+	// frequency). Plain substring counting treats "report" and "terrain"
+	// as equally informative, so a description about weekly ops reports
+	// pulled in genesis-train — which mentions "report" once and has
+	// nothing to do with the job. A term appearing in most packs says
+	// almost nothing about which pack you want; a term in one or two says
+	// almost everything.
+	df := map[string]int{}
+	for _, t := range terms {
+		for _, p := range packs {
+			if strings.Contains(strings.ToLower(p.Name+" "+p.DisplayName+" "+p.Description), t) {
+				df[t]++
+			}
+		}
+	}
+	n := float64(len(packs))
+	idf := func(t string) float64 {
+		d := float64(df[t])
+		if d <= 0 {
+			return 0
+		}
+		return math.Log(1 + n/d) // rare term -> high weight, ubiquitous -> ~0
+	}
+
 	type scored struct {
 		p     catalogPack
-		score int
+		score float64
+		hits  []string
 	}
 	var all []scored
 	for _, p := range packs {
 		nameHay := strings.ToLower(p.Name + " " + p.DisplayName)
 		descHay := strings.ToLower(p.Description)
-		s := 0
+		sc := 0.0
+		var hits []string
 		for _, t := range terms {
-			if strings.Contains(nameHay, t) {
-				s += 3 // a name hit is a much stronger signal
+			w := idf(t)
+			if w == 0 {
+				continue
 			}
-			if strings.Contains(descHay, t) {
-				s++
+			switch {
+			case strings.Contains(nameHay, t):
+				sc += w * 3 // the name is the strongest signal there is
+				hits = append(hits, t)
+			case strings.Contains(descHay, t):
+				sc += w
+				hits = append(hits, t)
 			}
 		}
-		if s > 0 {
-			all = append(all, scored{p, s})
+		if sc > 0 {
+			all = append(all, scored{p, sc, hits})
 		}
 	}
 	sort.SliceStable(all, func(i, j int) bool { return all[i].score > all[j].score })
+
+	// Quotas are a ceiling, never a target. The old code filled its 2
+	// skills / 2 tools / 1 kb whatever the runner-up scored, so a
+	// single weak word match always rode along. Anything scoring under
+	// a third of the best hit is noise and is dropped, even if that
+	// leaves one result — or none.
+	cutoff := 0.0
+	if len(all) > 0 {
+		cutoff = all[0].score / 3
+	}
 
 	perType := map[string]int{}
 	limit := map[string]int{"skill": 2, "tool": 2, "kb": 1}
 	chosen := []recommendPack{}
 	for _, s := range all {
+		if s.score < cutoff {
+			break // sorted desc: everything after this is weaker still
+		}
 		if perType[s.p.Type] >= limit[s.p.Type] {
 			continue
 		}
 		perType[s.p.Type]++
-		matched := []string{}
-		nameHay := strings.ToLower(s.p.Name + " " + s.p.DisplayName)
-		descHay := strings.ToLower(s.p.Description)
-		for _, t := range terms {
-			if strings.Contains(nameHay, t) || strings.Contains(descHay, t) {
-				matched = append(matched, t)
-			}
-		}
 		chosen = append(chosen, recommendPack{
 			catalogPack: s.p,
-			Reason:      fmt.Sprintf("matched: %s", strings.Join(matched, ", ")),
+			Reason:      fmt.Sprintf("matched: %s", strings.Join(s.hits, ", ")),
 		})
 	}
 
