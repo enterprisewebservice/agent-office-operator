@@ -11,7 +11,7 @@
 # embedded olm.bundle.object content (which is what OLM reads when
 # computing channel heads). Keep in sync with the image tag in
 # .tekton/operator-image-on-push.yaml etc.
-VERSION ?= 1.7.30
+VERSION ?= 1.7.31
 
 # CHANNELS define the bundle channels used in the bundle.
 # Add a new line here if you would like to change its default config. (E.g CHANNELS = "candidate,fast,stable")
@@ -580,6 +580,15 @@ preflight: verify-version preflight-unit-tests ## Run all structural sanity chec
 	    echo "        defaultTrainerImage   = $$IMG_DEF"; \
 	    BAD=1; \
 	  fi; \
+	fi; \
+	SKIPR=$$(grep -oE 'skipRange: ">=[0-9.]+ <[0-9.]+"' catalog/agent-office-operator/catalog.yaml | grep -oE '<[0-9.]+' | tr -d '<'); \
+	if [ "$$SKIPR" != "$(VERSION)" ]; then \
+	  echo "  ERR catalog skipRange upper bound is $$SKIPR, expected $(VERSION)"; \
+	  echo "      a stale skipRange breaks the upgrade path for any cluster"; \
+	  echo "      more than one version behind — OLM refuses to resolve"; \
+	  BAD=1; \
+	else \
+	  echo "  OK  catalog skipRange upper bound matches $(VERSION)"; \
 	fi; \
 	CMD_GO=$$(ls cmd/*.go 2>/dev/null | wc -l | tr -d ' '); \
 	if [ "$$CMD_GO" -gt 1 ] && ! grep -q '^COPY cmd/ cmd/' Dockerfile; then \
