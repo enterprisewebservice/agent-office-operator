@@ -398,6 +398,23 @@ cfg.nodeHost.browserProxy.allowProfiles = allow;
 // research gateway uses. An existing provider is never overwritten, so
 // a deliberate Brave or Perplexity choice survives, and the plugin
 // entry is created only when absent. Idempotent either way.
+// Tools an agent declares that are NOT in the runtime's default
+// profile have to be added additively. The default profile is
+// "coding", which excludes group:ui — so browser and canvas are
+// absent unless asked for, which is why the newsroom agents could be
+// paired to a browser-capable node host and still answer
+// BROWSER_TOOL_MISSING. alsoAllow adds without restricting: a plain
+// allow list would strip the newsroom__* MCP tools these agents need.
+// The runtime rejects allow and alsoAllow in the same scope.
+const additive = declaredTools.filter(t => ["browser", "canvas", "screen", "terminal"].includes(t));
+if (additive.length) {
+  cfg.tools = cfg.tools || {};
+  delete cfg.tools.allow;
+  const also = Array.isArray(cfg.tools.alsoAllow) ? cfg.tools.alsoAllow : [];
+  for (const t of additive) if (!also.includes(t)) also.push(t);
+  cfg.tools.alsoAllow = also;
+}
+
 if (declaredTools.includes("web_search")) {
   cfg.tools = cfg.tools || {};
   cfg.tools.web = cfg.tools.web || {};
