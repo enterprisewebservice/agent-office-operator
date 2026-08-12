@@ -118,7 +118,7 @@ func (h *CatalogSkillsHandler) readyGatewayPod(ctx context.Context, gwName strin
 // recommendViaGateway asks the model — through the gateway, on the
 // subscription — to choose packs and draft an identity.
 func (h *CatalogSkillsHandler) recommendViaGateway(
-	ctx context.Context, desc string, packs []catalogPack,
+	ctx context.Context, desc string, packs []catalogPack, teams []gatewayCandidate,
 ) (*recommendResponse, error) {
 	gw := strings.TrimSpace(os.Getenv("AGENT_RECOMMENDER_GATEWAY"))
 	agent := strings.TrimSpace(os.Getenv("AGENT_RECOMMENDER_AGENT"))
@@ -203,8 +203,13 @@ func (h *CatalogSkillsHandler) recommendViaGateway(
 		"Reply with ONE JSON object and no prose, no code fence:\n" +
 		`{"name":"<dns-safe-short-name>","displayName":"...","emoji":"<one emoji>","role":"<one word>",` +
 		`"systemPrompt":"<2-4 sentences: the job, which governed tools/skills to lean on, and: never fabricate data — if a tool cannot answer, say so>",` +
-		`"packs":[{"name":"<exact catalog name>","reason":"<why, one clause>"}]}` +
+		`"packs":[{"name":"<exact catalog name>","reason":"<why, one clause>"}],` +
+		`"team":{"gateway":"<exact gateway name from TEAMS>","reason":"<why this crew, one clause>"}}` +
 		"\n\nCATALOG:\n" + strings.Join(lines, "\n") +
+		"\n\nTEAMS — the gateway the agent joins. A team is a shared runtime, a shared " +
+		"browser node and one blast radius, so this is a real placement decision, not a label. " +
+		"Pick the crew this job belongs beside; prefer a team whose existing members do " +
+		"related work. Choose exactly one, by exact name:\n" + teamLines(teams) +
 		"\n\nJOB DESCRIPTION:\n" + desc + "\n"
 
 	// base64 the prompt rather than interpolating it into a shell
@@ -255,6 +260,10 @@ func (h *CatalogSkillsHandler) recommendViaGateway(
 			Name   string `json:"name"`
 			Reason string `json:"reason"`
 		} `json:"packs"`
+		Team struct {
+			Gateway string `json:"gateway"`
+			Reason  string `json:"reason"`
+		} `json:"team"`
 	}
 	// extractJSON strips the CLI's banner/ANSI framing.
 	if err := json.Unmarshal([]byte(extractJSON(out)), &sel); err != nil {
@@ -283,7 +292,16 @@ func (h *CatalogSkillsHandler) recommendViaGateway(
 	if id.Role == "" {
 		id.Role = "assistant"
 	}
-	return &recommendResponse{Source: "model:" + model, Identity: id, Packs: chosen}, nil
+	// A hallucinated gateway name would fail at create time, so validate
+	// against the live list and fall back to scoring rather than ship a
+	// reference that does not resolve.
+	team := resolveTeam(sel.Team.Gateway, sel.Team.Reason, teams)
+	if team == nil {
+		team = pickTeamFallback(desc, teams)
+	}
+	return &recommendResponse{
+		Source: "model:" + model, Identity: id, Packs: chosen, Team: team,
+	}, nil
 }
 
 // dropContained removes any selection that a bigger selection already

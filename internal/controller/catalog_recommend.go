@@ -96,6 +96,10 @@ type recommendResponse struct {
 	Source   string            `json:"source"`
 	Identity recommendIdentity `json:"identity"`
 	Packs    []recommendPack   `json:"packs"`
+	// Team — which gateway the agent joins. Chosen, not offered: the
+	// composer displays it and does not let the user override, for the
+	// same reason the pack list is not a multi-select.
+	Team *recommendTeam `json:"team,omitempty"`
 }
 
 func (h *CatalogSkillsHandler) recommend(w http.ResponseWriter, r *http.Request) {
@@ -123,9 +127,13 @@ func (h *CatalogSkillsHandler) recommend(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Which team the agent joins is recommended alongside the packs, so
+	// the composer never has to render a gateway dropdown.
+	teams := h.gatherGateways(r.Context())
+
 	// 1. A real model turn through the gateway, on the ChatGPT/Codex
 	//    subscription — no API key, no per-token billing.
-	if resp, err := h.recommendViaGateway(r.Context(), desc, packs); err == nil {
+	if resp, err := h.recommendViaGateway(r.Context(), desc, packs, teams); err == nil {
 		writeCatalogJSON(w, http.StatusOK, resp)
 		return
 	} else if !strings.Contains(err.Error(), "not configured") {
@@ -134,12 +142,15 @@ func (h *CatalogSkillsHandler) recommend(w http.ResponseWriter, r *http.Request)
 	// 2. An OpenAI-compatible endpoint, if one is configured.
 	if url := os.Getenv("AGENT_RECOMMENDER_URL"); url != "" {
 		if resp, err := recommendViaModel(r.Context(), url, desc, packs); err == nil {
+			if resp.Team == nil {
+				resp.Team = pickTeamFallback(desc, teams)
+			}
 			writeCatalogJSON(w, http.StatusOK, resp)
 			return
 		}
 	}
 	// 3. Deterministic scoring — always available.
-	writeCatalogJSON(w, http.StatusOK, recommendFallback(desc, packs))
+	writeCatalogJSON(w, http.StatusOK, recommendFallback(desc, packs, teams))
 }
 
 // ---- model engine ---------------------------------------------------
@@ -243,16 +254,24 @@ var stopwords = map[string]bool{
 	"can": true, "should": true, "data": true,
 }
 
-func recommendFallback(desc string, packs []catalogPack) *recommendResponse {
+// tokenize reduces a job description to its meaningful, de-duplicated
+// terms. Shared so team scoring and pack scoring judge a description
+// the same way.
+func tokenize(desc string) []string {
 	words := regexp.MustCompile(`[a-zA-Z][a-zA-Z-]+`).FindAllString(strings.ToLower(desc), -1)
 	var terms []string
-	seenTerm := map[string]bool{}
+	seen := map[string]bool{}
 	for _, w := range words {
-		if len(w) > 2 && !stopwords[w] && !seenTerm[w] {
-			seenTerm[w] = true
+		if len(w) > 2 && !stopwords[w] && !seen[w] {
+			seen[w] = true
 			terms = append(terms, w)
 		}
 	}
+	return terms
+}
+
+func recommendFallback(desc string, packs []catalogPack, teams []gatewayCandidate) *recommendResponse {
+	terms := tokenize(desc)
 
 	// Weight each term by how RARE it is in this catalog (inverse document
 	// frequency). Plain substring counting treats "report" and "terrain"
@@ -380,6 +399,7 @@ func recommendFallback(desc string, packs []catalogPack) *recommendResponse {
 	prompt += ". Never fabricate figures or results: if a tool cannot answer, say exactly that."
 
 	return &recommendResponse{
+		Team:   pickTeamFallback(desc, teams),
 		Source: "fallback",
 		Identity: recommendIdentity{
 			Name: slug, DisplayName: display, Emoji: "🤖",

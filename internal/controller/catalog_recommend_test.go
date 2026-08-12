@@ -41,7 +41,7 @@ func recommendFixture() []catalogPack {
 // prompt carries the never-fabricate line.
 func TestRecommendFallback(t *testing.T) {
 	out := recommendFallback(
-		"I need weekly ops reports summarizing orders and stuck shipments", recommendFixture())
+		"I need weekly ops reports summarizing orders and stuck shipments", recommendFixture(), nil)
 	if out.Source != "fallback" {
 		t.Fatalf("source: %v", out.Source)
 	}
@@ -77,7 +77,7 @@ func TestRecommendCarriesFullPacks(t *testing.T) {
 	fixture[0].Dependencies = []catalogDependency{
 		{Kind: "mcpServer", Name: "ops-metrics", Available: true, GatewayURL: "http://gw/mcp"},
 	}
-	out := recommendFallback("weekly ops report on orders and stuck shipments", fixture)
+	out := recommendFallback("weekly ops report on orders and stuck shipments", fixture, nil)
 
 	var sawSkillDeps, sawToolRecipe bool
 	for _, p := range out.Packs {
@@ -107,7 +107,7 @@ func TestRecommendCarriesFullPacks(t *testing.T) {
 // composer field crashed on it with "null is not an object". Asserted
 // on the JSON, not the struct, because the struct is nil either way.
 func TestRecommendNoMatchEmitsEmptyArray(t *testing.T) {
-	out := recommendFallback("zzzqqq unmatchable xyzzy", recommendFixture())
+	out := recommendFallback("zzzqqq unmatchable xyzzy", recommendFixture(), nil)
 	if len(out.Packs) != 0 {
 		t.Fatalf("fixture should not match: %+v", out.Packs)
 	}
@@ -226,7 +226,7 @@ func TestRecommendRejectsWeakMatches(t *testing.T) {
 		return false
 	}
 
-	got := names(recommendFallback("weekly ops report on orders and revenue", catalog))
+	got := names(recommendFallback("weekly ops report on orders and revenue", catalog, nil))
 	if !has(got, "weekly-ops-report") {
 		t.Errorf("lost the obvious hit: %v", got)
 	}
@@ -234,7 +234,7 @@ func TestRecommendRejectsWeakMatches(t *testing.T) {
 		t.Errorf(`"report" alone must not pull in genesis-train: %v`, got)
 	}
 
-	got = names(recommendFallback("an agent that reviews pull requests on github", catalog))
+	got = names(recommendFallback("an agent that reviews pull requests on github", catalog, nil))
 	if !has(got, "github") {
 		t.Errorf("lost the obvious hit: %v", got)
 	}
@@ -243,7 +243,7 @@ func TestRecommendRejectsWeakMatches(t *testing.T) {
 	}
 
 	// A genuinely multi-signal query should still return its real matches.
-	got = names(recommendFallback("sculpt terrain and build paths in unreal", catalog))
+	got = names(recommendFallback("sculpt terrain and build paths in unreal", catalog, nil))
 	if !has(got, "parkforge-terrain-strokes") {
 		t.Errorf("strong multi-term match lost: %v", got)
 	}
