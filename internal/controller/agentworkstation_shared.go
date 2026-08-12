@@ -299,7 +299,15 @@ console.log("SEEDED dir=" + dir +
 	// This one went unnoticed for two days: the agents' SOUL.md stopped
 	// being updated, spec edits silently stopped reaching them, and the
 	// only symptom was a log line with nothing actionable in it.
-	if out, err := r.execInPod(ctx, gwPod, []string{"node", "-e", seedScript}); err != nil {
+	// Stream the script rather than passing it as `node -e <script>`.
+	// It inlines every workspace file AND all ten skill bodies as JSON,
+	// which crossed MAX_ARG_STRLEN (128KB for one argv entry) when the
+	// skills catalog grew on Aug 10 — after which EVERY reconcile failed
+	// with "Argument list too long" and no agent's SOUL.md was ever
+	// rewritten again. Prompt edits were accepted and silently dropped
+	// for two days. node with no script argument reads its program from
+	// stdin, so there is no size ceiling here.
+	if out, err := r.execInPodStdin(ctx, gwPod, []string{"node"}, seedScript); err != nil {
 		return ctrl.Result{}, fmt.Errorf("seed agent workspace: %w (output=%s)",
 			err, truncate(strings.TrimSpace(out), 400))
 	}
@@ -645,7 +653,17 @@ func (r *AgentWorkstationReconciler) findReadyGatewayPod(ctx context.Context, gw
 // execInPod runs cmd inside the openclaw container of the given pod
 // and returns combined stdout/stderr. Uses the standard k8s exec
 // SPDY channel.
+// execInPod runs cmd in the gateway pod. stdin, when non-empty, is
+// streamed to the process — the way to hand it anything large, because
+// Linux caps a SINGLE argv entry at MAX_ARG_STRLEN (128KB) no matter
+// how much room the total has.
 func (r *AgentWorkstationReconciler) execInPod(ctx context.Context, pod *corev1.Pod, cmd []string) (string, error) {
+	return r.execInPodStdin(ctx, pod, cmd, "")
+}
+
+func (r *AgentWorkstationReconciler) execInPodStdin(
+	ctx context.Context, pod *corev1.Pod, cmd []string, stdin string,
+) (string, error) {
 	cs, err := kubernetes.NewForConfig(r.RestConfig)
 	if err != nil {
 		return "", fmt.Errorf("kubernetes client: %w", err)
@@ -659,7 +677,7 @@ func (r *AgentWorkstationReconciler) execInPod(ctx context.Context, pod *corev1.
 		VersionedParams(&corev1.PodExecOptions{
 			Container: "openclaw",
 			Command:   cmd,
-			Stdin:     false,
+			Stdin:     stdin != "",
 			Stdout:    true,
 			Stderr:    true,
 			TTY:       false,
@@ -674,10 +692,14 @@ func (r *AgentWorkstationReconciler) execInPod(ctx context.Context, pod *corev1.
 	// full story; passing the same buffer for both streams was the
 	// root cause of intermittent `parse agent reply: empty reply`.
 	var stdout, stderr bytes.Buffer
-	err = exec.StreamWithContext(ctx, remotecommand.StreamOptions{
+	opts := remotecommand.StreamOptions{
 		Stdout: &stdout,
 		Stderr: &stderr,
-	})
+	}
+	if stdin != "" {
+		opts.Stdin = strings.NewReader(stdin)
+	}
+	err = exec.StreamWithContext(ctx, opts)
 	if err != nil {
 		return stdout.String() + stderr.String(), fmt.Errorf("exec: %w", err)
 	}
