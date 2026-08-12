@@ -243,26 +243,39 @@ try {
   });
 } catch (e) {}
 
-if (catalogNames.length > 0) {
-  skillSrc = "image";
-  fs.mkdirSync(skillsRoot, { recursive: true });
-  for (const name of catalogNames) {
-    // cpSync(recursive) brings SKILL.md + scripts/ + references/ etc.
-    fs.cpSync(path.join(catalogDir, name), path.join(skillsRoot, name),
-      { recursive: true, force: true });
-    keep[name] = true;
-    touched++;
-  }
-} else {
-  skillSrc = "inline-fallback";
-  for (const [f, content] of Object.entries(inlineSkillWrites)) {
-    const p = path.join(dir, f);
-    fs.mkdirSync(path.dirname(p), { recursive: true });
-    let cur = ""; try { cur = fs.readFileSync(p, "utf8"); } catch (e) {}
-    if (cur !== content) { fs.writeFileSync(p, content); touched++; }
-  }
-  keep = keepSkillDirs;
+// UNION, not either/or. This preferred the image and ignored the Skill
+// CRs entirely whenever the mount existed, so a skill authored on the
+// cluster could never reach an agent — and that silently included every
+// skill installed from a mindifact: install created the CR,
+// /catalog/packs reported it installed, and no agent ever saw the file.
+// 19 CRs against 10 baked skills on this cluster, so nine were invisible.
+//
+// Baked skills win a name collision: the image is the pinned,
+// equivalence-gated set. Cluster CRs are additive on top of it.
+fs.mkdirSync(skillsRoot, { recursive: true });
+const fromImage = {};
+for (const name of catalogNames) {
+  // cpSync(recursive) brings SKILL.md + scripts/ + references/ etc.
+  fs.cpSync(path.join(catalogDir, name), path.join(skillsRoot, name),
+    { recursive: true, force: true });
+  keep[name] = true;
+  fromImage[name] = true;
+  touched++;
 }
+let extra = 0;
+for (const [f, content] of Object.entries(inlineSkillWrites)) {
+  // f is "skills/<name>/SKILL.md" — skip any name the image owns.
+  const parts = f.split("/");
+  const sname = parts.length > 1 ? parts[1] : "";
+  if (sname && fromImage[sname]) continue;
+  const p = path.join(dir, f);
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  let cur = ""; try { cur = fs.readFileSync(p, "utf8"); } catch (e) {}
+  if (cur !== content) { fs.writeFileSync(p, content); touched++; }
+  if (sname) { keep[sname] = true; extra++; }
+}
+for (const k of Object.keys(keepSkillDirs)) keep[k] = true;
+skillSrc = catalogNames.length > 0 ? ("image+" + extra + "-cluster") : "cluster-only";
 
 // GC #1: remove workspace skill folders not in the current source set.
 let gcd = 0;
