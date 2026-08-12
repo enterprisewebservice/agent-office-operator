@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -340,6 +341,20 @@ console.log("SEEDED dir=" + dir +
 	// id never matches" silently — every message fell through to
 	// the `main` agent. See dist/resolve-route-*.js
 	// `buildEvaluatedBindingsByChannel` for the lookup.
+	// spec.tools.allow finally does something. It is NOT rendered as a
+	// restrictive allowlist: these agents also hold newsroom__* MCP
+	// tools that the list does not name, and turning intent into
+	// enforcement would strip them. It is read as a declaration of what
+	// the agent needs the gateway to have configured.
+	declaredTools := []string{}
+	if aw.Spec.Tools != nil {
+		declaredTools = append(declaredTools, aw.Spec.Tools.Allow...)
+	}
+	declaredToolsJSON, err := json.Marshal(declaredTools)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("marshal declared tools: %w", err)
+	}
+
 	mergeScript := fmt.Sprintf(`
 const fs = require("fs");
 const path = "/home/node/.openclaw/openclaw.json";
@@ -347,6 +362,8 @@ const agentEntry = %[1]s;
 const profile = %[2]q;
 const channelId = %[3]q;
 const agentId = %[4]q;
+const declaredTools = %[5]s;
+const searchProvider = %[6]q;
 
 const raw = fs.readFileSync(path, "utf8");
 const cfg = JSON.parse(raw);
@@ -367,6 +384,31 @@ cfg.nodeHost.browserProxy.enabled = true;
 const allow = Array.isArray(cfg.nodeHost.browserProxy.allowProfiles) ? cfg.nodeHost.browserProxy.allowProfiles : [];
 if (!allow.includes(profile)) allow.push(profile);
 cfg.nodeHost.browserProxy.allowProfiles = allow;
+
+// web_search needs a PROVIDER, and declaring the tool never supplied
+// one. spec.tools.allow was read in exactly one place — to write a
+// line of documentation into WIKI.md — so an agent could list
+// web_search, look correctly configured, and get "web_search is
+// disabled or no provider is available" on every single call. The
+// nl2sql newsroom ran that way for 38 hours: four cron schedules
+// firing on time, every sweep reporting the provider missing, zero
+// articles published.
+//
+// duckduckgo is bundled and needs no API key — it is what the working
+// research gateway uses. An existing provider is never overwritten, so
+// a deliberate Brave or Perplexity choice survives, and the plugin
+// entry is created only when absent. Idempotent either way.
+if (declaredTools.includes("web_search")) {
+  cfg.tools = cfg.tools || {};
+  cfg.tools.web = cfg.tools.web || {};
+  cfg.tools.web.fetch = cfg.tools.web.fetch || {};
+  cfg.tools.web.search = cfg.tools.web.search || {};
+  if (!cfg.tools.web.search.provider) cfg.tools.web.search.provider = searchProvider;
+  const prov = cfg.tools.web.search.provider;
+  cfg.plugins = cfg.plugins || {};
+  cfg.plugins.entries = cfg.plugins.entries || {};
+  if (prov && !cfg.plugins.entries[prov]) cfg.plugins.entries[prov] = { enabled: true };
+}
 
 // bindings — strip stale-for-this-agent (any rule keyed on this
 // agent gets replaced by the one fresh write below), strip wide
@@ -414,7 +456,8 @@ if (after === before) {
   fs.writeFileSync(path, JSON.stringify(cfg, null, 2));
   console.log("MERGED agent=" + agentId + " profile=" + profile + " channel=" + (channelId || "(none)") + " bindings=" + bindings.length);
 }
-`, string(agentEntryJSON), profile, parseDiscordChannelID(awDiscordURL(aw)), agentID)
+`, string(agentEntryJSON), profile, parseDiscordChannelID(awDiscordURL(aw)), agentID,
+		string(declaredToolsJSON), searchProviderFor(aw))
 
 	mergeOut, err := r.execInPod(ctx, gwPod, []string{"node", "-e", mergeScript})
 	if err != nil {
@@ -933,4 +976,20 @@ echo "wrote $(wc -c < %s) bytes to %s"`,
 // escaping any embedded single quotes.
 func shellEscape(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// defaultSearchProvider is duckduckgo: bundled with the runtime, no API
+// key, and the provider the working research gateway already uses. A
+// keyed provider (brave, perplexity) is a deliberate upgrade, set on
+// the gateway config directly — the merge script never overwrites one.
+const defaultSearchProvider = "duckduckgo"
+
+// searchProviderFor resolves which search provider an agent's gateway
+// should be configured with. Env override so a cluster can standardise
+// on a keyed provider without editing every AgentWorkstation.
+func searchProviderFor(_ *agentofficev1alpha1.AgentWorkstation) string {
+	if p := strings.TrimSpace(os.Getenv("AGENT_SEARCH_PROVIDER")); p != "" {
+		return p
+	}
+	return defaultSearchProvider
 }
