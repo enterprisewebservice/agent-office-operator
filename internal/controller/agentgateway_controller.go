@@ -629,10 +629,20 @@ func (r *AgentGatewayReconciler) restartGatewayPods(ctx context.Context, gw *age
 // failure modes meant `spec.autoApproveNodeHost: true` silently did
 // nothing and every gateway-pod restart left the VM disconnected.
 //
-// We now drive the in-cluster `openclaw nodes` CLI, which both
-// updates the in-memory store and persists nodes/paired.json — no
-// pod bounce needed, and the next reconcile sees ALREADY_PAIRED.
-// Idempotent.
+// We now drive the in-cluster CLI, which both updates the in-memory
+// store and persists the pairing table — no pod bounce needed, and
+// the next reconcile sees ALREADY_PAIRED. Idempotent.
+//
+// WHICH table depends on the runtime, and getting it wrong is silent.
+// The note above says node-host pairings live under nodes/ and that
+// devices/ is only for operator-CLI pairings. On openclaw 2026.7.x
+// that is inverted: a node host's request arrives with role "node"
+// and lands in devices/pending.json, so `openclaw nodes pending
+// --json` returns [] while `openclaw devices list --json` holds it.
+// The result was that autoApproveNodeHost did nothing at all and
+// every node host sat at "pairing required: device is not approved
+// yet" until someone approved it by hand. Look in devices first, fall
+// back to nodes for older runtimes, and approve on whichever answered.
 func (r *AgentGatewayReconciler) maybeAutoApprovePending(ctx context.Context, gw *agentofficev1alpha1.AgentGateway) error {
 	if r.RestConfig == nil {
 		return fmt.Errorf("RestConfig not set; cannot exec")
@@ -664,52 +674,46 @@ func (r *AgentGatewayReconciler) maybeAutoApprovePending(ctx context.Context, gw
 		}
 	}
 
-	// 2. List pending requests; find one whose displayName contains
-	//    the configured nodeHostRef.Name. Pending entries we care
-	//    about advertise node-host capabilities (browser/system).
-	pendingOut, err := r.execInGatewayPod(ctx, pod, []string{"openclaw", "nodes", "pending", "--json"})
-	if err != nil {
-		return fmt.Errorf("list pending: %w (out=%s)", err, pendingOut)
-	}
-	var pending []struct {
-		RequestID   string   `json:"requestId"`
-		DisplayName string   `json:"displayName"`
-		Caps        []string `json:"caps"`
-	}
-	if jerr := json.Unmarshal([]byte(extractJSON(pendingOut)), &pending); jerr != nil {
-		// Empty / "No pending pairing requests." text — nothing to do.
-		return nil
-	}
-	var reqID string
-	for _, p := range pending {
-		if !strings.Contains(p.DisplayName, gw.Spec.NodeHostRef.Name) {
-			continue
+	// 2. Find the pending request, devices table first.
+	reqID, table := "", "devices"
+	if devOut, derr := r.execInGatewayPod(ctx,
+		pod, []string{"openclaw", "devices", "list", "--json"}); derr == nil {
+		var dl struct {
+			Pending []pendingPairing `json:"pending"`
 		}
-		hasNodeCap := false
-		for _, c := range p.Caps {
-			if c == "browser" || c == "system" {
-				hasNodeCap = true
-				break
-			}
+		if json.Unmarshal([]byte(extractJSON(devOut)), &dl) == nil {
+			reqID = matchNodePairing(dl.Pending, gw.Spec.NodeHostRef.Name)
 		}
-		if !hasNodeCap {
-			continue
+	}
+
+	// Older runtimes kept node-host pairings in the nodes table. Note
+	// these entries are identified by caps, not role.
+	if reqID == "" {
+		table = "nodes"
+		pendingOut, perr := r.execInGatewayPod(ctx,
+			pod, []string{"openclaw", "nodes", "pending", "--json"})
+		if perr != nil {
+			return fmt.Errorf("list pending: %w (out=%s)", perr, pendingOut)
 		}
-		reqID = p.RequestID
-		break
+		var pending []pendingPairing
+		if jerr := json.Unmarshal([]byte(extractJSON(pendingOut)), &pending); jerr != nil {
+			// Empty / "No pending pairing requests." text — nothing to do.
+			return nil
+		}
+		reqID = matchNodePairing(pending, gw.Spec.NodeHostRef.Name)
 	}
 	if reqID == "" {
 		return nil // no matching pending request
 	}
 
-	// 3. Approve via CLI — updates in-memory store + nodes/paired.json
-	//    in one shot. No pod bounce needed.
-	approveOut, err := r.execInGatewayPod(ctx, pod, []string{"openclaw", "nodes", "approve", reqID})
+	// 3. Approve on whichever table produced it — updates the in-memory
+	//    store and the on-disk table in one shot. No pod bounce needed.
+	approveOut, err := r.execInGatewayPod(ctx, pod, []string{"openclaw", table, "approve", reqID})
 	if err != nil {
-		return fmt.Errorf("approve %s: %w (out=%s)", reqID, err, approveOut)
+		return fmt.Errorf("approve %s via %s: %w (out=%s)", reqID, table, err, approveOut)
 	}
 	logf.FromContext(ctx).Info("auto-approved node-host pairing",
-		"nodeHost", gw.Spec.NodeHostRef.Name, "requestId", reqID,
+		"nodeHost", gw.Spec.NodeHostRef.Name, "requestId", reqID, "table", table,
 		"result", strings.TrimSpace(approveOut))
 	return nil
 }
@@ -880,4 +884,51 @@ func (r *AgentGatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&agentofficev1alpha1.AgentWorkstation{}, handler.EnqueueRequestsFromMapFunc(mapAW)).
 		Named("agentgateway").
 		Complete(r)
+}
+
+// pendingPairing is one entry of either pairing table. The two tables
+// identify a node host differently — devices carries role/clientMode,
+// nodes carries caps — so both are parsed and either is accepted.
+type pendingPairing struct {
+	RequestID   string   `json:"requestId"`
+	DisplayName string   `json:"displayName"`
+	Role        string   `json:"role"`
+	Roles       []string `json:"roles"`
+	ClientMode  string   `json:"clientMode"`
+	ClientID    string   `json:"clientId"`
+	Caps        []string `json:"caps"`
+}
+
+// isNodeHost keeps this from approving a phone or a laptop that happens
+// to share the configured name. Auto-approval must stay narrow.
+func (p pendingPairing) isNodeHost() bool {
+	if p.Role == "node" || p.ClientMode == "node" || p.ClientID == "node-host" {
+		return true
+	}
+	for _, r := range p.Roles {
+		if r == "node" {
+			return true
+		}
+	}
+	for _, c := range p.Caps {
+		if c == "browser" || c == "system" {
+			return true
+		}
+	}
+	return false
+}
+
+// matchNodePairing returns the requestId of the first pending node-host
+// entry whose display name contains the configured nodeHostRef name.
+func matchNodePairing(pending []pendingPairing, nodeHostName string) string {
+	for _, p := range pending {
+		if p.RequestID == "" || !strings.Contains(p.DisplayName, nodeHostName) {
+			continue
+		}
+		if !p.isNodeHost() {
+			continue
+		}
+		return p.RequestID
+	}
+	return ""
 }
