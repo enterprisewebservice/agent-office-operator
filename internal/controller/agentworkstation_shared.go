@@ -293,8 +293,15 @@ console.log("SEEDED dir=" + dir +
   " legacy_gcd=" + legacyGcd);
 `, agentID, string(writesJSON), string(inlineSkillJSON), string(keepJSON), skillsCatalogSkillsDir)
 
-	if _, err := r.execInPod(ctx, gwPod, []string{"node", "-e", seedScript}); err != nil {
-		return ctrl.Result{}, fmt.Errorf("seed agent workspace: %w", err)
+	// Keep the output. execInPod returns stdout+stderr as its first
+	// value precisely so a failure is diagnosable, and discarding it
+	// into `_` turned every seeding failure into a bare "exit code 1".
+	// This one went unnoticed for two days: the agents' SOUL.md stopped
+	// being updated, spec edits silently stopped reaching them, and the
+	// only symptom was a log line with nothing actionable in it.
+	if out, err := r.execInPod(ctx, gwPod, []string{"node", "-e", seedScript}); err != nil {
+		return ctrl.Result{}, fmt.Errorf("seed agent workspace: %w (output=%s)",
+			err, truncate(strings.TrimSpace(out), 400))
 	}
 
 	// 5. Merge agent entry, browser-profile allowlist, and Discord
