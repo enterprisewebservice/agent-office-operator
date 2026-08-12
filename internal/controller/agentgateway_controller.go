@@ -661,61 +661,88 @@ func (r *AgentGatewayReconciler) maybeAutoApprovePending(ctx context.Context, gw
 		// We accept either "paired" or any string starting with "paired"
 		// (e.g. "paired · connected") just in case the CLI tweaks it.
 		var nodes []struct {
-			DisplayName string `json:"displayName"`
-			Status      string `json:"status"`
+			DisplayName string   `json:"displayName"`
+			Status      string   `json:"status"`
+			Caps        []string `json:"caps"`
 		}
 		if jerr := json.Unmarshal([]byte(extractJSON(statusOut)), &nodes); jerr == nil {
 			for _, n := range nodes {
+				// "paired" alone is not done. Approving the DEVICES entry
+				// authenticates the connection and flips this to paired
+				// while granting no capabilities, and a node with empty
+				// caps refuses every invoke ("not in the allowlist for
+				// platform"). Capabilities arrive only from the NODES
+				// entry, so treat caps as the completion signal.
 				if strings.Contains(n.DisplayName, gw.Spec.NodeHostRef.Name) &&
-					strings.HasPrefix(n.Status, "paired") {
-					return nil // already paired — nothing to do
+					strings.HasPrefix(n.Status, "paired") && len(n.Caps) > 0 {
+					return nil // paired AND capable — nothing to do
 				}
 			}
 		}
 	}
 
-	// 2. Find the pending request, devices table first.
-	reqID, table := "", "devices"
-	if devOut, derr := r.execInGatewayPod(ctx,
-		pod, []string{"openclaw", "devices", "list", "--json"}); derr == nil {
-		var dl struct {
-			Pending []pendingPairing `json:"pending"`
+	// 2/3. Approve pending entries on BOTH tables. Pairing is two-stage
+	// on 2026.7.x and the stages are sequential, not alternative: the
+	// devices entry authenticates the connection, and only once it is
+	// approved does the node re-request on the nodes table carrying its
+	// real caps (system, browser, file, local-inference). Approving one
+	// and returning leaves a connected node that can do nothing.
+	//
+	// Each pass approves whatever is pending; the second stage lands on
+	// a later reconcile once the node has re-requested. Idempotent, so
+	// a table with nothing pending is simply skipped.
+	approved := 0
+	for _, table := range []string{"devices", "nodes"} {
+		pending, lerr := r.listPendingPairings(ctx, pod, table)
+		if lerr != nil {
+			// A table the runtime does not expose is not an error.
+			continue
 		}
-		if json.Unmarshal([]byte(extractJSON(devOut)), &dl) == nil {
-			reqID = matchNodePairing(dl.Pending, gw.Spec.NodeHostRef.Name)
+		reqID := matchNodePairing(pending, gw.Spec.NodeHostRef.Name)
+		if reqID == "" {
+			continue
 		}
-	}
-
-	// Older runtimes kept node-host pairings in the nodes table. Note
-	// these entries are identified by caps, not role.
-	if reqID == "" {
-		table = "nodes"
-		pendingOut, perr := r.execInGatewayPod(ctx,
-			pod, []string{"openclaw", "nodes", "pending", "--json"})
-		if perr != nil {
-			return fmt.Errorf("list pending: %w (out=%s)", perr, pendingOut)
+		approveOut, aerr := r.execInGatewayPod(ctx, pod, []string{"openclaw", table, "approve", reqID})
+		if aerr != nil {
+			return fmt.Errorf("approve %s via %s: %w (out=%s)", reqID, table, aerr, approveOut)
 		}
-		var pending []pendingPairing
-		if jerr := json.Unmarshal([]byte(extractJSON(pendingOut)), &pending); jerr != nil {
-			// Empty / "No pending pairing requests." text — nothing to do.
-			return nil
-		}
-		reqID = matchNodePairing(pending, gw.Spec.NodeHostRef.Name)
+		approved++
+		logf.FromContext(ctx).Info("auto-approved node-host pairing",
+			"nodeHost", gw.Spec.NodeHostRef.Name, "requestId", reqID, "table", table,
+			"result", strings.TrimSpace(approveOut))
 	}
-	if reqID == "" {
-		return nil // no matching pending request
+	if approved == 0 {
+		return nil // nothing pending on either table
 	}
-
-	// 3. Approve on whichever table produced it — updates the in-memory
-	//    store and the on-disk table in one shot. No pod bounce needed.
-	approveOut, err := r.execInGatewayPod(ctx, pod, []string{"openclaw", table, "approve", reqID})
-	if err != nil {
-		return fmt.Errorf("approve %s via %s: %w (out=%s)", reqID, table, err, approveOut)
-	}
-	logf.FromContext(ctx).Info("auto-approved node-host pairing",
-		"nodeHost", gw.Spec.NodeHostRef.Name, "requestId", reqID, "table", table,
-		"result", strings.TrimSpace(approveOut))
 	return nil
+}
+
+// listPendingPairings reads one pairing table. The two disagree on
+// shape: devices returns {pending:[…],paired:[…]}, nodes returns a bare
+// array. Both are accepted.
+func (r *AgentGatewayReconciler) listPendingPairings(
+	ctx context.Context, pod *corev1.Pod, table string,
+) ([]pendingPairing, error) {
+	args := []string{"openclaw", table, "list", "--json"}
+	if table == "nodes" {
+		args = []string{"openclaw", "nodes", "pending", "--json"}
+	}
+	out, err := r.execInGatewayPod(ctx, pod, args)
+	if err != nil {
+		return nil, err
+	}
+	body := extractJSON(out)
+	var wrapped struct {
+		Pending []pendingPairing `json:"pending"`
+	}
+	if json.Unmarshal([]byte(body), &wrapped) == nil && wrapped.Pending != nil {
+		return wrapped.Pending, nil
+	}
+	var bare []pendingPairing
+	if json.Unmarshal([]byte(body), &bare) == nil {
+		return bare, nil
+	}
+	return nil, fmt.Errorf("unparseable %s pending list", table)
 }
 
 // extractJSON pulls the first JSON document out of a CLI response —

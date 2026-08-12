@@ -66,3 +66,45 @@ func TestNonNodeDevicesAreNeverApproved(t *testing.T) {
 		t.Errorf("auto-approved a non-node device: %q", got)
 	}
 }
+
+// The nodes table returns a bare array whose entries are caps-shaped —
+// this is the SECOND stage, the one that actually grants capability.
+const nodesPendingJSON = `[{
+  "requestId": "635e1c1a-2044-4848-9389-4c8e3fd613be",
+  "displayName": "fedora-black-zebra-36-newsroom",
+  "platform": "linux",
+  "caps": ["system", "browser", "file", "local-inference"]
+}]`
+
+func TestNodesStagePendingIsMatched(t *testing.T) {
+	var bare []pendingPairing
+	if err := json.Unmarshal([]byte(nodesPendingJSON), &bare); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	got := matchNodePairing(bare, "fedora-black-zebra-36-newsroom")
+	if got != "635e1c1a-2044-4848-9389-4c8e3fd613be" {
+		t.Errorf("nodes-stage request not matched, got %q", got)
+	}
+}
+
+// Both stages describe the SAME node host and both must be approvable —
+// approving only the devices stage leaves a connected node with empty
+// caps that refuses every invoke.
+func TestBothStagesResolveForTheSameNode(t *testing.T) {
+	var dl struct {
+		Pending []pendingPairing `json:"pending"`
+	}
+	_ = json.Unmarshal([]byte(devicesListJSON), &dl)
+	var bare []pendingPairing
+	_ = json.Unmarshal([]byte(nodesPendingJSON), &bare)
+
+	name := "fedora-black-zebra-36-newsroom"
+	stage1 := matchNodePairing(dl.Pending, name)
+	stage2 := matchNodePairing(bare, name)
+	if stage1 == "" || stage2 == "" {
+		t.Fatalf("both stages must match: devices=%q nodes=%q", stage1, stage2)
+	}
+	if stage1 == stage2 {
+		t.Error("the two stages carry DIFFERENT request ids; treating them as one is the bug")
+	}
+}
