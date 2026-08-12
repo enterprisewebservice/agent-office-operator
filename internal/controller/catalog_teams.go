@@ -153,18 +153,16 @@ func pickTeamFallback(desc string, cands []gatewayCandidate) *recommendTeam {
 			best, bestScore = i, score
 		}
 	}
-	if best < 0 {
-		// Nothing matched. Prefer a Ready gateway over none at all so
-		// the agent still lands somewhere real.
-		for i, c := range cands {
-			if c.Ready {
-				best = i
-				break
-			}
-		}
-		if best < 0 {
-			return nil
-		}
+	// Nothing genuinely matched. Forcing the agent onto whichever
+	// gateway happens to be Ready is how unrelated crews end up sharing
+	// a runtime, a browser and a blast radius — the opposite of what a
+	// team means. Propose a NEW one instead; that is a real answer, and
+	// the composer shows it as such.
+	//
+	// bestScore counts term hits plus a 0.5 readiness nudge, so a score
+	// at or under 0.5 means no term matched at all.
+	if best < 0 || bestScore <= 0.5 {
+		return newTeamFor(desc)
 	}
 	c := cands[best]
 	return &recommendTeam{
@@ -190,5 +188,40 @@ func resolveTeam(name, reason string, cands []gatewayCandidate) *recommendTeam {
 			}
 		}
 	}
-	return nil
+	// Not an existing gateway. Previously this was rejected as a
+	// hallucination, which quietly removed "start a new team" from the
+	// set of possible answers and crammed every unrelated agent onto
+	// whatever already existed. A name that is not in the list is now
+	// read as a PROPOSAL — sanitized, marked new, and created by the
+	// template rather than referenced.
+	slug := sanitizeAgentName(strings.TrimSuffix(name, "-gateway"))
+	if slug == "" {
+		return nil
+	}
+	return &recommendTeam{
+		Gateway:  slug + "-gateway",
+		Existing: false,
+		Ready:    false,
+		Reason:   reason,
+	}
+}
+
+// newTeamFor proposes a gateway for a job that fits no existing crew.
+// Named from the description so the team reads as what it is for, not
+// as gateway-7.
+func newTeamFor(desc string) *recommendTeam {
+	terms := tokenize(strings.ToLower(desc))
+	if len(terms) > 2 {
+		terms = terms[:2]
+	}
+	slug := sanitizeAgentName(strings.Join(terms, "-"))
+	if slug == "" {
+		slug = "custom"
+	}
+	return &recommendTeam{
+		Gateway:  slug + "-gateway",
+		Existing: false,
+		Ready:    false,
+		Reason:   "no existing team does this work; starting a new one",
+	}
 }

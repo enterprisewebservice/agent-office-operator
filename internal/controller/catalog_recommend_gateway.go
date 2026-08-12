@@ -208,8 +208,11 @@ func (h *CatalogSkillsHandler) recommendViaGateway(
 		"\n\nCATALOG:\n" + strings.Join(lines, "\n") +
 		"\n\nTEAMS — the gateway the agent joins. A team is a shared runtime, a shared " +
 		"browser node and one blast radius, so this is a real placement decision, not a label. " +
-		"Pick the crew this job belongs beside; prefer a team whose existing members do " +
-		"related work. Choose exactly one, by exact name:\n" + teamLines(teams) +
+		"Prefer an existing team whose crew already does related work, and give its EXACT name. " +
+		"If none of them does this kind of work, do NOT force it onto the closest one — answer " +
+		"with a NEW dns-safe gateway name ending in -gateway, named for the work (e.g. " +
+		"\"unreal-worlds-gateway\"). Putting unrelated crews on one runtime is a worse mistake " +
+		"than starting a team. Choose exactly one:\n" + teamLines(teams) +
 		"\n\nJOB DESCRIPTION:\n" + desc + "\n"
 
 	// base64 the prompt rather than interpolating it into a shell
