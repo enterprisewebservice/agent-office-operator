@@ -390,7 +390,14 @@ type desiredOpenAIConfig struct {
 //     every agent turn died silently. The legacy block must be
 //     DELETED, not merged alongside.
 //  2. The api id `openai-codex-responses` was REMOVED in 7.x; the
-//     replacement is `openai-chatgpt-responses`.
+//     replacement is `openai-chatgpt-responses`. The template used to
+//     emit the removed id, which deadlocked every NEW gateway: openclaw
+//     refuses to start on an invalid config, this repair needs a READY
+//     pod to exec into, and so the pod could never reach the code that
+//     would have fixed it. Existing gateways only survived because their
+//     processes started before the id was withdrawn -- they would have
+//     died on their next restart. The template emits the valid id now,
+//     and this repair is belt-and-braces rather than load-bearing.
 //  3. With no auth.order, OpenClaw picks a credential implicitly. A
 //     stale `token`-type profile or a config-level apiKey can win over
 //     the subscription, which is how agent turns ended up on
