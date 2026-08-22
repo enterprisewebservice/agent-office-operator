@@ -163,6 +163,89 @@ spec:
                   without per-agent auth-profiles.json. Typically points at a
                   Secret with OPENAI_API_KEY / ANTHROPIC_API_KEY entries.
                 type: string
+              hooks:
+                description: |-
+                  Hooks declares OpenClaw's webhook ingress (`hooks.*` in
+                  openclaw.json): `POST <path>/wake` and `POST <path>/agent` on the
+                  gateway's HTTP port, authenticated with a DEDICATED bearer token.
+                  It is how an external system asks one specific agent for a
+                  targeted turn — a newsroom's "Check now" button running the wire
+                  reporter against a single source — without holding the gateway's
+                  shared WebSocket token.
+
+                  The token never enters the rendered config. The referenced Secret
+                  key is exposed to the gateway pod as the env var
+                  OPENCLAW_HOOKS_TOKEN and openclaw.json carries the reference
+                  "${OPENCLAW_HOOKS_TOKEN}", which OpenClaw substitutes at config
+                  load — so the literal is not in the ConfigMap, not on the PVC,
+                  not in exec arguments, and not in API audit logs.
+
+                  The operator owns exactly the keys this block declares (enabled,
+                  token, path, allowedAgentIds, allowRequestSessionKey) and leaves
+                  every other `hooks.*` key (mappings, presets, gmail, …) alone.
+                  Unset ⇒ the operator does not touch the `hooks` block at all.
+                properties:
+                  allowRequestSessionKey:
+                    description: |-
+                      AllowRequestSessionKey lets /hooks/agent callers choose the
+                      session key. Always written; false (the safe default) unless
+                      set. If you enable it, also constrain
+                      hooks.allowedSessionKeyPrefixes in the gateway config.
+                    type: boolean
+                  allowedAgentIds:
+                    description: |-
+                      AllowedAgentIds restricts which agents a hook call may target,
+                      including the default agent when the caller omits agentId.
+                      Omitted ⇒ the operator leaves any existing hooks.allowedAgentIds
+                      in the gateway config alone (OpenClaw's own default is
+                      unrestricted). Set ["*"] to declare "unrestricted" explicitly.
+                    items:
+                      type: string
+                    type: array
+                  enabled:
+                    description: |-
+                      Enabled turns the hook endpoints on. When false the operator
+                      writes hooks.enabled=false and drops its own token reference, so
+                      a gateway is never left pointing at an env var it no longer has
+                      (OpenClaw refuses to load a config with an unresolvable
+                      "${VAR}").
+                    type: boolean
+                  path:
+                    default: /hooks
+                    description: |-
+                      Path is the URL prefix the hook endpoints hang off. Must be a
+                      dedicated subpath — OpenClaw rejects "/". Defaults to "/hooks".
+                    pattern: ^/.+
+                    type: string
+                  tokenSecretRef:
+                    description: |-
+                      TokenSecretRef names the Secret (same namespace) and key holding
+                      the dedicated hook token. Required when Enabled. Use a value
+                      distinct from OPENCLAW_GATEWAY_TOKEN — OpenClaw flags reuse as a
+                      critical audit finding. If the Secret or key is missing or
+                      empty, hooks are rendered DISABLED and the HooksReady condition
+                      says why, rather than shipping a config the gateway cannot boot.
+                    properties:
+                      key:
+                        default: token
+                        description: |-
+                          Key inside the Secret whose value is the token. Defaults to
+                          "token".
+                        type: string
+                      name:
+                        description: Name of the Secret.
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    type: object
+                required:
+                - enabled
+                type: object
+                x-kubernetes-validations:
+                - message: hooks.tokenSecretRef is required when hooks.enabled is
+                    true
+                  rule: '!self.enabled || has(self.tokenSecretRef)'
               image:
                 default: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/openclaw:latest
                 description: Image is the container image for the gateway runtime.

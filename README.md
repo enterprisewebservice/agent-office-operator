@@ -6,7 +6,7 @@ Owns seven CRDs in the `agentoffice.ai` API group:
 
 | CRD | Role |
 |-----|------|
-| **`AgentGateway`** (`agw`) | One OpenClaw runtime hosting one-to-many `AgentWorkstation`s as logical agents. Pairs with a node-host, browser profile, and Codex subscription. |
+| **`AgentGateway`** (`agw`) | One OpenClaw runtime hosting one-to-many `AgentWorkstation`s as logical agents. Pairs with a node-host, browser profile, and Codex subscription. Optional webhook ingress via `spec.hooks` (below). |
 | **`AgentWorkstation`** (`aw`) | One governed coding-agent instance — the cluster representation of "one seat in the office". |
 | **`MemoryModule`** (`mm`) | Shared `.md` content (`AGENTS.md`, `USER.md`) referenced by one or more `AgentWorkstation`s with content-hash + referenced-by indexing. |
 | **`Skill`** (`sk`) | A reusable `SKILL_<name>.md` per the Anthropic Skills Open Standard. Bound to agents via `SkillBinding`. |
@@ -155,6 +155,76 @@ not just a transactional log.
 See `internal/search/` for the searcher implementation and
 `internal/controller/autoresearchproject_strategist.go` for the
 strategist runner.
+
+## AgentGateway `spec.hooks` — webhook ingress for targeted agent turns
+
+OpenClaw's hooks endpoints (`POST <path>/wake`, `POST <path>/agent`) let an
+external system ask one specific agent for a turn — a newsroom's **"Check
+now"** button running the wire reporter against a single source — without
+holding the gateway's shared WebSocket token. `spec.hooks` declares that
+ingress so it survives a gateway re-create. (Before v1.7.39 it had to be
+set by hand with `openclaw config set hooks.*`, which lived only on the
+gateway PVC and vanished with it.)
+
+```yaml
+apiVersion: agentoffice.ai/v1alpha1
+kind: AgentGateway
+metadata:
+  name: newsroom-gateway
+  namespace: agent-office
+spec:
+  hooks:
+    enabled: true
+    tokenSecretRef:                 # Secret in the gateway's namespace
+      name: newsroom-hooks
+      key: token                    # default
+    path: /hooks                    # default; OpenClaw rejects "/"
+    allowedAgentIds: ["nl2sql-wire", "nl2sql-bench", "nl2sql-scout"]
+    allowRequestSessionKey: false   # default
+```
+
+| Field | Meaning |
+|---|---|
+| `enabled` | Required. `false` writes `hooks.enabled: false` and removes the operator's own token reference, so a pod without the env var can still boot. |
+| `tokenSecretRef` | Required when enabled (CRD-validated). `{name, key}`; `key` defaults to `token`. Use a value distinct from `OPENCLAW_GATEWAY_TOKEN` — OpenClaw's security audit flags reuse as critical. |
+| `path` | URL prefix of the hook endpoints. Default `/hooks`. |
+| `allowedAgentIds` | Which agents a hook may target, including the default agent when the caller omits `agentId`. Omitted ⇒ the operator leaves the gateway's existing `hooks.allowedAgentIds` alone; `["*"]` declares unrestricted explicitly. |
+| `allowRequestSessionKey` | Lets `/hooks/agent` callers choose the session key. Always written; default `false`. |
+
+How the token reaches the gateway — and where it never goes:
+
+- The Deployment maps the Secret key onto the openclaw container's env var
+  `OPENCLAW_HOOKS_TOKEN` (`valueFrom.secretKeyRef`, not optional) and adds
+  the Secret to the pod's Reloader annotation, so a rotated token rolls the
+  pod.
+- `openclaw.json` carries `"token": "${OPENCLAW_HOOKS_TOKEN}"`. OpenClaw
+  substitutes `${VAR}` references in config strings at load, so the literal
+  token is never in the ConfigMap, on the PVC, in the operator's exec
+  arguments, or in the API server's audit log of those execs.
+- New gateways get the block from the rendered ConfigMap (seeded once into
+  the PVC). Existing gateways — whose `openclaw.json` is seed-only — get it
+  merged in place by the same read / compare / write-only-on-change
+  converge that model auth uses, followed by one pod restart so OpenClaw
+  re-reads its config.
+- The operator owns exactly the five keys above and leaves every other
+  `hooks.*` key (`mappings`, `presets`, `gmail`, `defaultSessionKey`, …)
+  untouched. `spec.hooks` unset ⇒ the `hooks` block is not touched at all.
+
+If the Secret or key is missing or empty, hooks are rendered **disabled**
+(the gateway keeps running) and the `HooksReady` condition on the
+AgentGateway says why — `SecretNotFound`, `SecretKeyMissing`,
+`TokenSecretRefMissing`, or `Disabled` — and flips to `True`/`Enabled`
+once the ingress is live. Creating the Secret afterwards is picked up at
+once: the controller watches the Secrets named by `tokenSecretRef`.
+
+Callers authenticate with `Authorization: Bearer <token>`. Verify from
+inside the pod without ever handling the token yourself:
+
+```bash
+oc exec -n agent-office deploy/newsroom-gateway -c openclaw -- node -e 'fetch("http://127.0.0.1:18789/hooks/wake",{method:"POST",headers:{authorization:"Bearer "+process.env.OPENCLAW_HOOKS_TOKEN,"content-type":"application/json"},body:JSON.stringify({text:"hooks check",mode:"next-heartbeat"})}).then(r=>console.log(r.status))'
+```
+
+`200` means the ingress is live; a wrong token answers `401`.
 
 ## Build pipeline
 

@@ -15,3 +15,17 @@ spec:
   nodeHostRef:
     name: fedora-black-zebra-36
     namespace: default
+  # Optional: OpenClaw webhook ingress (POST /hooks/wake, POST /hooks/agent)
+  # for external systems that need to trigger a targeted agent turn. The
+  # token is read from a Secret in this namespace and reaches the pod as
+  # the env var OPENCLAW_HOOKS_TOKEN; openclaw.json only ever carries
+  # "${OPENCLAW_HOOKS_TOKEN}". Keep it distinct from the gateway token.
+  #
+  # hooks:
+  #   enabled: true
+  #   tokenSecretRef:
+  #     name: research-gateway-hooks
+  #     key: token
+  #   path: /hooks
+  #   allowedAgentIds: ["web-browser-researcher"]
+  #   allowRequestSessionKey: false

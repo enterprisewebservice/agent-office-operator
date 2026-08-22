@@ -155,6 +155,28 @@ type AgentGatewaySpec struct {
 	//       id: "745444500335231169"
 	// +optional
 	AllowedUsers []AllowedUser `json:"allowedUsers,omitempty"`
+
+	// Hooks declares OpenClaw's webhook ingress (`hooks.*` in
+	// openclaw.json): `POST <path>/wake` and `POST <path>/agent` on the
+	// gateway's HTTP port, authenticated with a DEDICATED bearer token.
+	// It is how an external system asks one specific agent for a
+	// targeted turn — a newsroom's "Check now" button running the wire
+	// reporter against a single source — without holding the gateway's
+	// shared WebSocket token.
+	//
+	// The token never enters the rendered config. The referenced Secret
+	// key is exposed to the gateway pod as the env var
+	// OPENCLAW_HOOKS_TOKEN and openclaw.json carries the reference
+	// "${OPENCLAW_HOOKS_TOKEN}", which OpenClaw substitutes at config
+	// load — so the literal is not in the ConfigMap, not on the PVC,
+	// not in exec arguments, and not in API audit logs.
+	//
+	// The operator owns exactly the keys this block declares (enabled,
+	// token, path, allowedAgentIds, allowRequestSessionKey) and leaves
+	// every other `hooks.*` key (mappings, presets, gmail, …) alone.
+	// Unset ⇒ the operator does not touch the `hooks` block at all.
+	// +optional
+	Hooks *HooksSpec `json:"hooks,omitempty"`
 }
 
 // ModelAuthMode selects which credential the canonical `openai`
@@ -242,6 +264,71 @@ type AllowedUser struct {
 	// snowflake). Required.
 	ID string `json:"id"`
 }
+
+// HooksTokenSecretRef points at the Secret key holding the hook bearer
+// token. The Secret must live in the AgentGateway's namespace.
+type HooksTokenSecretRef struct {
+	// Name of the Secret.
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+
+	// Key inside the Secret whose value is the token. Defaults to
+	// "token".
+	// +kubebuilder:default=token
+	// +optional
+	Key string `json:"key,omitempty"`
+}
+
+// HooksSpec declares the gateway's OpenClaw webhook ingress. See
+// AgentGatewaySpec.Hooks for how the token reaches the pod.
+//
+// +kubebuilder:validation:XValidation:rule="!self.enabled || has(self.tokenSecretRef)",message="hooks.tokenSecretRef is required when hooks.enabled is true"
+type HooksSpec struct {
+	// Enabled turns the hook endpoints on. When false the operator
+	// writes hooks.enabled=false and drops its own token reference, so
+	// a gateway is never left pointing at an env var it no longer has
+	// (OpenClaw refuses to load a config with an unresolvable
+	// "${VAR}").
+	Enabled bool `json:"enabled"`
+
+	// TokenSecretRef names the Secret (same namespace) and key holding
+	// the dedicated hook token. Required when Enabled. Use a value
+	// distinct from OPENCLAW_GATEWAY_TOKEN — OpenClaw flags reuse as a
+	// critical audit finding. If the Secret or key is missing or
+	// empty, hooks are rendered DISABLED and the HooksReady condition
+	// says why, rather than shipping a config the gateway cannot boot.
+	// +optional
+	TokenSecretRef *HooksTokenSecretRef `json:"tokenSecretRef,omitempty"`
+
+	// Path is the URL prefix the hook endpoints hang off. Must be a
+	// dedicated subpath — OpenClaw rejects "/". Defaults to "/hooks".
+	// +kubebuilder:default="/hooks"
+	// +kubebuilder:validation:Pattern=`^/.+`
+	// +optional
+	Path string `json:"path,omitempty"`
+
+	// AllowedAgentIds restricts which agents a hook call may target,
+	// including the default agent when the caller omits agentId.
+	// Omitted ⇒ the operator leaves any existing hooks.allowedAgentIds
+	// in the gateway config alone (OpenClaw's own default is
+	// unrestricted). Set ["*"] to declare "unrestricted" explicitly.
+	// +optional
+	AllowedAgentIDs []string `json:"allowedAgentIds,omitempty"`
+
+	// AllowRequestSessionKey lets /hooks/agent callers choose the
+	// session key. Always written; false (the safe default) unless
+	// set. If you enable it, also constrain
+	// hooks.allowedSessionKeyPrefixes in the gateway config.
+	// +optional
+	AllowRequestSessionKey bool `json:"allowRequestSessionKey,omitempty"`
+}
+
+// AgentGatewayConditionHooksReady reports whether spec.hooks is in
+// effect on the gateway: True once the token Secret resolved and the
+// hooks block is rendered; False with a reason (Disabled,
+// SecretNotFound, SecretKeyMissing, TokenSecretRefMissing) otherwise.
+// Absent when spec.hooks is unset.
+const AgentGatewayConditionHooksReady = "HooksReady"
 
 // AgentGatewayPhase is the high-level lifecycle state.
 //

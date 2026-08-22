@@ -11,7 +11,7 @@
 # embedded olm.bundle.object content (which is what OLM reads when
 # computing channel heads). Keep in sync with the image tag in
 # .tekton/operator-image-on-push.yaml etc.
-VERSION ?= 1.7.38
+VERSION ?= 1.7.39
 
 # CHANNELS define the bundle channels used in the bundle.
 # Add a new line here if you would like to change its default config. (E.g CHANNELS = "candidate,fast,stable")
@@ -616,9 +616,10 @@ preflight: verify-version preflight-unit-tests ## Run all structural sanity chec
 .PHONY: preflight-unit-tests
 preflight-unit-tests: ## Run the fast unit tests preflight depends on.
 	@echo "  -- go test (render + resolve + verifyAdapterArtifact tests)..."
-	@go test ./internal/controller/ -run 'TestRender_|TestResolveTrainerImage_|TestParseBearerChallenge|TestVerifyAdapterArtifact_|TestParseAgentProposal|TestValidateQLoRAConfig|TestExtractJSONObject|TestRenderAutoresearch|TestMvToBackstageResource_|TestSanitizeName|TestRenderBackstageYAML_|TestCatalogModelToBackstageResource|TestFetchModelCatalogEntities' -count=1 >/dev/null \
-	  && echo "  OK  render + verify + agent + KB-bootstrap + Backstage-catalog + helper unit tests" \
-	  || { echo "  ERR unit tests failed; re-run with: go test ./internal/controller/ -v -run 'TestRender_|TestResolveTrainerImage_|TestParseBearerChallenge|TestVerifyAdapterArtifact_|TestParseAgentProposal|TestValidateQLoRAConfig|TestExtractJSONObject|TestRenderAutoresearch|TestMvToBackstageResource_|TestSanitizeName|TestRenderBackstageYAML_|TestCatalogModelToBackstageResource|TestFetchModelCatalogEntities'"; exit 1; }
+	@go test ./internal/controller/ -run 'TestRender_|TestResolveTrainerImage_|TestParseBearerChallenge|TestVerifyAdapterArtifact_|TestParseAgentProposal|TestValidateQLoRAConfig|TestExtractJSONObject|TestRenderAutoresearch|TestMvToBackstageResource_|TestSanitizeName|TestRenderBackstageYAML_|TestCatalogModelToBackstageResource|TestFetchModelCatalogEntities|TestHooksConvergeScript_|TestResolveHooks_|TestGatewayEnv_|TestReloaderSecrets_|TestConvergeScript' -count=1 >/dev/null \
+	  && go test ./internal/templates/ -count=1 >/dev/null \
+	  && echo "  OK  render + verify + agent + KB-bootstrap + Backstage-catalog + hooks + helper unit tests" \
+	  || { echo "  ERR unit tests failed; re-run with: go test ./internal/controller/ -v -run 'TestRender_|TestResolveTrainerImage_|TestParseBearerChallenge|TestVerifyAdapterArtifact_|TestParseAgentProposal|TestValidateQLoRAConfig|TestExtractJSONObject|TestRenderAutoresearch|TestMvToBackstageResource_|TestSanitizeName|TestRenderBackstageYAML_|TestCatalogModelToBackstageResource|TestFetchModelCatalogEntities|TestHooksConvergeScript_|TestResolveHooks_|TestGatewayEnv_|TestReloaderSecrets_|TestConvergeScript'"; exit 1; }
 
 # install-hooks: drop a pre-commit hook that refuses to commit when
 # preflight fails. Symlink (not copy) so future edits to the script

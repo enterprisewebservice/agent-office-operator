@@ -78,8 +78,19 @@ func (r *AgentGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
+	// 0. Decide what spec.hooks means this pass — in particular whether
+	//    the token Secret resolves — BEFORE anything is rendered, so the
+	//    ConfigMap, the Deployment env and the in-pod converge all
+	//    agree. A transient API error is returned (retry) rather than
+	//    read as "disable hooks", which would restart the gateway.
+	hooks, err := r.resolveHooks(ctx, &gw)
+	if err != nil {
+		log.Error(err, "resolveHooks")
+		return ctrl.Result{}, err
+	}
+
 	// 1. Materialize gateway runtime (Pod/PVC/Service/Route/CM/Secret).
-	if err := r.reconcileGatewayChildren(ctx, &gw); err != nil {
+	if err := r.reconcileGatewayChildren(ctx, &gw, hooks); err != nil {
 		log.Error(err, "reconcileGatewayChildren")
 		return ctrl.Result{}, err
 	}
@@ -111,6 +122,22 @@ func (r *AgentGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			log.Error(err, "restart gateway pods after model auth change")
 		}
 		// Come back once the new pod is Ready to verify convergence.
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	// 3a. Converge the operator-owned hooks.* keys (spec.hooks) the same
+	//     way. Seed-only init means an existing PVC never sees the
+	//     template's hooks block, so it is merged in place here. The
+	//     token is written as "${OPENCLAW_HOOKS_TOKEN}", which OpenClaw
+	//     resolves from the pod env at process start — so a change
+	//     needs the same restart model auth does.
+	if changed, err := r.reconcileHooksConfig(ctx, &gw, hooks); err != nil {
+		log.Info("hooks config reconcile skipped", "err", err)
+	} else if changed {
+		log.Info("hooks config changed; restarting gateway pods")
+		if err := r.restartGatewayPods(ctx, &gw); err != nil {
+			log.Error(err, "restart gateway pods after hooks change")
+		}
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
@@ -916,6 +943,10 @@ func (r *AgentGatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Watches(&agentofficev1alpha1.KnowledgeBase{}, handler.EnqueueRequestsFromMapFunc(mapKB)).
 		Watches(&agentofficev1alpha1.AgentWorkstation{}, handler.EnqueueRequestsFromMapFunc(mapAW)).
+		// spec.hooks.tokenSecretRef names a Secret the operator does not
+		// own; react to it appearing or rotating (see
+		// mapHooksSecretToGateways).
+		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.mapHooksSecretToGateways)).
 		Named("agentgateway").
 		Complete(r)
 }

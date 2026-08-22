@@ -108,6 +108,54 @@ func gatewayEnvFrom(gw *agentofficev1alpha1.AgentGateway, tokenSecretName string
 	return out
 }
 
+// gatewayEnv is gatewayRuntimeEnv plus, when hooks are on, the hook
+// token sourced straight from its Secret key as OPENCLAW_HOOKS_TOKEN.
+// openclaw.json carries only "${OPENCLAW_HOOKS_TOKEN}", so this env
+// var is the one place the literal exists outside the Secret. It is
+// deliberately NOT optional: a missing Secret should fail the pod
+// loudly (CreateContainerConfigError) rather than start a gateway
+// that then refuses its config over an unresolvable reference —
+// though resolveHooks normally drops the env var before it comes to
+// that.
+func gatewayEnv(hooksSecret *corev1.SecretKeySelector) []corev1.EnvVar {
+	env := gatewayRuntimeEnv()
+	if hooksSecret != nil && hooksSecret.Name != "" {
+		env = append(env, corev1.EnvVar{
+			Name: templates.HooksTokenEnvVar,
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: hooksSecret.Name},
+					Key:                  hooksSecret.Key,
+				},
+			},
+		})
+	}
+	return env
+}
+
+// reloaderSecrets is the value of the pod template's
+// secret.reloader.stakater.com/reload annotation: every Secret whose
+// rotation must roll the gateway — the MCP credential Secrets plus the
+// hooks token Secret — deduplicated and sorted so the pod template is
+// stable across reconciles. "" when there is nothing to watch.
+func reloaderSecrets(mcpExtraSecrets []string, hooksSecret *corev1.SecretKeySelector) string {
+	set := map[string]struct{}{}
+	for _, s := range mcpExtraSecrets {
+		if s != "" {
+			set[s] = struct{}{}
+		}
+	}
+	if hooksSecret != nil && hooksSecret.Name != "" {
+		set[hooksSecret.Name] = struct{}{}
+	}
+	names := make([]string, 0, len(set))
+	for n := range set {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ",")
+}
+
 func ptrBool(b bool) *bool    { return &b }
 func ptrInt32(i int32) *int32 { return &i }
 
@@ -364,18 +412,18 @@ func gatewayLabels(name string) map[string]string {
 // Mirror of the AgentWorkstation dedicated path but for the gateway
 // runtime. agents.list inside openclaw.json starts empty — the
 // AgentWorkstation runtime.shared path appends to it.
-func (r *AgentGatewayReconciler) reconcileGatewayChildren(ctx context.Context, gw *agentofficev1alpha1.AgentGateway) error {
+func (r *AgentGatewayReconciler) reconcileGatewayChildren(ctx context.Context, gw *agentofficev1alpha1.AgentGateway, hooks hooksState) error {
 	tok, err := r.reconcileGatewayTokenSecret(ctx, gw)
 	if err != nil {
 		return fmt.Errorf("token secret: %w", err)
 	}
-	if err := r.reconcileGatewayConfigMap(ctx, gw, tok); err != nil {
+	if err := r.reconcileGatewayConfigMap(ctx, gw, tok, hooks.render); err != nil {
 		return fmt.Errorf("configmap: %w", err)
 	}
 	if err := r.reconcileGatewayPVC(ctx, gw); err != nil {
 		return fmt.Errorf("pvc: %w", err)
 	}
-	if err := r.reconcileGatewayDeployment(ctx, gw); err != nil {
+	if err := r.reconcileGatewayDeployment(ctx, gw, hooks.secretKey); err != nil {
 		return fmt.Errorf("deployment: %w", err)
 	}
 	if err := r.reconcileGatewayService(ctx, gw); err != nil {
@@ -442,8 +490,10 @@ func (r *AgentGatewayReconciler) reconcileGatewayTokenSecret(ctx context.Context
 // reconcileGatewayConfigMap renders the base openclaw.json (no
 // agents yet) and applies the CM. agents.list will be appended to
 // at runtime by the AgentWorkstation runtime.shared reconciler.
-func (r *AgentGatewayReconciler) reconcileGatewayConfigMap(ctx context.Context, gw *agentofficev1alpha1.AgentGateway, gatewayToken string) error {
-	openclawJSON, err := templates.RenderAgentGatewayConfig(gw, gatewayToken, appsDomain())
+// hooks (spec.hooks, resolved) seeds the hooks block for a NEW
+// gateway; existing PVCs get it via reconcileHooksConfig instead.
+func (r *AgentGatewayReconciler) reconcileGatewayConfigMap(ctx context.Context, gw *agentofficev1alpha1.AgentGateway, gatewayToken string, hooks *templates.HooksRender) error {
+	openclawJSON, err := templates.RenderAgentGatewayConfig(gw, gatewayToken, appsDomain(), hooks)
 	if err != nil {
 		return err
 	}
@@ -510,7 +560,11 @@ func (r *AgentGatewayReconciler) reconcileGatewayPVC(ctx context.Context, gw *ag
 // generated openclaw.json + token Secret. Init container seeds
 // openclaw.json into the PVC on first start; subsequent starts
 // preserve any per-agent files OpenClaw has written there.
-func (r *AgentGatewayReconciler) reconcileGatewayDeployment(ctx context.Context, gw *agentofficev1alpha1.AgentGateway) error {
+//
+// hooksSecret (spec.hooks, resolved) wires the hook token into the
+// openclaw container as OPENCLAW_HOOKS_TOKEN and adds its Secret to
+// the Reloader annotation so a rotated token rolls the pod.
+func (r *AgentGatewayReconciler) reconcileGatewayDeployment(ctx context.Context, gw *agentofficev1alpha1.AgentGateway, hooksSecret *corev1.SecretKeySelector) error {
 	image := gw.Spec.Image
 	if image == "" {
 		image = DefaultOpenClawImage
@@ -567,11 +621,12 @@ func (r *AgentGatewayReconciler) reconcileGatewayDeployment(ctx context.Context,
 		dep.Spec.Replicas = &replicas
 		dep.Spec.Selector = &metav1.LabelSelector{MatchLabels: labels}
 		// Reloader annotation: bounce the pod when any MCP-credential
-		// Secret rotates. Set unconditionally so we DELETE the
-		// annotation when the last AW drops its mcpServers entry.
+		// Secret (or the hooks token Secret) rotates. Set
+		// unconditionally so we DELETE the annotation when the last
+		// AW drops its mcpServers entry and hooks are off.
 		podAnnotations := map[string]string{}
-		if len(mcpExtraSecrets) > 0 {
-			podAnnotations["secret.reloader.stakater.com/reload"] = strings.Join(mcpExtraSecrets, ",")
+		if reload := reloaderSecrets(mcpExtraSecrets, hooksSecret); reload != "" {
+			podAnnotations["secret.reloader.stakater.com/reload"] = reload
 		}
 		dep.Spec.Template = corev1.PodTemplateSpec{
 			ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: podAnnotations},
@@ -606,7 +661,7 @@ func (r *AgentGatewayReconciler) reconcileGatewayDeployment(ctx context.Context,
 					`},
 					VolumeMounts: gatewayInitMounts(gw),
 				}},
-				Containers: gatewayContainers(image, gw, tokenSecretName, attachedKBs, mcpExtraSecrets),
+				Containers: gatewayContainers(image, gw, tokenSecretName, attachedKBs, mcpExtraSecrets, hooksSecret),
 				Volumes:    gatewayVolumes(gw, dshmSize, attachedKBs),
 			},
 		}
@@ -673,7 +728,10 @@ func (r *AgentGatewayReconciler) collectMCPEnvFromSecrets(ctx context.Context, g
 // targeting this gateway via spec.tools.mcpServers — gives openclaw
 // the env vars it needs to resolve ${VAR} references in MCP
 // server header configs (e.g. ${GITHUB_PERSONAL_ACCESS_TOKEN}).
-func gatewayContainers(image string, gw *agentofficev1alpha1.AgentGateway, tokenSecretName string, attachedKBs []agentofficev1alpha1.KnowledgeBase, mcpExtraSecrets []string) []corev1.Container {
+//
+// hooksSecret, when non-nil, is the Secret key the hook token is read
+// from (spec.hooks.tokenSecretRef, resolved); see gatewayEnv.
+func gatewayContainers(image string, gw *agentofficev1alpha1.AgentGateway, tokenSecretName string, attachedKBs []agentofficev1alpha1.KnowledgeBase, mcpExtraSecrets []string, hooksSecret *corev1.SecretKeySelector) []corev1.Container {
 	out := []corev1.Container{{
 		Name:            "openclaw",
 		Image:           image,
@@ -681,7 +739,7 @@ func gatewayContainers(image string, gw *agentofficev1alpha1.AgentGateway, token
 		Ports: []corev1.ContainerPort{{
 			Name: "gateway", ContainerPort: 18789, Protocol: corev1.ProtocolTCP,
 		}},
-		Env:          gatewayRuntimeEnv(),
+		Env:          gatewayEnv(hooksSecret),
 		EnvFrom:      gatewayEnvFrom(gw, tokenSecretName, mcpExtraSecrets),
 		VolumeMounts: gatewayVolumeMounts(gw, attachedKBs),
 	}}
