@@ -12,6 +12,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strings"
@@ -188,45 +190,67 @@ func gatewayInitMounts(gw *agentofficev1alpha1.AgentGateway) []corev1.VolumeMoun
 	return mounts
 }
 
-// codexAuthSyncContainer returns a tiny sidecar that watches
-// /var/lib/codex-auth/auth.json (kept fresh by kubelet on Secret
-// updates, which happen when ESO syncs new Vault data) and
-// re-copies it into /home/node/.codex/auth.json so codex-acp and
-// openclaw see the latest token. Without this, ESO can update
-// the Secret all it wants but the gateway pod's emptyDir copy
-// stays stale until the pod restarts.
-func codexAuthSyncContainer() corev1.Container {
+// codex-auth-sync sidecar wiring. The script itself is
+// templates.CodexAuthSyncScript, rendered into the gateway config CM
+// under codexAuthSyncScriptKey and mounted read-only at
+// codexAuthSyncScriptPath.
+const (
+	codexAuthSyncScriptKey  = "codex-auth-sync.mjs"
+	codexAuthSyncScriptDir  = "/var/lib/codex-auth-sync"
+	codexAuthSyncScriptPath = codexAuthSyncScriptDir + "/" + codexAuthSyncScriptKey
+)
+
+// codexAuthSyncScriptHash pins the script content into the pod template
+// (as an annotation) so a script change rolls the gateway. The sidecar
+// reads the script once at process start; without this, editing the
+// embedded script would update the CM in place and then silently change
+// nothing until some unrelated event restarted the pod.
+func codexAuthSyncScriptHash() string {
+	sum := sha256.Sum256([]byte(templates.CodexAuthSyncScript))
+	return hex.EncodeToString(sum[:])[:12]
+}
+
+// codexAuthSyncContainer returns the sidecar that keeps the pod's Codex
+// credential usable end to end. Historically a ubi-minimal shell loop
+// that only mirrored the Secret projection
+// (/var/lib/codex-auth/auth.json, kept fresh by kubelet as ESO / the
+// Dev Hub re-auth flow updates the Secret) into the writable
+// /home/node/.codex/auth.json. That left a gap: each logical agent
+// holds its OWN copy of the OAuth profile in
+// ~/.openclaw/agents/<id>/agent/openclaw-agent.sqlite, seeded only at
+// provisioning. When the access token expired and a refresh hiccuped
+// (2026-08-23), OpenClaw pruned those profiles and nothing re-seeded
+// them — a 16h outage while the pod held a fresh credential in
+// auth.json the whole time.
+//
+// The sidecar now runs templates.CodexAuthSyncScript under node
+// instead: the same copy-on-change mirror, plus a per-agent seed pass
+// that upserts the shared profile into any store lacking a usable
+// openai OAuth profile (or holding a strictly older one). It runs on
+// the gateway's own OpenClaw image — already pulled for the main
+// container, and the only image guaranteed to carry the node:sqlite
+// runtime matching the DBs it touches — and therefore needs the
+// workspace PVC mount the shell loop never had.
+func codexAuthSyncContainer(image string) corev1.Container {
 	return corev1.Container{
-		Name:  "codex-auth-sync",
-		Image: "registry.access.redhat.com/ubi9/ubi-minimal:latest",
-		Command: []string{"/bin/sh", "-c", `
-			set -u
-			prev=""
-			while true; do
-				if [ -f /var/lib/codex-auth/auth.json ]; then
-					cur=$(sha256sum /var/lib/codex-auth/auth.json | cut -d' ' -f1)
-					if [ "$cur" != "$prev" ]; then
-						cp /var/lib/codex-auth/auth.json /home/node/.codex/auth.json
-						chmod 0600 /home/node/.codex/auth.json
-						echo "codex-auth-sync: refreshed auth.json (sha256=$cur)"
-						prev="$cur"
-					fi
-				fi
-				sleep 30
-			done
-		`},
+		Name:            "codex-auth-sync",
+		Image:           image,
+		ImagePullPolicy: corev1.PullAlways,
+		Command:         []string{"node", codexAuthSyncScriptPath},
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: "codex-auth-src", MountPath: "/var/lib/codex-auth", ReadOnly: true},
 			{Name: "codex-home", MountPath: "/home/node/.codex"},
+			{Name: "workspace", MountPath: "/home/node/.openclaw"},
+			{Name: "config", MountPath: codexAuthSyncScriptDir, ReadOnly: true},
 		},
 		Resources: corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{
 				corev1.ResourceCPU:    resource.MustParse("10m"),
-				corev1.ResourceMemory: resource.MustParse("16Mi"),
+				corev1.ResourceMemory: resource.MustParse("48Mi"),
 			},
 			Limits: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse("50m"),
-				corev1.ResourceMemory: resource.MustParse("64Mi"),
+				corev1.ResourceCPU:    resource.MustParse("200m"),
+				corev1.ResourceMemory: resource.MustParse("256Mi"),
 			},
 		},
 	}
@@ -505,7 +529,13 @@ func (r *AgentGatewayReconciler) reconcileGatewayConfigMap(ctx context.Context, 
 	}
 	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, cm, func() error {
 		cm.Labels = mergeLabels(cm.Labels, gatewayLabels(gw.Name))
-		cm.Data = map[string]string{"openclaw.json": openclawJSON}
+		cm.Data = map[string]string{
+			"openclaw.json": openclawJSON,
+			// Always rendered (harmless without codex creds); only the
+			// codex-auth-sync sidecar, added when
+			// spec.codexCredentialsSecretRef is set, executes it.
+			codexAuthSyncScriptKey: templates.CodexAuthSyncScript,
+		}
 		return controllerutil.SetControllerReference(gw, cm, r.Scheme)
 	})
 	return err
@@ -628,6 +658,11 @@ func (r *AgentGatewayReconciler) reconcileGatewayDeployment(ctx context.Context,
 		if reload := reloaderSecrets(mcpExtraSecrets, hooksSecret); reload != "" {
 			podAnnotations["secret.reloader.stakater.com/reload"] = reload
 		}
+		if gw.Spec.CodexCredentialsSecretRef != "" {
+			// See codexAuthSyncScriptHash — rolls the pod when the
+			// sidecar script content changes.
+			podAnnotations["agentoffice.ai/codex-auth-sync-script"] = codexAuthSyncScriptHash()
+		}
 		dep.Spec.Template = corev1.PodTemplateSpec{
 			ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: podAnnotations},
 			Spec: corev1.PodSpec{
@@ -745,9 +780,10 @@ func gatewayContainers(image string, gw *agentofficev1alpha1.AgentGateway, token
 	}}
 	// codex-auth-sync sidecar: propagates Vault → Secret → emptyDir
 	// updates so the user's re-auth dialog flow rotates the token
-	// without a pod restart. Only added when Codex creds are wired.
+	// without a pod restart, and re-seeds any agent auth store that
+	// lost its openai profile. Only added when Codex creds are wired.
 	if gw.Spec.CodexCredentialsSecretRef != "" {
-		out = append(out, codexAuthSyncContainer())
+		out = append(out, codexAuthSyncContainer(image))
 	}
 	for _, kb := range attachedKBs {
 		if kb.Spec.GitMirror != nil {

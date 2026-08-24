@@ -22,6 +22,17 @@ import (
 //go:embed agentgateway-openclaw.json.tmpl
 var templateFS embed.FS
 
+// CodexAuthSyncScript is the node program the codex-auth-sync sidecar
+// runs: it mirrors the Secret-projected auth.json into the writable
+// .codex/ emptyDir AND re-seeds any agent auth store that lost (or
+// never had) a usable openai OAuth profile — the missing hop behind the
+// 2026-08-23 upstreambeat outage, where OpenClaw pruned expired
+// profiles and nothing put them back. Rendered into the gateway config
+// CM (key codex-auth-sync.mjs) so the operator, not the image, owns it.
+//
+//go:embed codex-auth-sync.mjs
+var CodexAuthSyncScript string
+
 // HooksTokenEnvVar is the env var the operator exposes the hook token
 // through: the gateway Deployment maps spec.hooks.tokenSecretRef onto
 // it, and openclaw.json refers to it as HooksTokenRef. OpenClaw
