@@ -107,10 +107,12 @@ type ToolsSpec struct {
 
 	// MCPServers declares Model Context Protocol servers this agent
 	// can call. Each entry becomes an `openclaw mcp set` invocation
-	// against the agent's gateway pod, and any referenced credentials
-	// Secret is envFrom'd onto the openclaw container with a
-	// stakater/Reloader annotation so the pod rolls on Secret
-	// rotation (e.g. ESO-rotated GitHub App installation tokens).
+	// against the agent's gateway pod. Credentials referenced by an
+	// entry's headers are rendered into that config from the entry's
+	// envFromSecret and hot-reloaded by the runtime on rotation (no
+	// pod restart); a Secret not consumed via headers falls back to
+	// envFrom plus an envSecretsHash-driven pod roll on rotation.
+	// See MCPServerSpec.Headers / MCPServerSpec.EnvFromSecret.
 	//
 	// Only meaningful when spec.runtime.shared.gatewayRef is set —
 	// dedicated-runtime agents own their own pod and configure MCP
@@ -123,9 +125,10 @@ type ToolsSpec struct {
 
 // MCPServerSpec declares one MCP server the agent talks to. The
 // operator translates this into `openclaw mcp set <name> '<json>'`
-// against the agent's gateway pod, plus optional envFrom + Reloader
-// wiring on the gateway Deployment so rotated credentials are
-// available as env-var refs in Headers.
+// against the agent's gateway pod, resolving header credential
+// references from EnvFromSecret into the rendered config (the
+// churn-free delivery path for self-expiring tokens), with envFrom +
+// hash-roll on the gateway Deployment as the env-delivery fallback.
 type MCPServerSpec struct {
 	// Name is the local identifier openclaw uses for this MCP server.
 	// Tools from this server appear in openclaw as `<name>_<toolname>`
@@ -152,24 +155,39 @@ type MCPServerSpec struct {
 	Type string `json:"type,omitempty"`
 
 	// Headers is the static request-header map sent on every MCP
-	// call. Values support `${ENV_VAR}` interpolation that openclaw
-	// resolves at request time from the gateway pod's environment.
-	// Typical usage with a rotating GitHub App installation token:
+	// call. Values support `${ENV_VAR}` references. Typical usage
+	// with a rotating credential (GitHub App installation token,
+	// Gitea OAuth2 access token):
 	//   headers:
-	//     Authorization: "Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN}"
+	//     Authorization: "Bearer ${GITEA_TOKEN}"
 	// paired with EnvFromSecret pointing at the ESO-rotated Secret.
+	//
+	// Delivery (v1.7.46): a `${KEY}` that resolves from
+	// EnvFromSecret is rendered by the operator as the LITERAL
+	// Secret value into the gateway's openclaw.json on every
+	// reconcile — the runtime hot-reloads mcp.* config changes
+	// (dispose-mcp-runtimes), so rotation reaches the next tool
+	// call WITHOUT a pod restart. A `${KEY}` that does not resolve
+	// from EnvFromSecret is left verbatim for openclaw's own env
+	// expansion (see EnvFromSecret for that fallback's semantics).
 	// +optional
 	Headers map[string]string `json:"headers,omitempty"`
 
 	// EnvFromSecret names a Secret in the AgentGateway's namespace
-	// whose keys are projected into the openclaw container via
-	// envFrom. Required when Headers contains any `${ENV_VAR}`
-	// references. The operator also patches the gateway Deployment
-	// with a `secret.reloader.stakater.com/reload` annotation
-	// naming this Secret, so stakater/Reloader bounces the pod
-	// whenever the Secret content changes (kubelet's mounted-secret
-	// refresh doesn't cover env-var consumers — openclaw reads
-	// ${VAR} at startup, not per-request).
+	// backing this server's credentials. Required when Headers
+	// contains any `${ENV_VAR}` references.
+	//
+	// When at least one Headers reference resolves from this
+	// Secret's keys, the credential is CONFIG-delivered (see
+	// Headers): the Secret is NOT projected into the pod env and
+	// its rotation does NOT roll the gateway — the operator's
+	// Secret watch re-renders openclaw.json and the runtime
+	// hot-reloads it. Otherwise the v1.7.45 env fallback applies:
+	// the Secret's keys are projected into the openclaw container
+	// via envFrom, and the pod template carries a content hash of
+	// the Secret (envSecretsHash) so rotation rolls the pod
+	// (env-var consumers resolve ${VAR} at process start, so a
+	// restart is the only correct env delivery).
 	// +optional
 	EnvFromSecret string `json:"envFromSecret,omitempty"`
 }

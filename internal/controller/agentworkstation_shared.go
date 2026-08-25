@@ -832,8 +832,28 @@ func (r *AgentWorkstationReconciler) reconcileMCPServers(
 			"url":       srv.URL,
 			"transport": openclawType,
 		}
-		if len(srv.Headers) > 0 {
-			cfg["headers"] = srv.Headers
+		// v1.7.46: header credentials are CONFIG-delivered. A `${KEY}`
+		// that resolves from the server's EnvFromSecret is rendered as
+		// the LITERAL Secret value here — the runtime classifies any
+		// mcp.* config change as hot (dispose-mcp-runtimes) and the
+		// next tool call reconnects with the fresh credential, no pod
+		// roll. The matching envFrom/envSecretsHash exclusion lives in
+		// collectMCPEnvFromSecrets; the Secret watch in
+		// SetupWithManager re-runs this on every rotation. Refs that
+		// don't resolve stay literal `${KEY}` for openclaw's own env
+		// expansion (the env-delivery fallback path).
+		headers := srv.Headers
+		if srv.EnvFromSecret != "" && len(srv.Headers) > 0 {
+			var sec corev1.Secret
+			if err := r.Get(ctx, client.ObjectKey{Namespace: gw.Namespace, Name: srv.EnvFromSecret}, &sec); err != nil {
+				log.Info("mcp header credential secret unreadable; leaving env-var refs for env delivery",
+					"secret", srv.EnvFromSecret, "server", srv.Name, "err", err.Error())
+			} else if resolved, n := resolveMCPHeaderCredentials(srv.Headers, sec.Data); n > 0 {
+				headers = resolved
+			}
+		}
+		if len(headers) > 0 {
+			cfg["headers"] = headers
 		}
 		cfgJSON, err := json.Marshal(cfg)
 		if err != nil {

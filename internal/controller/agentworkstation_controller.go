@@ -263,6 +263,41 @@ func (r *AgentWorkstationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return out
 	}
 
+	// MCP credential Secret fan-out (v1.7.46): when a Secret named by
+	// any spec.tools.mcpServers[].envFromSecret rotates (ESO refresh of
+	// a Gitea OAuth2 access token, a GitHub App installation token),
+	// re-reconcile the declaring AWs so reconcileMCPServers re-renders
+	// the LITERAL header value into openclaw.json and the runtime
+	// hot-reloads it. This is the config-delivery twin of the AG
+	// reconciler's mapHooksSecretToGateways watch — that one recomputes
+	// the pod template (env fallback), this one rewrites the config.
+	mapCredentialSecret := func(ctx context.Context, obj client.Object) []reconcile.Request {
+		sec, ok := obj.(*corev1.Secret)
+		if !ok {
+			return nil
+		}
+		var aws agentofficev1alpha1.AgentWorkstationList
+		if err := r.List(ctx, &aws, client.InNamespace(sec.Namespace)); err != nil {
+			return nil
+		}
+		out := make([]reconcile.Request, 0)
+		for i := range aws.Items {
+			aw := &aws.Items[i]
+			if aw.Spec.Tools == nil {
+				continue
+			}
+			for _, srv := range aw.Spec.Tools.MCPServers {
+				if srv.EnvFromSecret == sec.Name {
+					out = append(out, reconcile.Request{NamespacedName: client.ObjectKey{
+						Namespace: aw.Namespace, Name: aw.Name,
+					}})
+					break
+				}
+			}
+		}
+		return out
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&agentofficev1alpha1.AgentWorkstation{}).
 		Owns(&appsv1.Deployment{}).
@@ -274,6 +309,7 @@ func (r *AgentWorkstationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&agentofficev1alpha1.SkillBinding{}, handler.EnqueueRequestsFromMapFunc(mapSkillBinding)).
 		Watches(&agentofficev1alpha1.Skill{}, handler.EnqueueRequestsFromMapFunc(mapSkill)).
 		Watches(&agentofficev1alpha1.KnowledgeBase{}, handler.EnqueueRequestsFromMapFunc(mapKB)).
+		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(mapCredentialSecret)).
 		Named("agentworkstation").
 		Complete(r)
 }

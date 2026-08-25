@@ -768,7 +768,18 @@ func (r *AgentGatewayReconciler) reconcileGatewayDeployment(ctx context.Context,
 // gateway's namespace, filters to those targeting THIS gateway via
 // spec.runtime.shared.gatewayRef, and collects the deduplicated,
 // sorted list of Secret names declared in their
-// spec.tools.mcpServers[].envFromSecret fields.
+// spec.tools.mcpServers[].envFromSecret fields that still need ENV
+// delivery.
+//
+// v1.7.46: a Secret whose keys are referenced by the declaring
+// server's headers (`Authorization: Bearer ${GITEA_TOKEN}`) is
+// EXCLUDED here — the AW reconciler renders the literal value into
+// openclaw.json (`openclaw mcp set`) and the runtime hot-reloads it,
+// so envFrom + an envSecretsHash roll would only add a pointless pod
+// restart per rotation. A Secret referenced by ANY server that does
+// not consume it via headers keeps the env+hash path (the fallback
+// for plain env injection), as does a Secret that cannot be read yet
+// (its later creation must roll the pod exactly as before).
 //
 // Why on the AG reconciler (v1.4.1 fix): the AG reconciler OWNS the
 // Deployment via SetControllerReference and rebuilds the pod
@@ -784,7 +795,21 @@ func (r *AgentGatewayReconciler) collectMCPEnvFromSecrets(ctx context.Context, g
 	if err := r.List(ctx, &awList, client.InNamespace(gw.Namespace)); err != nil {
 		return nil, fmt.Errorf("listing AgentWorkstations: %w", err)
 	}
-	set := map[string]struct{}{}
+	// Secret name → does any referencing server still need it as env?
+	needsEnv := map[string]bool{}
+	secretData := map[string]map[string][]byte{}
+	lookup := func(name string) map[string][]byte {
+		if d, ok := secretData[name]; ok {
+			return d
+		}
+		var sec corev1.Secret
+		if err := r.Get(ctx, types.NamespacedName{Namespace: gw.Namespace, Name: name}, &sec); err != nil {
+			secretData[name] = nil // unreadable/absent → env fallback
+		} else {
+			secretData[name] = sec.Data
+		}
+		return secretData[name]
+	}
 	for _, aw := range awList.Items {
 		// Include every agent on THIS gateway — shared agents that
 		// reference it AND a dedicated agent whose own gateway this is.
@@ -794,15 +819,24 @@ func (r *AgentGatewayReconciler) collectMCPEnvFromSecrets(ctx context.Context, g
 		if aw.Spec.Tools == nil {
 			continue
 		}
-		for _, srv := range aw.Spec.Tools.MCPServers {
-			if srv.EnvFromSecret != "" {
-				set[srv.EnvFromSecret] = struct{}{}
+		for i := range aw.Spec.Tools.MCPServers {
+			srv := &aw.Spec.Tools.MCPServers[i]
+			if srv.EnvFromSecret == "" {
+				continue
+			}
+			data := lookup(srv.EnvFromSecret)
+			if data == nil || !mcpServerConsumesSecretViaConfig(srv, data) {
+				needsEnv[srv.EnvFromSecret] = true
+			} else if _, seen := needsEnv[srv.EnvFromSecret]; !seen {
+				needsEnv[srv.EnvFromSecret] = false
 			}
 		}
 	}
-	out := make([]string, 0, len(set))
-	for s := range set {
-		out = append(out, s)
+	out := make([]string, 0, len(needsEnv))
+	for s, env := range needsEnv {
+		if env {
+			out = append(out, s)
+		}
 	}
 	sort.Strings(out)
 	return out, nil
