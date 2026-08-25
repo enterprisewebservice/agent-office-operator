@@ -187,6 +187,13 @@ func (h *CatalogSkillsHandler) recommendViaGateway(
 		"and select an artifact for each one — an agent missing a capability the user asked for is " +
 		"a failure, and so is a half-equipped agent. Do not pad with entries the description does " +
 		"not call for; an artifact's PROVIDES list is the evidence that it covers a capability.\n" +
+		"An agent also carries the KNOWLEDGE that grounds its domain: a kb-type pack whose " +
+		"description matches the agent's workplace or subject matter belongs in the selection " +
+		"even when no task verb names it — a platform assistant without the platform's kb is " +
+		"half-equipped.\n" +
+		"Capabilities come with COMPANIONS: work that writes into a knowledge base also searches " +
+		"it first; investigating OpenShift usually means reading Kubernetes documentation too. " +
+		"Select the companion packs the work will obviously hit in practice.\n" +
 		"\nThe catalog is a HIERARCHY. Selecting a pack installs every skill it contains; " +
 		"selecting a meta-pack installs every skill in all of its packs. Therefore:\n" +
 		"  * NEVER select both a container and something already inside it — pick one.\n" +
@@ -203,16 +210,12 @@ func (h *CatalogSkillsHandler) recommendViaGateway(
 		"Reply with ONE JSON object and no prose, no code fence:\n" +
 		`{"name":"<dns-safe-short-name>","displayName":"...","emoji":"<one emoji>","role":"<one word>",` +
 		`"systemPrompt":"<2-4 sentences: the job, which governed tools/skills to lean on, and: never fabricate data — if a tool cannot answer, say so>",` +
-		`"packs":[{"name":"<exact catalog name>","reason":"<why, one clause>"}],` +
-		`"team":{"gateway":"<exact gateway name from TEAMS>","reason":"<why this crew, one clause>"}}` +
+		`"packs":[{"name":"<exact catalog name>","reason":"<why, one clause>"}]}` +
 		"\n\nCATALOG:\n" + strings.Join(lines, "\n") +
-		"\n\nTEAMS — the gateway the agent joins. A team is a shared runtime, a shared " +
-		"browser node and one blast radius, so this is a real placement decision, not a label. " +
-		"Prefer an existing team whose crew already does related work, and give its EXACT name. " +
-		"If none of them does this kind of work, do NOT force it onto the closest one — answer " +
-		"with a NEW dns-safe gateway name ending in -gateway, named for the work (e.g. " +
-		"\"unreal-worlds-gateway\"). Putting unrelated crews on one runtime is a worse mistake " +
-		"than starting a team. Choose exactly one:\n" + teamLines(teams) +
+		// No TEAMS section: since 2026-08-25 every hire starts on its own
+		// gateway (ownTeamFor overrides whatever a model proposes), so
+		// asking the model to place the agent on a crew is wasted tokens
+		// and a policy contradiction.
 		"\n\nJOB DESCRIPTION:\n" + desc + "\n"
 
 	// base64 the prompt rather than interpolating it into a shell

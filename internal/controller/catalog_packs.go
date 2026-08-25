@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -266,10 +267,26 @@ func (h *CatalogSkillsHandler) gatherPacks(ctx context.Context, typeFilter map[s
 		for _, p := range items {
 			local[p.Name] = true
 		}
+		// One row per registry pack, at its newest version. The registry
+		// lists every published version of a mindifact; appending them
+		// all handed the composer six upstreambeat-newsroom rows to wade
+		// through and the UI a duplicate-riddled catalog (2026-08-25).
+		newest := map[string]catalogPack{}
+		order := []string{}
 		for _, rp := range registryPacks(ctx) {
-			if !local[rp.Name] {
-				items = append(items, rp)
+			if local[rp.Name] {
+				continue
 			}
+			cur, ok := newest[rp.Name]
+			if !ok {
+				order = append(order, rp.Name)
+			}
+			if !ok || versionLess(cur.Version, rp.Version) {
+				newest[rp.Name] = rp
+			}
+		}
+		for _, n := range order {
+			items = append(items, newest[n])
 		}
 	}
 
@@ -305,4 +322,33 @@ func (h *CatalogSkillsHandler) gatherPacks(ctx context.Context, typeFilter map[s
 		return items[i].Name < items[j].Name
 	})
 	return items, nil
+}
+
+// versionLess reports whether a is an older version than b, comparing
+// dotted numeric segments ("0.6.3", "v1.2") and falling back to string
+// order when a segment is not numeric.
+func versionLess(a, b string) bool {
+	as := strings.Split(strings.TrimPrefix(strings.TrimSpace(a), "v"), ".")
+	bs := strings.Split(strings.TrimPrefix(strings.TrimSpace(b), "v"), ".")
+	for i := 0; i < len(as) || i < len(bs); i++ {
+		var av, bv string
+		if i < len(as) {
+			av = as[i]
+		}
+		if i < len(bs) {
+			bv = bs[i]
+		}
+		ai, aerr := strconv.Atoi(av)
+		bi, berr := strconv.Atoi(bv)
+		if aerr == nil && berr == nil {
+			if ai != bi {
+				return ai < bi
+			}
+			continue
+		}
+		if av != bv {
+			return av < bv
+		}
+	}
+	return false
 }
