@@ -134,6 +134,7 @@ func (h *CatalogSkillsHandler) recommend(w http.ResponseWriter, r *http.Request)
 	// 1. A real model turn through the gateway, on the ChatGPT/Codex
 	//    subscription — no API key, no per-token billing.
 	if resp, err := h.recommendViaGateway(r.Context(), desc, packs, teams); err == nil {
+		resp.Team = ownTeamFor(resp.Identity.Name)
 		writeCatalogJSON(w, http.StatusOK, resp)
 		return
 	} else if !strings.Contains(err.Error(), "not configured") {
@@ -142,9 +143,7 @@ func (h *CatalogSkillsHandler) recommend(w http.ResponseWriter, r *http.Request)
 	// 2. An OpenAI-compatible endpoint, if one is configured.
 	if url := os.Getenv("AGENT_RECOMMENDER_URL"); url != "" {
 		if resp, err := recommendViaModel(r.Context(), url, desc, packs); err == nil {
-			if resp.Team == nil {
-				resp.Team = pickTeamFallback(desc, teams)
-			}
+			resp.Team = ownTeamFor(resp.Identity.Name)
 			writeCatalogJSON(w, http.StatusOK, resp)
 			return
 		}
@@ -415,7 +414,7 @@ func recommendFallback(desc string, packs []catalogPack, teams []gatewayCandidat
 	prompt += ". Never fabricate figures or results: if a tool cannot answer, say exactly that."
 
 	return &recommendResponse{
-		Team:   pickTeamFallback(desc, teams),
+		Team:   ownTeamFor(slug),
 		Source: "fallback",
 		Identity: recommendIdentity{
 			Name: slug, DisplayName: display, Emoji: "🤖",

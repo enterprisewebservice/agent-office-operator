@@ -125,6 +125,28 @@ func oneLine(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
+// ownTeamFor is the team policy since 2026-08-25: EVERY hire starts on
+// its own gateway, named for the agent. Description-matching against
+// existing crews put a workshop hire on the newsroom desk — sharing a
+// runtime, a browser node, and a blast radius with an unrelated
+// production crew. Joining an existing team is now a deliberate git
+// edit (point runtime.shared.gatewayRef at the crew's gateway in the
+// agent's gitops repo), not something a keyword score decides.
+// pickTeamFallback/resolveTeam remain for the join-a-crew flow if a
+// future composer surface offers it explicitly.
+func ownTeamFor(agentSlug string) *recommendTeam {
+	slug := sanitizeAgentName(strings.TrimSuffix(strings.TrimSpace(agentSlug), "-gateway"))
+	if slug == "" {
+		slug = "custom"
+	}
+	return &recommendTeam{
+		Gateway:  slug + "-gateway",
+		Existing: false,
+		Ready:    false,
+		Reason:   "each hire starts on its own gateway; joining an existing crew is a gitops edit",
+	}
+}
+
 // pickTeamFallback chooses a gateway without a model: score the job
 // description against each team's description and the names of the
 // agents already on it. Ready gateways win ties; an empty catalog

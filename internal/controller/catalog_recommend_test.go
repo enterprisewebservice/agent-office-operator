@@ -89,6 +89,30 @@ func TestRecommendHonorsDeclaredName(t *testing.T) {
 	}
 }
 
+// TestRecommendTeamIsOwnGateway pins the 2026-08-25 policy: a hire never
+// lands on an existing crew's gateway (a workshop hire once joined the
+// newsroom desk by keyword score). The team is always the agent's own,
+// marked new so the template emits the AgentGateway in the hire's repo.
+func TestRecommendTeamIsOwnGateway(t *testing.T) {
+	cands := []gatewayCandidate{{
+		Name: "newsroom-gateway", Ready: true,
+		Description: "platform investigations and reporting crew",
+		Members:     []string{"upstream-anchor (reporter)"},
+	}}
+	out := recommendFallback(
+		"You are user1-assistant, ACME Financial's platform assistant: investigate questions about this OpenShift cluster and document what you find.",
+		recommendFixture(), cands)
+	if out.Team == nil {
+		t.Fatal("no team proposed")
+	}
+	if out.Team.Gateway != "user1-assistant-gateway" {
+		t.Errorf("team gateway: want user1-assistant-gateway, got %q", out.Team.Gateway)
+	}
+	if out.Team.Existing {
+		t.Errorf("team must be new, not an existing crew: %+v", out.Team)
+	}
+}
+
 // TestRecommendCarriesFullPacks is the guard for the defect that shipped
 // in v1.7.12: a recommendation whose packs are names only forces the
 // client into a second lookup, and a slow or failed lookup silently
