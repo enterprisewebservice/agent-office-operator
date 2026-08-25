@@ -128,10 +128,10 @@ func TestMCPServerConsumesSecretViaConfig(t *testing.T) {
 }
 
 // TestCollectMCPEnvFromSecretsSkipsConfigDelivered proves the gateway
-// reconciler stops env-delivering (and therefore stops hash-rolling on)
-// a Secret whose keys are consumed by the declaring server's headers,
-// while a Secret used as a plain env injector keeps the v1.7.45
-// env+roll fallback.
+// reconciler keeps a config-delivered Secret in envFrom (so the pod still
+// starts with the credential in its env — no migration roll) but drops it
+// from the ROLL hash (so its rotation is hot-reloaded, not rolled), while a
+// Secret used as a plain env injector stays in both (env + roll fallback).
 func TestCollectMCPEnvFromSecretsSkipsConfigDelivered(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
@@ -181,19 +181,25 @@ func TestCollectMCPEnvFromSecretsSkipsConfigDelivered(t *testing.T) {
 		WithObjects(gw, configSecret, envSecret, aw).Build()
 	r := &AgentGatewayReconciler{Client: cl, Scheme: scheme}
 
-	got, err := r.collectMCPEnvFromSecrets(context.Background(), gw)
+	envSecrets, hashSecrets, err := r.collectMCPEnvFromSecrets(context.Background(), gw)
 	if err != nil {
 		t.Fatalf("collectMCPEnvFromSecrets: %v", err)
 	}
-	if len(got) != 1 || got[0] != "plain-env-creds" {
-		t.Fatalf("got %v, want [plain-env-creds] (config-delivered secret must be excluded)", got)
+	// envFrom carries BOTH (pod always starts with the credential in env).
+	if len(envSecrets) != 2 || envSecrets[0] != "plain-env-creds" || envSecrets[1] != "seat-gitea-token" {
+		t.Fatalf("envSecrets = %v, want [plain-env-creds seat-gitea-token]", envSecrets)
+	}
+	// hash carries ONLY the plain-env secret — the config-delivered one
+	// must not roll the pod on rotation.
+	if len(hashSecrets) != 1 || hashSecrets[0] != "plain-env-creds" {
+		t.Fatalf("hashSecrets = %v, want [plain-env-creds] (config-delivered secret must not roll)", hashSecrets)
 	}
 }
 
 // TestCollectMCPEnvFromSecretsMissingSecretFallsBackToEnv: a referenced
-// Secret that cannot be read yet must keep the env path — envSecretsHash
-// folds its later creation into the pod template, which is how a
-// created-after-the-CR credential still reaches the runtime.
+// Secret that cannot be read yet must stay in the ROLL hash — its later
+// creation folds into the pod template and rolls the pod, which is how a
+// created-after-the-CR credential still reaches the runtime env.
 func TestCollectMCPEnvFromSecretsMissingSecretFallsBackToEnv(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
@@ -225,11 +231,15 @@ func TestCollectMCPEnvFromSecretsMissingSecretFallsBackToEnv(t *testing.T) {
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(gw, aw).Build()
 	r := &AgentGatewayReconciler{Client: cl, Scheme: scheme}
 
-	got, err := r.collectMCPEnvFromSecrets(context.Background(), gw)
+	envSecrets, hashSecrets, err := r.collectMCPEnvFromSecrets(context.Background(), gw)
 	if err != nil {
 		t.Fatalf("collectMCPEnvFromSecrets: %v", err)
 	}
-	if len(got) != 1 || got[0] != "not-created-yet" {
-		t.Fatalf("got %v, want [not-created-yet]", got)
+	// Unreadable → in envFrom AND in the roll hash (its creation must roll).
+	if len(envSecrets) != 1 || envSecrets[0] != "not-created-yet" {
+		t.Fatalf("envSecrets = %v, want [not-created-yet]", envSecrets)
+	}
+	if len(hashSecrets) != 1 || hashSecrets[0] != "not-created-yet" {
+		t.Fatalf("hashSecrets = %v, want [not-created-yet]", hashSecrets)
 	}
 }

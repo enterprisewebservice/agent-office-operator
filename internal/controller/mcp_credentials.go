@@ -42,10 +42,14 @@ import (
 //
 // So: when a server's headers reference `${KEY}` values that resolve from
 // its EnvFromSecret, the operator renders the LITERAL values into the
-// `openclaw mcp set` payload, and that Secret is dropped from the gateway
-// Deployment's envFrom + envSecretsHash (no roll on rotation — the config
-// write IS the delivery). Rotation propagates: Secret watch → AW
-// reconcile → mcp set → OpenClaw hot reload.
+// `openclaw mcp set` payload. A rotated value differs from the pod's stale
+// env, so OpenClaw stores the literal (rather than collapsing it back to
+// `${KEY}`) and hot-reloads it. That Secret is kept in the gateway
+// Deployment's envFrom — so the pod always starts with the current
+// credential in its env and there is no migration roll — but excluded from
+// the pod-template ROLL hash, so its rotation never restarts the pod
+// (v1.7.47). Rotation propagates: Secret watch → AW reconcile → mcp set →
+// OpenClaw hot reload.
 //
 // Fallback stays intact: a Secret whose keys are NOT referenced by the
 // declaring server's headers (someone using envFromSecret as a plain env
@@ -87,9 +91,10 @@ func resolveMCPHeaderCredentials(headers map[string]string, data map[string][]by
 // mcpServerConsumesSecretViaConfig reports whether srv's declared
 // EnvFromSecret is consumed through config rendering: at least one
 // `${KEY}` in its headers names a key present in data. When true, the
-// gateway reconciler must NOT envFrom that Secret for this server nor
-// fold it into envSecretsHash — delivery happens through openclaw.json
-// and rotation must not roll the pod.
+// gateway reconciler must NOT fold that Secret into the pod-template roll
+// hash — delivery happens through openclaw.json hot-reload and rotation
+// must not roll the pod (the Secret stays in envFrom for the pod-start
+// value; see collectMCPEnvFromSecrets).
 func mcpServerConsumesSecretViaConfig(srv *agentofficev1alpha1.MCPServerSpec, data map[string][]byte) bool {
 	if srv.EnvFromSecret == "" || len(srv.Headers) == 0 || len(data) == 0 {
 		return false

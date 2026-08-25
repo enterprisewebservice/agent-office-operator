@@ -683,11 +683,16 @@ func (r *AgentGatewayReconciler) reconcileGatewayDeployment(ctx context.Context,
 	// this gateway via spec.tools.mcpServers. These secrets get
 	// envFrom'd onto the openclaw container so MCP server header
 	// templates like `Authorization: "Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN}"`
-	// resolve at request time. The deduplicated, sorted list also
-	// drives a Reloader annotation on the pod template so the pod
-	// rolls when any of those Secrets rotate (e.g. ESO-managed
-	// GitHub App installation tokens that refresh every 30min).
-	mcpExtraSecrets, err := r.collectMCPEnvFromSecrets(ctx, gw)
+	// resolve at request time.
+	//
+	// v1.7.47: two lists. mcpEnvSecrets (ALL) go on envFrom so the pod
+	// always starts with the current credential in its env. mcpHashSecrets
+	// (config-delivered ones excluded) drive the pod-template content hash,
+	// so a config-delivered credential's rotation is hot-reloaded into
+	// openclaw.json WITHOUT rolling the pod. Non-config secrets stay in the
+	// hash and still roll on rotation (env-var consumers read ${VAR} at
+	// process start).
+	mcpEnvSecrets, mcpHashSecrets, err := r.collectMCPEnvFromSecrets(ctx, gw)
 	if err != nil {
 		return fmt.Errorf("collecting mcp envFrom secrets: %w", err)
 	}
@@ -707,11 +712,14 @@ func (r *AgentGatewayReconciler) reconcileGatewayDeployment(ctx context.Context,
 		// unconditionally so we DELETE the annotation when the last
 		// AW drops its mcpServers entry and hooks are off.
 		podAnnotations := map[string]string{}
-		if hash := r.envSecretsHash(ctx, gw.Namespace, mcpExtraSecrets, hooksSecret); hash != "" {
-			// Rolls the pod when any env-sourced credential ROTATES —
-			// the operator's own analogue of the Reloader annotation it
-			// replaces (Reloader's patches cannot survive this
-			// wholesale re-render; see reloaderSecrets).
+		if hash := r.envSecretsHash(ctx, gw.Namespace, mcpHashSecrets, hooksSecret); hash != "" {
+			// Rolls the pod when any NON-config-delivered env-sourced
+			// credential ROTATES — the operator's own analogue of the
+			// Reloader annotation it replaces (Reloader's patches cannot
+			// survive this wholesale re-render; see reloaderSecrets).
+			// Config-delivered credentials are absent from mcpHashSecrets,
+			// so their rotation reaches the runtime via openclaw.json
+			// hot-reload with no roll.
 			podAnnotations["agentoffice.ai/env-secrets-sha"] = hash
 		}
 		if gw.Spec.CodexCredentialsSecretRef != "" {
@@ -752,7 +760,7 @@ func (r *AgentGatewayReconciler) reconcileGatewayDeployment(ctx context.Context,
 					`},
 					VolumeMounts: gatewayInitMounts(gw),
 				}},
-				Containers: gatewayContainers(image, gw, tokenSecretName, attachedKBs, mcpExtraSecrets, hooksSecret),
+				Containers: gatewayContainers(image, gw, tokenSecretName, attachedKBs, mcpEnvSecrets, hooksSecret),
 				Volumes:    gatewayVolumes(gw, dshmSize, attachedKBs),
 			},
 		}
@@ -766,20 +774,32 @@ func (r *AgentGatewayReconciler) reconcileGatewayDeployment(ctx context.Context,
 
 // collectMCPEnvFromSecrets walks all AgentWorkstations in the
 // gateway's namespace, filters to those targeting THIS gateway via
-// spec.runtime.shared.gatewayRef, and collects the deduplicated,
-// sorted list of Secret names declared in their
-// spec.tools.mcpServers[].envFromSecret fields that still need ENV
-// delivery.
+// spec.runtime.shared.gatewayRef, and returns two deduplicated, sorted
+// lists of Secret names declared in their
+// spec.tools.mcpServers[].envFromSecret fields:
 //
-// v1.7.46: a Secret whose keys are referenced by the declaring
-// server's headers (`Authorization: Bearer ${GITEA_TOKEN}`) is
-// EXCLUDED here — the AW reconciler renders the literal value into
-// openclaw.json (`openclaw mcp set`) and the runtime hot-reloads it,
-// so envFrom + an envSecretsHash roll would only add a pointless pod
-// restart per rotation. A Secret referenced by ANY server that does
-// not consume it via headers keeps the env+hash path (the fallback
-// for plain env injection), as does a Secret that cannot be read yet
-// (its later creation must roll the pod exactly as before).
+//   - envSecrets: EVERY referenced Secret. All are envFrom'd onto the
+//     openclaw container, exactly as before v1.7.46. The pod thus always
+//     starts with the current credential in its environment — no
+//     migration roll to "drop" anything, and openclaw can still resolve a
+//     `${VAR}` header as a fallback.
+//
+//   - hashSecrets: only the Secrets whose rotation must ROLL the pod —
+//     i.e. those NOT config-delivered. A Secret whose keys are referenced
+//     by its declaring server's headers is config-delivered: the AW
+//     reconciler renders the fresh literal into openclaw.json and the
+//     runtime hot-reloads it (a rotated value differs from the stale pod
+//     env, so `openclaw mcp set` stores the literal rather than collapsing
+//     to `${VAR}`), so its rotation must NOT change the pod-template hash.
+//     A Secret used only as a plain env injector, or one not yet readable,
+//     stays in hashSecrets so its rotation/creation rolls the pod as before.
+//
+// v1.7.47: this two-list split replaces v1.7.46's single filtered list,
+// which dropped config-delivered Secrets from envFrom entirely. That
+// forced a one-time migration roll AND left a window after any roll where
+// the seeded `${GITEA_TOKEN}` resolved to empty (new pod, no env var) until
+// the next reconcile wrote the literal. Keeping the Secret in envFrom while
+// excluding only its hash contribution is churn-free with no such window.
 //
 // Why on the AG reconciler (v1.4.1 fix): the AG reconciler OWNS the
 // Deployment via SetControllerReference and rebuilds the pod
@@ -790,13 +810,16 @@ func (r *AgentGatewayReconciler) reconcileGatewayDeployment(ctx context.Context,
 // the AG's authoritative state, so it survives. AW reconcile still
 // calls `openclaw mcp set` (no Deployment write) and touches the
 // AG to trigger a prompt re-reconcile.
-func (r *AgentGatewayReconciler) collectMCPEnvFromSecrets(ctx context.Context, gw *agentofficev1alpha1.AgentGateway) ([]string, error) {
+func (r *AgentGatewayReconciler) collectMCPEnvFromSecrets(ctx context.Context, gw *agentofficev1alpha1.AgentGateway) (envSecrets, hashSecrets []string, err error) {
 	var awList agentofficev1alpha1.AgentWorkstationList
 	if err := r.List(ctx, &awList, client.InNamespace(gw.Namespace)); err != nil {
-		return nil, fmt.Errorf("listing AgentWorkstations: %w", err)
+		return nil, nil, fmt.Errorf("listing AgentWorkstations: %w", err)
 	}
-	// Secret name → does any referencing server still need it as env?
-	needsEnv := map[string]bool{}
+	// Secret name → is it config-delivered by EVERY server that references
+	// it? A Secret is kept out of the hash only when nothing still needs a
+	// roll on its rotation. Start optimistic (true) and clear on the first
+	// server that consumes it as plain env.
+	configDelivered := map[string]bool{}
 	secretData := map[string]map[string][]byte{}
 	lookup := func(name string) map[string][]byte {
 		if d, ok := secretData[name]; ok {
@@ -804,7 +827,7 @@ func (r *AgentGatewayReconciler) collectMCPEnvFromSecrets(ctx context.Context, g
 		}
 		var sec corev1.Secret
 		if err := r.Get(ctx, types.NamespacedName{Namespace: gw.Namespace, Name: name}, &sec); err != nil {
-			secretData[name] = nil // unreadable/absent → env fallback
+			secretData[name] = nil // unreadable/absent → must still roll
 		} else {
 			secretData[name] = sec.Data
 		}
@@ -824,22 +847,27 @@ func (r *AgentGatewayReconciler) collectMCPEnvFromSecrets(ctx context.Context, g
 			if srv.EnvFromSecret == "" {
 				continue
 			}
+			prev, seen := configDelivered[srv.EnvFromSecret]
 			data := lookup(srv.EnvFromSecret)
-			if data == nil || !mcpServerConsumesSecretViaConfig(srv, data) {
-				needsEnv[srv.EnvFromSecret] = true
-			} else if _, seen := needsEnv[srv.EnvFromSecret]; !seen {
-				needsEnv[srv.EnvFromSecret] = false
+			thisConfig := data != nil && mcpServerConsumesSecretViaConfig(srv, data)
+			if !seen {
+				configDelivered[srv.EnvFromSecret] = thisConfig
+			} else {
+				configDelivered[srv.EnvFromSecret] = prev && thisConfig
 			}
 		}
 	}
-	out := make([]string, 0, len(needsEnv))
-	for s, env := range needsEnv {
-		if env {
-			out = append(out, s)
+	envSecrets = make([]string, 0, len(configDelivered))
+	hashSecrets = make([]string, 0, len(configDelivered))
+	for s, cfg := range configDelivered {
+		envSecrets = append(envSecrets, s)
+		if !cfg {
+			hashSecrets = append(hashSecrets, s)
 		}
 	}
-	sort.Strings(out)
-	return out, nil
+	sort.Strings(envSecrets)
+	sort.Strings(hashSecrets)
+	return envSecrets, hashSecrets, nil
 }
 
 // gatewayContainers returns the pod's container list: always
