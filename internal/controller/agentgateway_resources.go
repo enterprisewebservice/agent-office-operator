@@ -707,6 +707,13 @@ func (r *AgentGatewayReconciler) reconcileGatewayDeployment(ctx context.Context,
 		dep.Labels = mergeLabels(dep.Labels, labels)
 		dep.Spec.Replicas = &replicas
 		dep.Spec.Selector = &metav1.LabelSelector{MatchLabels: labels}
+		// Recreate, never RollingUpdate: the gateway mounts its workspace
+		// PVC ReadWriteOnce, so a rolling replacement scheduled onto a
+		// different node deadlocks on Multi-Attach — the new pod waits
+		// forever for a volume the old pod cannot release (hit live
+		// 2026-08-25 on a seat gateway; the agent-office gateways had
+		// been hand-patched to Recreate long ago, never encoded).
+		dep.Spec.Strategy = appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}
 		// Reloader annotation: bounce the pod when any MCP-credential
 		// Secret (or the hooks token Secret) rotates. Set
 		// unconditionally so we DELETE the annotation when the last
