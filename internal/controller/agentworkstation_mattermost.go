@@ -191,8 +191,11 @@ func (r *AgentWorkstationReconciler) reconcileMattermost(ctx context.Context, aw
 			mmAPI("POST", base, token, "/api/v4/channels/"+chID+"/restore", nil)
 		}
 	} else {
+		// PRIVATE since 2026-08-25: agent channels are per-tenant rooms.
+		// Public channels let every team member browse every agent —
+		// workshop seats must see and talk to ONLY their own agents.
 		cst, cch := mmAPI("POST", base, token, "/api/v4/channels",
-			map[string]interface{}{"team_id": teamID, "name": slug, "display_name": mmDisplay(display), "type": "O"})
+			map[string]interface{}{"team_id": teamID, "name": slug, "display_name": mmDisplay(display), "type": "P"})
 		if cst != 201 {
 			return fmt.Errorf("mattermost: create channel %s: %v", slug, cch["message"])
 		}
@@ -200,6 +203,18 @@ func (r *AgentWorkstationReconciler) reconcileMattermost(ctx context.Context, aw
 	}
 	if chID != "" {
 		mmAPI("POST", base, token, "/api/v4/channels/"+chID+"/members", map[string]interface{}{"user_id": userID})
+		// Seat owner: an agent living in <user>-agent-workspace belongs to
+		// that user — invite their Mattermost account (same username) into
+		// the team and the private channel. Graceful when the account does
+		// not exist (non-workshop clusters, unprovisioned seats).
+		if owner := strings.TrimSuffix(aw.Namespace, "-agent-workspace"); owner != aw.Namespace {
+			if ost, ou := mmAPI("GET", base, token, "/api/v4/users/username/"+owner, nil); ost == 200 {
+				ownerID := mmStr(ou, "id")
+				mmAPI("POST", base, token, "/api/v4/teams/"+teamID+"/members",
+					map[string]interface{}{"team_id": teamID, "user_id": ownerID})
+				mmAPI("POST", base, token, "/api/v4/channels/"+chID+"/members", map[string]interface{}{"user_id": ownerID})
+			}
+		}
 	}
 	logf.FromContext(ctx).Info("mattermost presence ensured", "agent", agent)
 	return nil
