@@ -365,12 +365,28 @@ func recommendFallback(desc string, packs []catalogPack, teams []gatewayCandidat
 	// brings the skill.
 	chosen = dropContained(completeSelection(chosen, packs), packs)
 
-	// Identity from the description itself — plain, predictable.
-	base := terms
-	if len(base) > 3 {
-		base = base[:3]
+	// Identity from the description itself — plain, predictable. A brief
+	// that opens with the "You are <name>, ..." convention (what the hire
+	// form's placeholder and the workshop guide both teach) declares the
+	// name outright; honor it. Only briefs without a declared name fall
+	// back to the leading terms ("You are user1-assistant, ..." used to
+	// slug into "you-are-user").
+	slug := ""
+	if m := declaredNameRe.FindStringSubmatch(desc); m != nil {
+		cand := strings.ToLower(m[1])
+		// "You are an assistant..." declares no name — articles and other
+		// stopwords fall through to the terms-based fallback.
+		if len(cand) >= 3 && !stopwords[cand] {
+			slug = sanitizeAgentName(cand)
+		}
 	}
-	slug := sanitizeAgentName(strings.Join(base, "-"))
+	if slug == "" {
+		base := terms
+		if len(base) > 3 {
+			base = base[:3]
+		}
+		slug = sanitizeAgentName(strings.Join(base, "-"))
+	}
 	if slug == "" {
 		slug = "custom-agent"
 	}
@@ -410,6 +426,10 @@ func recommendFallback(desc string, packs []catalogPack, teams []gatewayCandidat
 }
 
 var nameRe = regexp.MustCompile(`[^a-z0-9-]+`)
+
+// declaredNameRe captures an explicitly named identity at the head of a
+// job brief: "You are user1-assistant, ..." → "user1-assistant".
+var declaredNameRe = regexp.MustCompile(`(?i)^\s*you\s+are\s+([a-zA-Z0-9][a-zA-Z0-9_-]*)`)
 
 // sanitizeAgentName forces a DNS-1123-safe, <=30 char name.
 func sanitizeAgentName(s string) string {

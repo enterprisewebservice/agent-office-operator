@@ -66,6 +66,29 @@ func TestRecommendFallback(t *testing.T) {
 	}
 }
 
+// TestRecommendHonorsDeclaredName is the guard for the workshop defect of
+// 2026-08-25: the guide teaches briefs of the form "You are <name>, ...",
+// and the fallback slugged the leading words instead — "You are
+// user1-assistant, ..." became agent "you-are-user".
+func TestRecommendHonorsDeclaredName(t *testing.T) {
+	out := recommendFallback(
+		"You are user1-assistant, ACME Financial's platform assistant: investigate questions about this OpenShift cluster and document what you find.",
+		recommendFixture(), nil)
+	if out.Identity.Name != "user1-assistant" {
+		t.Errorf("declared name not honored: got %q", out.Identity.Name)
+	}
+	if out.Identity.DisplayName != "User1 Assistant" {
+		t.Errorf("display name: got %q", out.Identity.DisplayName)
+	}
+
+	// An article after "You are" declares no name — fall back to terms.
+	out = recommendFallback(
+		"You are an assistant for weekly ops reports", recommendFixture(), nil)
+	if out.Identity.Name == "an" || out.Identity.Name == "" {
+		t.Errorf("stopword leaked into the name: got %q", out.Identity.Name)
+	}
+}
+
 // TestRecommendCarriesFullPacks is the guard for the defect that shipped
 // in v1.7.12: a recommendation whose packs are names only forces the
 // client into a second lookup, and a slow or failed lookup silently
