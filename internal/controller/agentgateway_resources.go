@@ -22,6 +22,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/types"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -135,11 +136,17 @@ func gatewayEnv(hooksSecret *corev1.SecretKeySelector) []corev1.EnvVar {
 	return env
 }
 
-// reloaderSecrets is the value of the pod template's
-// secret.reloader.stakater.com/reload annotation: every Secret whose
-// rotation must roll the gateway — the MCP credential Secrets plus the
-// hooks token Secret — deduplicated and sorted so the pod template is
-// stable across reconciles. "" when there is nothing to watch.
+// reloaderSecrets lists every Secret whose rotation must roll the
+// gateway — the MCP credential Secrets plus the hooks token Secret —
+// deduplicated and sorted so the result is stable across reconciles.
+// "" when there is nothing to watch. Since v1.7.45 this feeds the
+// operator's OWN env-secrets content hash (below) instead of a
+// Reloader annotation: this Deployment is re-rendered wholesale every
+// reconcile, so any template patch a third party makes (Reloader's
+// env injection, a manual `rollout restart`) is stomped before the
+// rollout starts — observed live 2026-08-25 when a rotated seat token
+// left a gateway running on a REVOKED credential. The operator is the
+// only actor whose template changes survive itself.
 func reloaderSecrets(mcpExtraSecrets []string, hooksSecret *corev1.SecretKeySelector) string {
 	set := map[string]struct{}{}
 	for _, s := range mcpExtraSecrets {
@@ -156,6 +163,51 @@ func reloaderSecrets(mcpExtraSecrets []string, hooksSecret *corev1.SecretKeySele
 	}
 	sort.Strings(names)
 	return strings.Join(names, ",")
+}
+
+// envSecretsHash folds the CONTENT of every env-sourced Secret into one
+// stable digest for the pod template. When a credential rotates, the
+// digest changes, the template changes, and the Deployment rolls — the
+// same mechanism codexAuthSyncScriptHash uses for script changes. A
+// referenced Secret that does not exist yet contributes its name plus a
+// marker, so its later creation also rolls the pod.
+func (r *AgentGatewayReconciler) envSecretsHash(ctx context.Context, ns string, mcpExtraSecrets []string, hooksSecret *corev1.SecretKeySelector) string {
+	names := map[string]struct{}{}
+	for _, n := range mcpExtraSecrets {
+		if n != "" {
+			names[n] = struct{}{}
+		}
+	}
+	if hooksSecret != nil && hooksSecret.Name != "" {
+		names[hooksSecret.Name] = struct{}{}
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	sorted := make([]string, 0, len(names))
+	for n := range names {
+		sorted = append(sorted, n)
+	}
+	sort.Strings(sorted)
+	h := sha256.New()
+	for _, n := range sorted {
+		var sec corev1.Secret
+		if err := r.Get(ctx, types.NamespacedName{Namespace: ns, Name: n}, &sec); err != nil {
+			fmt.Fprintf(h, "%s\x00absent\x00", n)
+			continue
+		}
+		keys := make([]string, 0, len(sec.Data))
+		for k := range sec.Data {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			fmt.Fprintf(h, "%s\x00%s\x00", n, k)
+			h.Write(sec.Data[k])
+			h.Write([]byte{0})
+		}
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))[:16]
 }
 
 func ptrBool(b bool) *bool    { return &b }
@@ -655,8 +707,12 @@ func (r *AgentGatewayReconciler) reconcileGatewayDeployment(ctx context.Context,
 		// unconditionally so we DELETE the annotation when the last
 		// AW drops its mcpServers entry and hooks are off.
 		podAnnotations := map[string]string{}
-		if reload := reloaderSecrets(mcpExtraSecrets, hooksSecret); reload != "" {
-			podAnnotations["secret.reloader.stakater.com/reload"] = reload
+		if hash := r.envSecretsHash(ctx, gw.Namespace, mcpExtraSecrets, hooksSecret); hash != "" {
+			// Rolls the pod when any env-sourced credential ROTATES —
+			// the operator's own analogue of the Reloader annotation it
+			// replaces (Reloader's patches cannot survive this
+			// wholesale re-render; see reloaderSecrets).
+			podAnnotations["agentoffice.ai/env-secrets-sha"] = hash
 		}
 		if gw.Spec.CodexCredentialsSecretRef != "" {
 			// See codexAuthSyncScriptHash — rolls the pod when the

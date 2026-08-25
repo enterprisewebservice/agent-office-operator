@@ -232,10 +232,35 @@ func (r *AgentGatewayReconciler) mapHooksSecretToGateways(ctx context.Context, o
 	if err := r.List(ctx, &gws, client.InNamespace(sec.Namespace)); err != nil {
 		return nil
 	}
+	// v1.7.45: the gateway pod template also carries a content hash of
+	// every env-sourced credential Secret (envSecretsHash), so a Secret
+	// referenced by any AgentWorkstation's mcpServers[].envFromSecret
+	// must re-reconcile that agent's gateway too — that is how a rotated
+	// seat token rolls the runtime (the operator's re-render used to
+	// stomp Reloader's patch and leave gateways on REVOKED credentials).
+	envRefGWs := map[string]struct{}{}
+	var aws agentofficev1alpha1.AgentWorkstationList
+	if err := r.List(ctx, &aws, client.InNamespace(sec.Namespace)); err == nil {
+		for i := range aws.Items {
+			aw := &aws.Items[i]
+			if aw.Spec.Tools == nil {
+				continue
+			}
+			for _, srv := range aw.Spec.Tools.MCPServers {
+				if srv.EnvFromSecret == sec.Name {
+					if gwRef := effectiveGatewayRef(aw); gwRef != "" {
+						envRefGWs[gwRef] = struct{}{}
+					}
+				}
+			}
+		}
+	}
 	var out []reconcile.Request
 	for _, gw := range gws.Items {
+		_, viaEnv := envRefGWs[gw.Name]
 		h := gw.Spec.Hooks
-		if h == nil || h.TokenSecretRef == nil || h.TokenSecretRef.Name != sec.Name {
+		viaHooks := h != nil && h.TokenSecretRef != nil && h.TokenSecretRef.Name == sec.Name
+		if !viaEnv && !viaHooks {
 			continue
 		}
 		out = append(out, reconcile.Request{NamespacedName: types.NamespacedName{
