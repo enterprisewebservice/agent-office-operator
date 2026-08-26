@@ -136,6 +136,9 @@ func (r *SkillReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 // condition reflects the gap.
 func (r *SkillReconciler) resolveSkillContent(ctx context.Context, skill *agentofficev1alpha1.Skill) (string, error) {
 	src := skill.Spec.Source
+	if src.PackageRef != nil {
+		return resolvePackageRef(ctx, src.PackageRef)
+	}
 	if src.ConfigMapRef != nil {
 		var cm corev1.ConfigMap
 		key := types.NamespacedName{Namespace: skill.Namespace, Name: src.ConfigMapRef.Name}
@@ -151,7 +154,7 @@ func (r *SkillReconciler) resolveSkillContent(ctx context.Context, skill *agento
 	if src.Inline != "" {
 		return src.Inline, nil
 	}
-	return "", fmt.Errorf("source has neither configMapRef nor inline content")
+	return "", fmt.Errorf("source has no packageRef, configMapRef, or inline content")
 }
 
 // resolveReferencedBy lists all SkillBindings in the namespace,

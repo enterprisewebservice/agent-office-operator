@@ -22,13 +22,22 @@ import (
 
 // SkillSource is the location of the skill's primary `SKILL.md`
 // content (Anthropic Skills Open Standard). Exactly one of
-// `configMapRef` or `inline` must be set.
+// `packageRef`, `configMapRef`, or `inline` must be set.
 //
+// Skills adopted from a skills registry should use `packageRef` —
+// content by reference: the CR pins a coordinate (and, ideally, a
+// digest) and the operator fetches and verifies the body, the same
+// way the baked catalog pins per-skill artifacts in its lockfile.
 // Skills authored as real `.md` files in git should use
 // `configMapRef` pointed at a kustomize-generated ConfigMap whose
 // data[key] holds the markdown body. `inline` is for small or
 // one-off skills where shipping a separate file in git is overkill.
 type SkillSource struct {
+	// PackageRef pins the content to a versioned artifact in a
+	// skills registry — content by reference, not by copy.
+	// +optional
+	PackageRef *PackageRefSource `json:"packageRef,omitempty"`
+
 	// Reference to a ConfigMap whose data[key] holds the skill's
 	// `SKILL.md` content.
 	// +optional
@@ -37,6 +46,36 @@ type SkillSource struct {
 	// Inline `SKILL.md` markdown body.
 	// +optional
 	Inline string `json:"inline,omitempty"`
+}
+
+// PackageRefSource identifies a versioned skill artifact in a skills
+// registry. The operator resolves the artifact's manifest, follows
+// its content URL, and — when Digest is set — refuses content whose
+// SHA-256 does not match. A digest-pinned ref is immutable: the
+// resolved body is cached for the life of the operator process.
+// Without a digest the content is re-fetched on the registry
+// federation TTL, so a republished version converges but is not
+// tamper-evident.
+type PackageRefSource struct {
+	// Ref is the artifact coordinate, "name:version"
+	// (e.g. "platform-incident-triage:1.1.0"). A namespaced
+	// coordinate ("agent-office/platform-incident-triage:1.1.0")
+	// is accepted; the registry content path uses only name and
+	// version.
+	Ref string `json:"ref"`
+
+	// Digest is the expected SHA-256 (hex, optionally prefixed
+	// "sha256:") of the SKILL.md content. Strongly recommended —
+	// with it set, a drifted or compromised registry cannot change
+	// what this Skill delivers.
+	// +optional
+	Digest string `json:"digest,omitempty"`
+
+	// Registry is the base URL of the skills registry
+	// (e.g. "https://mindifact.ai/v1"). Defaults to the first
+	// entry of the operator's AGENT_REGISTRY_URLS federation.
+	// +optional
+	Registry string `json:"registry,omitempty"`
 }
 
 // SkillInvocation describes how an agent invokes the skill at

@@ -188,6 +188,9 @@ func (r *AgentWorkstationReconciler) listAllCatalogSkills(ctx context.Context, n
 // back to a pure-template skill.
 func (r *AgentWorkstationReconciler) resolveSkillContent(ctx context.Context, skill *agentofficev1alpha1.Skill) (string, error) {
 	src := skill.Spec.Source
+	if src.PackageRef != nil {
+		return resolvePackageRef(ctx, src.PackageRef)
+	}
 	if src.ConfigMapRef != nil {
 		var cm corev1.ConfigMap
 		key := types.NamespacedName{Namespace: skill.Namespace, Name: src.ConfigMapRef.Name}
@@ -203,7 +206,7 @@ func (r *AgentWorkstationReconciler) resolveSkillContent(ctx context.Context, sk
 	if src.Inline != "" {
 		return src.Inline, nil
 	}
-	return "", fmt.Errorf("skill source has neither configMapRef nor inline content")
+	return "", fmt.Errorf("skill source has no packageRef, configMapRef, or inline content")
 }
 
 // skillBindingAppliesToAW reports whether `sb` should grant its

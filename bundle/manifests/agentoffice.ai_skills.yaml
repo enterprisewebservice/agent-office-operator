@@ -187,6 +187,35 @@ spec:
                   inline:
                     description: Inline `SKILL.md` markdown body.
                     type: string
+                  packageRef:
+                    description: |-
+                      PackageRef pins the content to a versioned artifact in a
+                      skills registry — content by reference, not by copy.
+                    properties:
+                      digest:
+                        description: |-
+                          Digest is the expected SHA-256 (hex, optionally prefixed
+                          "sha256:") of the SKILL.md content. Strongly recommended —
+                          with it set, a drifted or compromised registry cannot change
+                          what this Skill delivers.
+                        type: string
+                      ref:
+                        description: |-
+                          Ref is the artifact coordinate, "name:version"
+                          (e.g. "platform-incident-triage:1.1.0"). A namespaced
+                          coordinate ("agent-office/platform-incident-triage:1.1.0")
+                          is accepted; the registry content path uses only name and
+                          version.
+                        type: string
+                      registry:
+                        description: |-
+                          Registry is the base URL of the skills registry
+                          (e.g. "https://mindifact.ai/v1"). Defaults to the first
+                          entry of the operator's AGENT_REGISTRY_URLS federation.
+                        type: string
+                    required:
+                    - ref
+                    type: object
                 type: object
               version:
                 description: |-
