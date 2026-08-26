@@ -262,14 +262,27 @@ func resolvedVersionLabel(pinned, skillVersion string) string {
 func renderSkill(skill agentofficev1alpha1.Skill, base string, overrides *agentofficev1alpha1.SkillOverrides) string {
 	var b strings.Builder
 
+	// A base that opens with YAML frontmatter is a COMPLETE SKILL.md —
+	// the openclaw skills scanner requires `---` at byte zero, and any
+	// synthesized header above it makes the whole skill invisible to
+	// the runtime: present on disk, absent from the skills snapshot,
+	// never shown to the model. Found live 2026-08-26: an installed
+	// mindifact materialized into the workspace and changed nothing,
+	// because the render buried its frontmatter. Emit frontmatter-led
+	// bodies verbatim (overrides/template still append below).
+	frontmatterLed := strings.HasPrefix(strings.TrimLeft(base, "\n"), "---\n")
+
 	// Header: skill identity, helps the LLM ground when reading
-	// SKILL_<name>.md in its working set.
+	// SKILL_<name>.md in its working set. Only for bodies that do NOT
+	// carry their own frontmatter.
 	displayName := skill.Spec.DisplayName
 	if displayName == "" {
 		displayName = skill.Name
 	}
-	fmt.Fprintf(&b, "# %s\n\n", displayName)
-	if skill.Spec.Description != "" {
+	if !frontmatterLed {
+		fmt.Fprintf(&b, "# %s\n\n", displayName)
+	}
+	if !frontmatterLed && skill.Spec.Description != "" {
 		fmt.Fprintf(&b, "%s\n\n", skill.Spec.Description)
 	}
 	if skill.Spec.Invocation.Tool != "" {
