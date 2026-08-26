@@ -97,11 +97,16 @@ func (r *AgentWorkstationReconciler) listAppliedSkills(ctx context.Context, aw *
 			continue
 		}
 
-		// Resolve content from the source. Inline beats nothing,
-		// configMapRef beats both. Failure to resolve is
-		// non-fatal — render whatever we have (possibly just the
-		// invocation template body).
-		base, _ := r.resolveSkillContent(ctx, &skill)
+		// Resolve content from the source. A skill with NO source at
+		// all is a pure-template skill and renders from its invocation
+		// template. But a skill whose DECLARED source fails to resolve
+		// (missing ConfigMap, unreachable registry, digest mismatch)
+		// must not be delivered as an empty stub — a refused skill
+		// does not appear in the workspace, period.
+		base, err := r.resolveSkillContent(ctx, &skill)
+		if err != nil && skillDeclaresSource(&skill) {
+			continue
+		}
 
 		rendered := renderSkill(skill, base, winner.Spec.Overrides)
 
@@ -159,8 +164,15 @@ func (r *AgentWorkstationReconciler) listAllCatalogSkills(ctx context.Context, n
 	resolved := make([]ResolvedSkill, 0, len(skills.Items))
 	for i := range skills.Items {
 		skill := skills.Items[i]
-		// Resolve content from source. Failure is non-fatal.
-		base, _ := r.resolveSkillContent(ctx, &skill)
+		// Resolve content from source. A pure-template skill (no
+		// source declared) renders from its template; a skill whose
+		// declared source failed to resolve (digest refusal, missing
+		// ConfigMap, registry unreachable) is skipped entirely so a
+		// refused skill never reaches an agent as an empty stub.
+		base, err := r.resolveSkillContent(ctx, &skill)
+		if err != nil && skillDeclaresSource(&skill) {
+			continue
+		}
 		// No SkillBinding overrides in the catalog model — pass nil.
 		rendered := renderSkill(skill, base, nil)
 		resolved = append(resolved, ResolvedSkill{
@@ -405,4 +417,13 @@ func (r *AgentWorkstationReconciler) renderWikiMd(ctx context.Context, aw *agent
 	b.WriteString("- **Log every meaningful operation**: every `wiki-clip`, `wiki-write`, and substantial `wiki-search` skill appends a single entry to `log.md` with the format `## [YYYY-MM-DD] <op> | <subject>`. This makes the wiki's history greppable and gives the linter agent a structured timeline to walk.\n")
 	b.WriteString("- **Cite**: when answering from the wiki, cite the source article path so the user can navigate to it directly.\n")
 	return b.String(), nil
+}
+
+// skillDeclaresSource reports whether the Skill names any content
+// source. Skills that do are delivered only when that source
+// resolves; skills that don't are pure-template skills and render
+// from their invocation template alone.
+func skillDeclaresSource(s *agentofficev1alpha1.Skill) bool {
+	src := s.Spec.Source
+	return src.PackageRef != nil || src.ConfigMapRef != nil || src.Inline != ""
 }

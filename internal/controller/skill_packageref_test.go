@@ -70,3 +70,21 @@ func TestResolvePackageRefDigest(t *testing.T) {
 		t.Fatalf("cached pinned resolve after server close: err=%v", err)
 	}
 }
+
+func TestSkillDeclaresSource(t *testing.T) {
+	mk := func(src agentofficev1alpha1.SkillSource) *agentofficev1alpha1.Skill {
+		return &agentofficev1alpha1.Skill{Spec: agentofficev1alpha1.SkillSpec{Source: src}}
+	}
+	if skillDeclaresSource(mk(agentofficev1alpha1.SkillSource{})) {
+		t.Fatal("pure-template skill must not count as declaring a source")
+	}
+	if !skillDeclaresSource(mk(agentofficev1alpha1.SkillSource{Inline: "x"})) {
+		t.Fatal("inline counts")
+	}
+	if !skillDeclaresSource(mk(agentofficev1alpha1.SkillSource{PackageRef: &agentofficev1alpha1.PackageRefSource{Ref: "x:1"}})) {
+		t.Fatal("packageRef counts")
+	}
+	if !skillDeclaresSource(mk(agentofficev1alpha1.SkillSource{ConfigMapRef: &agentofficev1alpha1.ConfigMapSource{Name: "c", Key: "k"}})) {
+		t.Fatal("configMapRef counts")
+	}
+}
