@@ -219,22 +219,22 @@ func (r *AgentWorkstationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		if !ok {
 			return nil
 		}
-		var bindings agentofficev1alpha1.SkillBindingList
-		if err := r.List(ctx, &bindings, client.InNamespace(sk.Namespace)); err != nil {
+		// Catalog model: every AW in the Skill's namespace consumes the
+		// whole local catalog (listAllCatalogSkills), so a Skill change
+		// re-seeds every workspace in that namespace. The old mapping
+		// routed only through SkillBindings — a catalog-model Skill CR
+		// (no binding) fired this watch into the void, and an installed
+		// mindifact never reached any agent until something else poked
+		// the AW (found live 2026-08-25 on a seat workspace).
+		var aws agentofficev1alpha1.AgentWorkstationList
+		if err := r.List(ctx, &aws, client.InNamespace(sk.Namespace)); err != nil {
 			return nil
 		}
-		seen := map[client.ObjectKey]struct{}{}
-		for _, sb := range bindings.Items {
-			if sb.Spec.SkillRef.Name != sk.Name {
-				continue
-			}
-			for _, n := range sb.Status.AppliedTo {
-				seen[client.ObjectKey{Namespace: sk.Namespace, Name: n}] = struct{}{}
-			}
-		}
-		out := make([]reconcile.Request, 0, len(seen))
-		for k := range seen {
-			out = append(out, reconcile.Request{NamespacedName: k})
+		out := make([]reconcile.Request, 0, len(aws.Items))
+		for i := range aws.Items {
+			out = append(out, reconcile.Request{NamespacedName: client.ObjectKey{
+				Namespace: sk.Namespace, Name: aws.Items[i].Name,
+			}})
 		}
 		return out
 	}
