@@ -246,6 +246,23 @@ spec:
                 - message: hooks.tokenSecretRef is required when hooks.enabled is
                     true
                   rule: '!self.enabled || has(self.tokenSecretRef)'
+              http:
+                description: |-
+                  HTTP exposes optional gateway HTTP surfaces beyond the core
+                  WebSocket protocol.
+                properties:
+                  chatCompletions:
+                    description: |-
+                      ChatCompletions serves the runtime's OpenAI-compatible surface
+                      (/v1/chat/completions, /v1/models, /v1/responses) on the gateway
+                      port, authenticated by the gateway token. A request runs the
+                      same governed agent codepath as any other turn — routing,
+                      permissions, and audit match the gateway. Off by default: the
+                      token is an operator-grade credential, so enable this only for
+                      gateways whose namespace RBAC already guards that Secret (for
+                      example, in-namespace pipeline callers).
+                    type: boolean
+                type: object
               image:
                 default: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/openclaw:latest
                 description: Image is the container image for the gateway runtime.

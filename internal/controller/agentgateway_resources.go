@@ -493,13 +493,18 @@ func (r *AgentGatewayReconciler) reconcileGatewayChildren(ctx context.Context, g
 	if err != nil {
 		return fmt.Errorf("token secret: %w", err)
 	}
-	if err := r.reconcileGatewayConfigMap(ctx, gw, tok, hooks.render); err != nil {
+	baseCfg, err := r.reconcileGatewayConfigMap(ctx, gw, tok, hooks.render)
+	if err != nil {
 		return fmt.Errorf("configmap: %w", err)
 	}
 	if err := r.reconcileGatewayPVC(ctx, gw); err != nil {
 		return fmt.Errorf("pvc: %w", err)
 	}
-	if err := r.reconcileGatewayDeployment(ctx, gw, hooks.secretKey); err != nil {
+	// Hash of the operator's BASE render only — AW agent appends evolve
+	// the live CM and must NOT roll a shared gateway; a base-config
+	// change (e.g. enabling spec.http.chatCompletions) must.
+	cfgSum := sha256.Sum256([]byte(baseCfg))
+	if err := r.reconcileGatewayDeployment(ctx, gw, hooks.secretKey, hex.EncodeToString(cfgSum[:8])); err != nil {
 		return fmt.Errorf("deployment: %w", err)
 	}
 	if err := r.reconcileGatewayService(ctx, gw); err != nil {
@@ -568,10 +573,10 @@ func (r *AgentGatewayReconciler) reconcileGatewayTokenSecret(ctx context.Context
 // at runtime by the AgentWorkstation runtime.shared reconciler.
 // hooks (spec.hooks, resolved) seeds the hooks block for a NEW
 // gateway; existing PVCs get it via reconcileHooksConfig instead.
-func (r *AgentGatewayReconciler) reconcileGatewayConfigMap(ctx context.Context, gw *agentofficev1alpha1.AgentGateway, gatewayToken string, hooks *templates.HooksRender) error {
+func (r *AgentGatewayReconciler) reconcileGatewayConfigMap(ctx context.Context, gw *agentofficev1alpha1.AgentGateway, gatewayToken string, hooks *templates.HooksRender) (string, error) {
 	openclawJSON, err := templates.RenderAgentGatewayConfig(gw, gatewayToken, appsDomain(), hooks)
 	if err != nil {
-		return err
+		return "", err
 	}
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
@@ -590,7 +595,7 @@ func (r *AgentGatewayReconciler) reconcileGatewayConfigMap(ctx context.Context, 
 		}
 		return controllerutil.SetControllerReference(gw, cm, r.Scheme)
 	})
-	return err
+	return openclawJSON, err
 }
 
 // reconcileGatewayPVC sizes the workspace bigger than the
@@ -646,7 +651,7 @@ func (r *AgentGatewayReconciler) reconcileGatewayPVC(ctx context.Context, gw *ag
 // hooksSecret (spec.hooks, resolved) wires the hook token into the
 // openclaw container as OPENCLAW_HOOKS_TOKEN and adds its Secret to
 // the Reloader annotation so a rotated token rolls the pod.
-func (r *AgentGatewayReconciler) reconcileGatewayDeployment(ctx context.Context, gw *agentofficev1alpha1.AgentGateway, hooksSecret *corev1.SecretKeySelector) error {
+func (r *AgentGatewayReconciler) reconcileGatewayDeployment(ctx context.Context, gw *agentofficev1alpha1.AgentGateway, hooksSecret *corev1.SecretKeySelector, baseConfigSha string) error {
 	image := gw.Spec.Image
 	if image == "" {
 		image = DefaultOpenClawImage
@@ -719,6 +724,12 @@ func (r *AgentGatewayReconciler) reconcileGatewayDeployment(ctx context.Context,
 		// unconditionally so we DELETE the annotation when the last
 		// AW drops its mcpServers entry and hooks are off.
 		podAnnotations := map[string]string{}
+		if baseConfigSha != "" {
+			// Rolls the pod when the operator's rendered base config
+			// changes (openclaw reads config at start; live CM appends
+			// from AW reconciles deliberately excluded).
+			podAnnotations["agentoffice.ai/gateway-config-sha"] = baseConfigSha
+		}
 		if hash := r.envSecretsHash(ctx, gw.Namespace, mcpHashSecrets, hooksSecret); hash != "" {
 			// Rolls the pod when any NON-config-delivered env-sourced
 			// credential ROTATES — the operator's own analogue of the

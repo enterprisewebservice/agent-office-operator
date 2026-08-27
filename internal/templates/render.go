@@ -124,6 +124,7 @@ func (h *HooksRender) ConfigJSON() (string, error) {
 // openclaw.json.
 type OpenClawConfigData struct {
 	GatewayToken string
+	ChatCompletions bool
 	// AllowedOrigins is the list of hostnames the OpenClaw Control UI
 	// accepts cross-origin requests from. Computed by the reconciler
 	// from the gateway's Route hostname so the "Open agent gateway"
@@ -143,6 +144,9 @@ func RenderAgentGatewayConfig(gw *agentofficev1alpha1.AgentGateway, gatewayToken
 		return "", fmt.Errorf("parsing agentgateway-openclaw.json template: %w", err)
 	}
 	data := OpenClawConfigData{GatewayToken: gatewayToken}
+	if gw.Spec.HTTP != nil && gw.Spec.HTTP.ChatCompletions {
+		data.ChatCompletions = true
+	}
 	if appsDomain != "" {
 		host := fmt.Sprintf("%s-%s.%s", gw.Name, gw.Namespace, appsDomain)
 		data.AllowedOrigins = []string{

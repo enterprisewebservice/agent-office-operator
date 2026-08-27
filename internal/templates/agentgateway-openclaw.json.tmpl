@@ -9,7 +9,12 @@
     },
     "remote": {
       "token": "{{.GatewayToken}}"
-    },
+    },{{if .ChatCompletions}}
+    "http": {
+      "endpoints": {
+        "chatCompletions": { "enabled": true }
+      }
+    },{{end}}
     "controlUi": {
       "allowedOrigins": [{{range $i, $o := .AllowedOrigins}}{{if $i}},{{end}}"{{$o}}"{{end}}]
     },

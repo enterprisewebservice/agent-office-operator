@@ -166,3 +166,38 @@ func TestHooksRender_WireShape(t *testing.T) {
 		t.Errorf("wire shape drifted:\n got=%s\nwant=%s", b, want)
 	}
 }
+
+func TestRenderAgentGatewayConfigChatCompletions(t *testing.T) {
+	gw := &agentofficev1alpha1.AgentGateway{}
+	gw.Name = "g"
+	gw.Namespace = "ns"
+	off, err := RenderAgentGatewayConfig(gw, "tok", "apps.example.com", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(off, "chatCompletions") {
+		t.Fatal("chatCompletions must be absent by default")
+	}
+	var parsed map[string]interface{}
+	if err := json.Unmarshal([]byte(off), &parsed); err != nil {
+		t.Fatalf("default render is not valid JSON: %v", err)
+	}
+
+	gw.Spec.HTTP = &agentofficev1alpha1.GatewayHTTPSpec{ChatCompletions: true}
+	on, err := RenderAgentGatewayConfig(gw, "tok", "apps.example.com", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(on), &parsed); err != nil {
+		t.Fatalf("enabled render is not valid JSON: %v", err)
+	}
+	gwBlock := parsed["gateway"].(map[string]interface{})
+	http, ok := gwBlock["http"].(map[string]interface{})
+	if !ok {
+		t.Fatal("gateway.http block missing when enabled")
+	}
+	cc := http["endpoints"].(map[string]interface{})["chatCompletions"].(map[string]interface{})
+	if cc["enabled"] != true {
+		t.Fatal("chatCompletions.enabled not true")
+	}
+}

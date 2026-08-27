@@ -177,6 +177,11 @@ type AgentGatewaySpec struct {
 	// Unset ⇒ the operator does not touch the `hooks` block at all.
 	// +optional
 	Hooks *HooksSpec `json:"hooks,omitempty"`
+
+	// HTTP exposes optional gateway HTTP surfaces beyond the core
+	// WebSocket protocol.
+	// +optional
+	HTTP *GatewayHTTPSpec `json:"http,omitempty"`
 }
 
 // ModelAuthMode selects which credential the canonical `openai`
@@ -277,6 +282,21 @@ type HooksTokenSecretRef struct {
 	// +kubebuilder:default=token
 	// +optional
 	Key string `json:"key,omitempty"`
+}
+
+// GatewayHTTPSpec selects which optional HTTP surfaces the gateway
+// serves on its port.
+type GatewayHTTPSpec struct {
+	// ChatCompletions serves the runtime's OpenAI-compatible surface
+	// (/v1/chat/completions, /v1/models, /v1/responses) on the gateway
+	// port, authenticated by the gateway token. A request runs the
+	// same governed agent codepath as any other turn — routing,
+	// permissions, and audit match the gateway. Off by default: the
+	// token is an operator-grade credential, so enable this only for
+	// gateways whose namespace RBAC already guards that Secret (for
+	// example, in-namespace pipeline callers).
+	// +optional
+	ChatCompletions bool `json:"chatCompletions,omitempty"`
 }
 
 // HooksSpec declares the gateway's OpenClaw webhook ingress. See
