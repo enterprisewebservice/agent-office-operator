@@ -382,6 +382,14 @@ type desiredOpenAIConfig struct {
 	Profiles map[string]map[string]string `json:"profiles"`
 	Order    map[string][]string          `json:"order"`
 
+	// GatewayHTTP is the operator-owned gateway.http block from
+	// spec.http (nil = the spec declares no HTTP surfaces, and any
+	// stale block in the live file is deleted). The CM template
+	// carries the same block for FRESH gateways; this convergence
+	// is what reaches gateways whose PVC already holds an evolved
+	// openclaw.json the seed-only init will never rewrite.
+	GatewayHTTP map[string]interface{} `json:"gatewayHTTP"`
+
 	// AcceptableOrder lists, per provider, every profile id that would
 	// satisfy the requested mode. When the config already pins one of
 	// these, the script KEEPS it instead of rewriting to our preferred
@@ -484,6 +492,13 @@ func (r *AgentGatewayReconciler) reconcileModelProvidersAndAuth(ctx context.Cont
 		Profiles:        map[string]map[string]string{},
 		Order:           map[string][]string{},
 		AcceptableOrder: map[string][]string{},
+	}
+	if gw.Spec.HTTP != nil && gw.Spec.HTTP.ChatCompletions {
+		desired.GatewayHTTP = map[string]interface{}{
+			"endpoints": map[string]interface{}{
+				"chatCompletions": map[string]interface{}{"enabled": true},
+			},
+		}
 	}
 
 	// Pin the credential. Explicit spec.modelAuth.order wins outright
@@ -610,6 +625,18 @@ for (const [prov, ids] of Object.entries(desired.order || {})) {
 // ignored for provider "openai" — drop it so it can't mislead.
 if (cfg.auth.order["openai-codex"]) {
   delete cfg.auth.order["openai-codex"];
+  changed = true;
+}
+
+// gateway.http is operator-owned: converge to the spec exactly,
+// deleting a stale block when the spec declares none.
+if (desired.gatewayHTTP) {
+  if (!eq(cfg.gateway.http, desired.gatewayHTTP)) {
+    cfg.gateway.http = desired.gatewayHTTP;
+    changed = true;
+  }
+} else if (cfg.gateway.http !== undefined) {
+  delete cfg.gateway.http;
   changed = true;
 }
 
