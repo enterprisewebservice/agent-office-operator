@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
 	agentofficev1alpha1 "github.com/enterprisewebservice/agent-office-operator/api/v1alpha1"
 )
 
@@ -60,11 +62,17 @@ func parsePackageCoordinate(ref string) (name, version string, err error) {
 	return name, version, nil
 }
 
-// resolvePackageRef fetches the SKILL.md body for a registry
-// coordinate, verifying the declared digest when present. The
-// artifact manifest's own content URL is authoritative; when the
-// manifest cannot be read, the conventional content path is tried.
-func resolvePackageRef(ctx context.Context, src *agentofficev1alpha1.PackageRefSource) (string, error) {
+// resolvePackageRef fetches the SKILL.md body for a packageRef,
+// verifying the declared digest when present. Two transports:
+// "name:version" resolves via the HTTP skills registry (the artifact
+// manifest's content URL is authoritative, with a conventional-path
+// fallback); "oci://host/repo:tag" resolves the artifact directly
+// from an OCI registry (config-described, single content layer),
+// authenticating with the namespace pull secret when one is named.
+func resolvePackageRef(ctx context.Context, c client.Client, namespace string, src *agentofficev1alpha1.PackageRefSource) (string, error) {
+	if strings.HasPrefix(strings.TrimSpace(src.Ref), "oci://") {
+		return resolvePackageRefOCI(ctx, c, namespace, src)
+	}
 	name, version, err := parsePackageCoordinate(src.Ref)
 	if err != nil {
 		return "", err
@@ -111,6 +119,50 @@ func resolvePackageRef(ctx context.Context, src *agentofficev1alpha1.PackageRefS
 		return "", fmt.Errorf("packageRef %s: content digest %s does not match pinned digest %s — refusing to deliver", src.Ref, got, wantDigest)
 	}
 
+	packageRefCache.mu.Lock()
+	packageRefCache.m[cacheKey] = packageRefEntry{content: body, fetched: time.Now(), pinned: wantDigest != ""}
+	packageRefCache.mu.Unlock()
+	return body, nil
+}
+
+// resolvePackageRefOCI is the oci:// transport of resolvePackageRef:
+// same digest verification and cache semantics, content fetched from
+// the OCI artifact's layer.
+func resolvePackageRefOCI(ctx context.Context, c client.Client, namespace string, src *agentofficev1alpha1.PackageRefSource) (string, error) {
+	ref, err := parseOCIRef(src.Ref)
+	if err != nil {
+		return "", err
+	}
+	wantDigest := strings.TrimPrefix(strings.TrimSpace(src.Digest), "sha256:")
+	cacheKey := "oci|" + src.Ref + "|" + wantDigest
+
+	packageRefCache.mu.Lock()
+	if e, ok := packageRefCache.m[cacheKey]; ok && (e.pinned || time.Since(e.fetched) < registryTTL) {
+		packageRefCache.mu.Unlock()
+		return e.content, nil
+	}
+	packageRefCache.mu.Unlock()
+
+	basic := ""
+	if src.PullSecretName != "" {
+		if c == nil {
+			return "", fmt.Errorf("packageRef %s: pullSecretName set but no cluster client available", src.Ref)
+		}
+		basic, err = basicFromPullSecret(ctx, c, namespace, src.PullSecretName, ref.host)
+		if err != nil {
+			return "", fmt.Errorf("packageRef %s: %w", src.Ref, err)
+		}
+	}
+	cl := newOCIClient("https://"+ref.host, src.InsecureSkipTLSVerify, basic)
+	body, err := fetchOCISkillContent(ctx, cl, ref)
+	if err != nil {
+		return "", fmt.Errorf("packageRef %s: %w", src.Ref, err)
+	}
+	sum := sha256.Sum256([]byte(body))
+	got := hex.EncodeToString(sum[:])
+	if wantDigest != "" && !strings.EqualFold(got, wantDigest) {
+		return "", fmt.Errorf("packageRef %s: content digest %s does not match pinned digest %s — refusing to deliver", src.Ref, got, wantDigest)
+	}
 	packageRefCache.mu.Lock()
 	packageRefCache.m[cacheKey] = packageRefEntry{content: body, fetched: time.Now(), pinned: wantDigest != ""}
 	packageRefCache.mu.Unlock()

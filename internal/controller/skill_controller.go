@@ -137,7 +137,7 @@ func (r *SkillReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 func (r *SkillReconciler) resolveSkillContent(ctx context.Context, skill *agentofficev1alpha1.Skill) (string, error) {
 	src := skill.Spec.Source
 	if src.PackageRef != nil {
-		return resolvePackageRef(ctx, src.PackageRef)
+		return resolvePackageRef(ctx, r.Client, skill.Namespace, src.PackageRef)
 	}
 	if src.ConfigMapRef != nil {
 		var cm corev1.ConfigMap

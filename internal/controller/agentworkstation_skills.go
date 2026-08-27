@@ -201,7 +201,7 @@ func (r *AgentWorkstationReconciler) listAllCatalogSkills(ctx context.Context, n
 func (r *AgentWorkstationReconciler) resolveSkillContent(ctx context.Context, skill *agentofficev1alpha1.Skill) (string, error) {
 	src := skill.Spec.Source
 	if src.PackageRef != nil {
-		return resolvePackageRef(ctx, src.PackageRef)
+		return resolvePackageRef(ctx, r.Client, skill.Namespace, src.PackageRef)
 	}
 	if src.ConfigMapRef != nil {
 		var cm corev1.ConfigMap

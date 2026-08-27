@@ -57,11 +57,13 @@ type SkillSource struct {
 // federation TTL, so a republished version converges but is not
 // tamper-evident.
 type PackageRefSource struct {
-	// Ref is the artifact coordinate, "name:version"
-	// (e.g. "platform-incident-triage:1.1.0"). A namespaced
-	// coordinate ("agent-office/platform-incident-triage:1.1.0")
-	// is accepted; the registry content path uses only name and
-	// version.
+	// Ref is the artifact reference. Two forms:
+	//   "name:version" — resolved against the HTTP skills registry
+	//   (Registry field or the operator's federation default); a
+	//   namespaced coordinate ("ns/name:version") is accepted.
+	//   "oci://host/repo:tag" — resolved directly from an OCI
+	//   registry (the artifact's config blob and content layer);
+	//   an optional "@sha256:..." suffix pins the manifest digest.
 	Ref string `json:"ref"`
 
 	// Digest is the expected SHA-256 (hex, optionally prefixed
@@ -74,8 +76,23 @@ type PackageRefSource struct {
 	// Registry is the base URL of the skills registry
 	// (e.g. "https://mindifact.ai/v1"). Defaults to the first
 	// entry of the operator's AGENT_REGISTRY_URLS federation.
+	// Ignored when Ref uses the oci:// scheme.
 	// +optional
 	Registry string `json:"registry,omitempty"`
+
+	// PullSecretName names a kubernetes.io/dockerconfigjson Secret
+	// in the Skill's own namespace whose credentials authenticate
+	// the fetch — the imagePullSecrets convention applied to skill
+	// artifacts. Used by oci:// refs against private repositories;
+	// omitted means anonymous.
+	// +optional
+	PullSecretName string `json:"pullSecretName,omitempty"`
+
+	// InsecureSkipTLSVerify disables TLS certificate verification
+	// for this fetch. Only for registries behind self-signed
+	// routes; leave false anywhere real certificates exist.
+	// +optional
+	InsecureSkipTLSVerify bool `json:"insecureSkipTLSVerify,omitempty"`
 }
 
 // SkillInvocation describes how an agent invokes the skill at
