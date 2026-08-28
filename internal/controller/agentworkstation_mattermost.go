@@ -8,9 +8,15 @@ delete. The in-cluster mm-bridge then discovers these users and does the chat
 (receive → drive the openclaw agent → reply as the user), plus presence + the
 "…is typing" indicator.
 
-Opt-in + graceful: enabled only when a `mattermost-admin-token` Secret exists
-in the AgentWorkstation's namespace (key `token`). Absent ⇒ no-op. The
-Mattermost base URL is MM_URL (default: the in-cluster service).
+Opt-in + graceful, two shapes. Preferred: label the CR's NAMESPACE
+`agentoffice.ai/chat-provisioning: "enabled"` and keep ONE
+`mattermost-admin-token` Secret (key `token`) in the OPERATOR's own
+namespace — the admin credential never enters tenant reach (a tenant
+namespace admin could read a namespace-local copy, which is exactly the
+"no platform identity in your workspace" claim the platform makes).
+Legacy: a `mattermost-admin-token` Secret in the CR's namespace still
+works and wins when present. Neither ⇒ no-op. The Mattermost base URL is
+MM_URL (default: the in-cluster service).
 */
 package controller
 
@@ -39,6 +45,10 @@ import (
 const (
 	mmAdminTokenSecret = "mattermost-admin-token"
 	mmTeam             = "agents"
+	// mmProvisionLabel on a NAMESPACE opts its AgentWorkstations into
+	// chat provisioning using the central admin token in the operator's
+	// namespace (value must be "enabled").
+	mmProvisionLabel = "agentoffice.ai/chat-provisioning"
 )
 
 var mmHTTP = &http.Client{
@@ -86,14 +96,48 @@ func mmDisplay(s string) string {
 	return strings.TrimRight(string(r[:64]), " ")
 }
 
-// mmAdminToken returns the Mattermost admin PAT from a Secret in ns, or ""
+// mmAdminToken returns the Mattermost admin PAT for CRs in ns, or ""
 // (⇒ Mattermost integration disabled — skip silently).
+//
+// Resolution order:
+//  1. Secret `mattermost-admin-token` in the CR's namespace (legacy
+//     per-namespace opt-in; wins when present so existing installs keep
+//     their behavior).
+//  2. If the CR's Namespace carries mmProvisionLabel="enabled": the same
+//     Secret read from the OPERATOR's namespace — the tenant namespace
+//     holds no admin credential at all.
 func (r *AgentWorkstationReconciler) mmAdminToken(ctx context.Context, ns string) string {
 	var s corev1.Secret
-	if err := r.Get(ctx, types.NamespacedName{Namespace: ns, Name: mmAdminTokenSecret}, &s); err != nil {
+	if err := r.Get(ctx, types.NamespacedName{Namespace: ns, Name: mmAdminTokenSecret}, &s); err == nil {
+		return string(s.Data["token"])
+	}
+	var nsObj corev1.Namespace
+	if err := r.Get(ctx, types.NamespacedName{Name: ns}, &nsObj); err != nil {
 		return ""
 	}
-	return string(s.Data["token"])
+	if nsObj.Labels[mmProvisionLabel] != "enabled" {
+		return ""
+	}
+	var central corev1.Secret
+	if err := r.Get(ctx, types.NamespacedName{Namespace: controllerNamespace(), Name: mmAdminTokenSecret}, &central); err != nil {
+		return ""
+	}
+	return string(central.Data["token"])
+}
+
+// controllerNamespace is where this operator pod runs. Mirrors
+// operatorNamespace() in cmd/cachescope.go (package boundary keeps them
+// separate); the operator's own namespace is always in the cache scope.
+func controllerNamespace() string {
+	if ns := strings.TrimSpace(os.Getenv("POD_NAMESPACE")); ns != "" {
+		return ns
+	}
+	if b, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); err == nil {
+		if ns := strings.TrimSpace(string(b)); ns != "" {
+			return ns
+		}
+	}
+	return "agent-office-operator"
 }
 
 // mmAPI calls the Mattermost REST API with the admin token. Returns the HTTP
