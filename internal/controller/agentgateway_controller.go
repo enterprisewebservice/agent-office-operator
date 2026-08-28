@@ -390,6 +390,18 @@ type desiredOpenAIConfig struct {
 	// openclaw.json the seed-only init will never rewrite.
 	GatewayHTTP map[string]interface{} `json:"gatewayHTTP"`
 
+	// ProfileMode is the auth mode ("oauth" or "api_key") the current
+	// spec routes through. The script uses it to extend stickiness to
+	// pins whose profile entry the operator itself wrote earlier: a
+	// FRESHLY RESTARTED pod's `models auth list` can transiently omit
+	// profiles the codex-auth-sync sidecar has not re-seeded yet, and
+	// without this the shrunken acceptable set forced an order rewrite
+	// -> restart -> another young pod -> the same race again. Observed
+	// live 2026-08-27: three pod-killing "model auth config changed"
+	// restarts across two seat gateways in 15 minutes, none of them
+	// from a real spec change.
+	ProfileMode string `json:"profileMode"`
+
 	// AcceptableOrder lists, per provider, every profile id that would
 	// satisfy the requested mode. When the config already pins one of
 	// these, the script KEEPS it instead of rewriting to our preferred
@@ -492,6 +504,10 @@ func (r *AgentGatewayReconciler) reconcileModelProvidersAndAuth(ctx context.Cont
 		Profiles:        map[string]map[string]string{},
 		Order:           map[string][]string{},
 		AcceptableOrder: map[string][]string{},
+		ProfileMode:     "oauth",
+	}
+	if mode == agentofficev1alpha1.ModelAuthModeAPIKey {
+		desired.ProfileMode = "api_key"
 	}
 	if gw.Spec.HTTP != nil && gw.Spec.HTTP.ChatCompletions {
 		desired.GatewayHTTP = map[string]interface{}{
@@ -610,10 +626,22 @@ for (const [prov, ids] of Object.entries(desired.order || {})) {
   // satisfy the requested mode, keep them. Rewriting to an equally
   // valid alternative would change the config, which restarts the
   // gateway — on every reconcile, forever.
+  //
+  // An id counts as still-valid when EITHER (a) this pass's discovery
+  // listed it, or (b) the config's own auth.profiles carries it with
+  // the mode the spec routes through — an entry this convergence wrote
+  // on an earlier pass. (b) is what survives the young-pod race: right
+  // after a restart, "models auth list" can transiently omit profiles
+  // the auth-sync sidecar has not re-seeded yet, and trusting that
+  // shrunken listing rewrote the pin and restarted the pod, re-running
+  // the same race on the next boot.
   const acceptable = (desired.acceptableOrder || {})[prov] || [];
+  const wantMode = desired.profileMode || "oauth";
+  const stillValid = (id) => acceptable.includes(id) ||
+    (cfg.auth.profiles[id] && cfg.auth.profiles[id].mode === wantMode);
   const current = cfg.auth.order[prov];
   if (acceptable.length && Array.isArray(current) && current.length &&
-      current.every((id) => acceptable.includes(id))) {
+      current.every(stillValid)) {
     continue;
   }
   if (!eq(current, ids)) {
