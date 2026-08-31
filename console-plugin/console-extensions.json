@@ -50,10 +50,10 @@
   {
     "type": "console.navigation/href",
     "properties": {
-      "id": "agent-office-maas-grants",
+      "id": "agent-office-model-catalog",
       "section": "agent-office",
-      "name": "MaaS Grants",
-      "href": "/agent-office/maas-grants",
+      "name": "Model Catalog",
+      "href": "/agent-office/model-catalog",
       "perspective": "admin"
     }
   },
@@ -169,9 +169,9 @@
     "type": "console.page/route",
     "properties": {
       "exact": true,
-      "path": "/agent-office/maas-grants",
+      "path": "/agent-office/model-catalog",
       "component": {
-        "$codeRef": "MaaSGrantsPage.default"
+        "$codeRef": "ModelCatalogPage.default"
       }
     }
   },
@@ -179,8 +179,8 @@
     "type": "console.tab/horizontalNav",
     "properties": {
       "page": {
-        "name": "MaaS Grants",
-        "href": "maas-grants"
+        "name": "Model Catalog",
+        "href": "model-catalog"
       },
       "model": {
         "group": "operators.coreos.com",
@@ -188,7 +188,7 @@
         "kind": "ClusterServiceVersion"
       },
       "component": {
-        "$codeRef": "MaaSGrantsPage.default"
+        "$codeRef": "ModelCatalogPage.default"
       }
     }
   }
