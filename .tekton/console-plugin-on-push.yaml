@@ -21,7 +21,7 @@ spec:
     - name: revision
       value: '{{revision}}'
     - name: output-image
-      value: 'quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-plugin:v0.0.2'
+      value: 'quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-plugin:v0.0.3'
     - name: dockerfile
       value: console-plugin/Dockerfile
     - name: path-context

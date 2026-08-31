@@ -38,6 +38,16 @@
     }
   },
   {
+    "type": "console.navigation/href",
+    "properties": {
+      "id": "agent-office-model-connections",
+      "section": "agent-office",
+      "name": "Model Connections",
+      "href": "/agent-office/model-connections",
+      "perspective": "admin"
+    }
+  },
+  {
     "type": "console.page/route",
     "properties": {
       "exact": true,
@@ -59,6 +69,14 @@
       "exact": true,
       "path": "/agent-office/agent-gateways",
       "component": { "$codeRef": "AgentGatewaysPage.default" }
+    }
+  },
+  {
+    "type": "console.page/route",
+    "properties": {
+      "exact": true,
+      "path": "/agent-office/model-connections",
+      "component": { "$codeRef": "ModelConnectionsPage.default" }
     }
   },
   {
@@ -104,6 +122,21 @@
         "kind": "ClusterServiceVersion"
       },
       "component": { "$codeRef": "AgentGatewaysPage.default" }
+    }
+  },
+  {
+    "type": "console.tab/horizontalNav",
+    "properties": {
+      "page": {
+        "name": "Model Connections",
+        "href": "model-connections"
+      },
+      "model": {
+        "group": "operators.coreos.com",
+        "version": "v1alpha1",
+        "kind": "ClusterServiceVersion"
+      },
+      "component": { "$codeRef": "ModelConnectionsPage.default" }
     }
   }
 ]
