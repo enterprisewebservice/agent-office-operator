@@ -164,6 +164,12 @@ func (h *CatalogSkillsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		h.install(w, r)
 		return
 	}
+	// v1.7.59: the hiring UI's brain menu (GET only; falls through to
+	// the method guard below).
+	if len(parts) == 2 && parts[0] == "catalog" && parts[1] == "model-connections" && r.Method == http.MethodGet {
+		h.listModelConnections(w, r)
+		return
+	}
 	if r.Method != http.MethodGet {
 		writeCatalogJSONError(w, http.StatusMethodNotAllowed,
 			fmt.Errorf("only GET is supported"))
