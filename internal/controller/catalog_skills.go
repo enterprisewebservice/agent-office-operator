@@ -170,6 +170,12 @@ func (h *CatalogSkillsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		h.listModelConnections(w, r)
 		return
 	}
+	// v1.7.60: ask an OpenAI-compatible endpoint what it serves, so
+	// the admin console offers model checkboxes instead of free text.
+	if len(parts) == 3 && parts[0] == "catalog" && parts[1] == "model-connections" && parts[2] == "probe" {
+		h.probeModelEndpoint(w, r)
+		return
+	}
 	if r.Method != http.MethodGet {
 		writeCatalogJSONError(w, http.StatusMethodNotAllowed,
 			fmt.Errorf("only GET is supported"))

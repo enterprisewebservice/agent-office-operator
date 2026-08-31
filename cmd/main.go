@@ -388,6 +388,9 @@ func main() {
 		// brain menu (admin-published ModelConnections, non-secret
 		// metadata + access groups). See catalog_modelconnections.go.
 		mux.Handle("/catalog/model-connections", catalogSkills)
+		// v1.7.60: POST /catalog/model-connections/probe — list an
+		// OpenAI-compatible endpoint's models for the admin console.
+		mux.Handle("/catalog/model-connections/", catalogSkills)
 		mux.HandleFunc("/healthz/backstage", func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte("ok"))
 		})
