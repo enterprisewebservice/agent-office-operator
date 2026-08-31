@@ -1,6 +1,6 @@
 {
   "name": "agent-office-plugin",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "private": true,
   "description": "OpenShift Console dynamic plugin for the Governed Agent Platform \u2014 adds Memory Modules and Agent Workstations pages with custom UI.",
   "scripts": {
@@ -34,7 +34,7 @@
   },
   "consolePlugin": {
     "name": "agent-office-plugin",
-    "version": "0.0.3",
+    "version": "0.0.4",
     "displayName": "Agent Office Plugin",
     "description": "Agents grouped into teams, with live phase and activity, plus Agent Gateways and admin-published Model Connections.",
     "exposedModules": {

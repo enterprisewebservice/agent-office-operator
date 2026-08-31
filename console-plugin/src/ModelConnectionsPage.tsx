@@ -2,6 +2,7 @@ import * as React from 'react';
 import {
   K8sModel,
   K8sResourceCommon,
+  consoleFetch,
   k8sCreate,
   k8sDelete,
   k8sGet,
@@ -18,33 +19,47 @@ import { Button } from '@patternfly/react-core/dist/dynamic/components/Button';
 import { Modal, ModalVariant } from '@patternfly/react-core/dist/dynamic/components/Modal';
 import { Form, FormGroup, FormHelperText } from '@patternfly/react-core/dist/dynamic/components/Form';
 import { TextInput } from '@patternfly/react-core/dist/dynamic/components/TextInput';
-import { TextArea } from '@patternfly/react-core/dist/dynamic/components/TextArea';
 import { FormSelect, FormSelectOption } from '@patternfly/react-core/dist/dynamic/components/FormSelect';
 import { Radio } from '@patternfly/react-core/dist/dynamic/components/Radio';
 import { Checkbox } from '@patternfly/react-core/dist/dynamic/components/Checkbox';
 import { Alert } from '@patternfly/react-core/dist/dynamic/components/Alert';
 import { HelperText, HelperTextItem } from '@patternfly/react-core/dist/dynamic/components/HelperText';
+import {
+  Select,
+  SelectOption,
+  SelectVariant,
+} from '@patternfly/react-core/dist/dynamic/deprecated/components/Select';
 import { Bullseye } from '@patternfly/react-core/dist/dynamic/layouts/Bullseye';
 import { Flex, FlexItem } from '@patternfly/react-core/dist/dynamic/layouts/Flex';
 import { Gallery } from '@patternfly/react-core/dist/dynamic/layouts/Gallery';
 import PlusCircleIcon from '@patternfly/react-icons/dist/dynamic/icons/plus-circle-icon';
 import TrashIcon from '@patternfly/react-icons/dist/dynamic/icons/trash-icon';
 import PencilAltIcon from '@patternfly/react-icons/dist/dynamic/icons/pencil-alt-icon';
+import TimesIcon from '@patternfly/react-icons/dist/dynamic/icons/times-icon';
+import SearchIcon from '@patternfly/react-icons/dist/dynamic/icons/search-icon';
 
 /*
  * Model Connections — the admin side of "publish brains, don't hand
- * out keys". Full lifecycle in one page:
+ * out keys".
  *
- *   - publish (create) a connection with a friendly form,
- *   - the API key goes straight into a Secret in agent-office
- *     (write-only here — it is never read back or displayed),
- *   - visibility is groups/users the hiring UI filters on,
- *   - edit rotates the key only when a new one is typed,
- *   - delete unpublishes and (optionally) removes the key Secret.
+ * Design rule: nothing is free-typed when the platform can offer the
+ * real values —
+ *   - groups/users: multi-selects fed by the cluster's Groups/Users
+ *     UNION whatever existing connections already grant (that union
+ *     is what covers identities that live only in the SSO provider,
+ *     e.g. Developer Hub's `attendees`), with a guarded "add" for a
+ *     new SSO-only name;
+ *   - models: fetched from the endpoint's own /v1/models (via the
+ *     operator's probe) and offered as checkboxes; subscription
+ *     routes get one-click chips for the platform's known models;
+ *   - endpoint URL: a picker over discovered in-cluster serving
+ *     endpoints (KServe InferenceServices + URLs already published),
+ *     with Custom as the deliberate escape hatch;
+ *   - API dialect / key strategy / kind: fixed vocabularies, so
+ *     selects and radios.
  *
- * Everything runs with the console user's own credentials — someone
- * without RBAC on ModelConnections/Secrets gets the API's 403, not a
- * silent success.
+ * The API key stays write-only: typed once, stored as a Secret in
+ * agent-office, never read back or displayed.
  */
 
 type ModelEntry = { id: string; name?: string };
@@ -64,9 +79,22 @@ type ModelConnection = K8sResourceCommon & {
   };
 };
 
-type SecretLite = K8sResourceCommon;
+type Named = K8sResourceCommon;
+type InferenceService = K8sResourceCommon & { status?: { url?: string } };
 
 const ADMIN_NS = 'agent-office';
+const PROBE_URL =
+  '/api/proxy/plugin/agent-office-plugin/catalog/catalog/model-connections/probe';
+
+// The subscription-side model catalog the platform ships today.
+const KNOWN_SUBSCRIPTION_MODELS: ModelEntry[] = [
+  { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol' },
+  { id: 'gpt-5.6', name: 'GPT-5.6' },
+  { id: 'gpt-5.5', name: 'GPT-5.5' },
+  { id: 'gpt-5.4', name: 'GPT-5.4' },
+];
+
+const API_DIALECTS = ['openai-completions', 'openai-chatgpt-responses'];
 
 const ModelConnectionModel = {
   apiGroup: 'agentoffice.ai',
@@ -108,11 +136,47 @@ const slugify = (s: string) =>
     .replace(/^-+|-+$/g, '')
     .slice(0, 63);
 
-const splitList = (s: string) =>
-  s
-    .split(/[\s,]+/)
-    .map((x) => x.trim())
-    .filter(Boolean);
+/** Checkbox multi-select over a known vocabulary, with a guarded
+ *  "add another" for names that only exist in the SSO provider. */
+const MultiPicker: React.FC<{
+  id: string;
+  options: string[];
+  value: string[];
+  onChange: (next: string[]) => void;
+  placeholder: string;
+  addHint: string;
+}> = ({ id, options, value, onChange, placeholder, addHint }) => {
+  const [open, setOpen] = React.useState(false);
+  const all = React.useMemo(
+    () => Array.from(new Set([...options, ...value])).sort(),
+    [options, value],
+  );
+  return (
+    <Select
+      id={id}
+      variant={SelectVariant.checkbox}
+      isOpen={open}
+      onToggle={(_e: unknown, o: boolean) => setOpen(o)}
+      selections={value}
+      onSelect={(_e: unknown, sel: unknown) => {
+        const s = String(sel);
+        onChange(value.includes(s) ? value.filter((v) => v !== s) : [...value, s]);
+      }}
+      placeholderText={placeholder}
+      isCreatable
+      createText={addHint}
+      onCreateOption={(newVal: string) => {
+        const s = newVal.trim();
+        if (s && !value.includes(s)) onChange([...value, s]);
+      }}
+      maxHeight={260}
+    >
+      {all.map((o) => (
+        <SelectOption key={o} value={o} />
+      ))}
+    </Select>
+  );
+};
 
 interface FormState {
   name: string;
@@ -122,10 +186,11 @@ interface FormState {
   kind: 'endpoint' | 'subscription' | 'apiKey';
   provider: string;
   baseUrl: string;
+  baseUrlCustom: boolean;
   api: string;
-  modelsText: string; // one per line: "id | label"
-  groupsText: string;
-  usersText: string;
+  models: ModelEntry[];
+  groups: string[];
+  users: string[];
   keyStrategy: string;
   apiKeyInput: string; // write-only
 }
@@ -138,10 +203,11 @@ const emptyForm = (): FormState => ({
   kind: 'endpoint',
   provider: 'openai-codex',
   baseUrl: '',
+  baseUrlCustom: false,
   api: 'openai-completions',
-  modelsText: '',
-  groupsText: '',
-  usersText: '',
+  models: [],
+  groups: [],
+  users: [],
   keyStrategy: 'shared',
   apiKeyInput: '',
 });
@@ -154,43 +220,68 @@ const formFrom = (c: ModelConnection): FormState => ({
   kind: (c.spec?.kind as FormState['kind']) ?? 'endpoint',
   provider: c.spec?.provider ?? 'openai-codex',
   baseUrl: c.spec?.baseUrl ?? '',
+  baseUrlCustom: false,
   api: c.spec?.api ?? 'openai-completions',
-  modelsText: (c.spec?.models ?? [])
-    .map((m) => (m.name && m.name !== m.id ? `${m.id} | ${m.name}` : m.id))
-    .join('\n'),
-  groupsText: (c.spec?.access?.groups ?? []).join(', '),
-  usersText: (c.spec?.access?.users ?? []).join(', '),
+  models: c.spec?.models ?? [],
+  groups: c.spec?.access?.groups ?? [],
+  users: c.spec?.access?.users ?? [],
   keyStrategy: c.spec?.keyStrategy ?? 'shared',
   apiKeyInput: '',
 });
-
-const parseModels = (text: string): ModelEntry[] =>
-  text
-    .split('\n')
-    .map((l) => l.trim())
-    .filter(Boolean)
-    .map((l) => {
-      const [id, ...rest] = l.split('|');
-      const name = rest.join('|').trim();
-      return name ? { id: id.trim(), name } : { id: id.trim() };
-    });
 
 const ModelConnectionsPage: React.FC = () => {
   const [conns, loaded, loadError] = useK8sWatchResource<ModelConnection[]>({
     groupVersionKind: { group: 'agentoffice.ai', version: 'v1alpha1', kind: 'ModelConnection' },
     isList: true,
   });
-  // Key-Secret presence, so an endpoint connection whose Secret is
-  // missing shows it loudly instead of failing agents quietly.
-  const [secrets] = useK8sWatchResource<SecretLite[]>({
+  const [secrets] = useK8sWatchResource<Named[]>({
     groupVersionKind: { version: 'v1', kind: 'Secret' },
     namespace: ADMIN_NS,
     isList: true,
   });
+  const [clusterGroups] = useK8sWatchResource<Named[]>({
+    groupVersionKind: { group: 'user.openshift.io', version: 'v1', kind: 'Group' },
+    isList: true,
+  });
+  const [clusterUsers] = useK8sWatchResource<Named[]>({
+    groupVersionKind: { group: 'user.openshift.io', version: 'v1', kind: 'User' },
+    isList: true,
+  });
+  // Discovered in-cluster model servers (tolerate the CRD being absent).
+  const [inferenceServices] = useK8sWatchResource<InferenceService[]>({
+    groupVersionKind: { group: 'serving.kserve.io', version: 'v1beta1', kind: 'InferenceService' },
+    isList: true,
+  });
+
   const secretNames = React.useMemo(
     () => new Set((secrets ?? []).map((s) => s.metadata?.name)),
     [secrets],
   );
+
+  // Vocabularies = live cluster objects ∪ names existing connections
+  // already use (covers SSO-only identities like `attendees`).
+  const groupOptions = React.useMemo(() => {
+    const s = new Set<string>((clusterGroups ?? []).map((g) => g.metadata?.name || ''));
+    (conns ?? []).forEach((c) => (c.spec?.access?.groups ?? []).forEach((g) => s.add(g)));
+    s.delete('');
+    return Array.from(s).sort();
+  }, [clusterGroups, conns]);
+  const userOptions = React.useMemo(() => {
+    const s = new Set<string>((clusterUsers ?? []).map((u) => u.metadata?.name || ''));
+    (conns ?? []).forEach((c) => (c.spec?.access?.users ?? []).forEach((u) => s.add(u)));
+    s.delete('');
+    return Array.from(s).sort();
+  }, [clusterUsers, conns]);
+  const endpointOptions = React.useMemo(() => {
+    const s = new Set<string>();
+    (inferenceServices ?? []).forEach((i) => {
+      if (i.status?.url) s.add(`${i.status.url.replace(/\/$/, '')}/v1`);
+    });
+    (conns ?? []).forEach((c) => {
+      if (c.spec?.kind === 'endpoint' && c.spec?.baseUrl) s.add(c.spec.baseUrl);
+    });
+    return Array.from(s).sort();
+  }, [inferenceServices, conns]);
 
   const [editing, setEditing] = React.useState<ModelConnection | 'new' | null>(null);
   const [form, setForm] = React.useState<FormState>(emptyForm());
@@ -199,24 +290,32 @@ const ModelConnectionsPage: React.FC = () => {
   const [deleting, setDeleting] = React.useState<ModelConnection | null>(null);
   const [deleteSecretToo, setDeleteSecretToo] = React.useState(true);
 
+  // Endpoint model discovery.
+  const [probing, setProbing] = React.useState(false);
+  const [probeError, setProbeError] = React.useState<string | undefined>();
+  const [probed, setProbed] = React.useState<string[] | undefined>();
+
   const patch = (p: Partial<FormState>) => setForm((f) => ({ ...f, ...p }));
 
   const openCreate = () => {
     setForm(emptyForm());
     setFormError(undefined);
+    setProbed(undefined);
+    setProbeError(undefined);
     setEditing('new');
   };
   const openEdit = (c: ModelConnection) => {
     setForm(formFrom(c));
     setFormError(undefined);
+    setProbed(undefined);
+    setProbeError(undefined);
     setEditing(c);
   };
 
   const effectiveName = form.nameTouched || form.name ? form.name : slugify(form.displayName);
 
-  // Where the key lives. On edit, respect whatever ref the connection
-  // already carries (model-desk uses model-desk-agent-key); only fresh
-  // connections get the managed `<name>-key` convention.
+  // Where the key lives: respect an existing connection's own ref;
+  // only fresh connections get the managed `<name>-key` convention.
   const keyRef = (): { name: string; namespace: string; key: string } => {
     const existing = editing !== 'new' && editing ? editing.spec?.apiKeySecretRef : undefined;
     if (existing?.name) {
@@ -229,20 +328,65 @@ const ModelConnectionsPage: React.FC = () => {
     return { name: `${effectiveName}-key`, namespace: ADMIN_NS, key: 'api-key' };
   };
 
+  const fetchModels = async () => {
+    setProbing(true);
+    setProbeError(undefined);
+    try {
+      const body: Record<string, unknown> = { baseUrl: form.baseUrl.trim() };
+      if (form.apiKeyInput) body.apiKey = form.apiKeyInput;
+      else {
+        const ref = keyRef();
+        if (secretNames.has(ref.name)) body.secretRef = ref;
+      }
+      const res = await consoleFetch(PROBE_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+      const ids: string[] = (data.models ?? []).map((m: ModelEntry) => m.id);
+      setProbed(ids);
+      if (ids.length === 0) setProbeError('The endpoint answered but lists no models.');
+    } catch (e) {
+      setProbed(undefined);
+      setProbeError((e as Error).message);
+    } finally {
+      setProbing(false);
+    }
+  };
+
+  const toggleModel = (id: string) => {
+    setForm((f) => ({
+      ...f,
+      models: f.models.some((m) => m.id === id)
+        ? f.models.filter((m) => m.id !== id)
+        : [...f.models, { id }],
+    }));
+  };
+  const setModelLabel = (id: string, name: string) => {
+    setForm((f) => ({
+      ...f,
+      models: f.models.map((m) => (m.id === id ? { ...m, name: name || undefined } : m)),
+    }));
+  };
+
   const validate = (): string | undefined => {
     if (!form.displayName.trim()) return 'Display name is required.';
     if (!effectiveName || !/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(effectiveName))
       return 'Name must be lowercase letters, digits and dashes.';
     if (form.kind === 'endpoint') {
       if (!/^https?:\/\//.test(form.baseUrl.trim()))
-        return 'Endpoint connections need a http(s) base URL.';
-      if (parseModels(form.modelsText).length === 0)
-        return 'List at least one model (one per line, `id | label`).';
+        return 'Pick or enter an http(s) endpoint URL.';
       const ref = keyRef();
       if (editing === 'new' && !form.apiKeyInput && !secretNames.has(ref.name))
         return `Enter an API key, or create Secret ${ADMIN_NS}/${ref.name} first.`;
     }
-    if (!splitList(form.groupsText).length && !splitList(form.usersText).length)
+    if (form.models.length === 0)
+      return form.kind === 'endpoint'
+        ? 'Fetch the endpoint’s models and check at least one.'
+        : 'Add at least one model.';
+    if (form.groups.length === 0 && form.users.length === 0)
       return 'Grant access to at least one group or user, or nobody will see it.';
     return undefined;
   };
@@ -257,9 +401,6 @@ const ModelConnectionsPage: React.FC = () => {
     setFormError(undefined);
     try {
       const ref = keyRef();
-      // 1. Key first (endpoint kind, only when a new key was typed) —
-      //    never store a connection that points at a key we failed to
-      //    write.
       if (form.kind === 'endpoint' && form.apiKeyInput) {
         let existing: any;
         try {
@@ -284,7 +425,6 @@ const ModelConnectionsPage: React.FC = () => {
         }
       }
 
-      // 2. The connection itself.
       const spec: ModelConnection['spec'] = {
         displayName: form.displayName.trim(),
         ...(form.description.trim() ? { description: form.description.trim() } : {}),
@@ -293,15 +433,15 @@ const ModelConnectionsPage: React.FC = () => {
         ...(form.kind === 'endpoint'
           ? {
               baseUrl: form.baseUrl.trim(),
-              api: form.api.trim() || 'openai-completions',
+              api: form.api,
               apiKeySecretRef: ref,
             }
           : {}),
-        models: parseModels(form.modelsText),
+        models: form.models,
         keyStrategy: form.keyStrategy,
         access: {
-          ...(splitList(form.groupsText).length ? { groups: splitList(form.groupsText) } : {}),
-          ...(splitList(form.usersText).length ? { users: splitList(form.usersText) } : {}),
+          ...(form.groups.length ? { groups: form.groups } : {}),
+          ...(form.users.length ? { users: form.users } : {}),
         },
       };
 
@@ -357,6 +497,10 @@ const ModelConnectionsPage: React.FC = () => {
       setBusy(false);
     }
   };
+
+  const canProbe =
+    /^https?:\/\//.test(form.baseUrl.trim()) &&
+    (!!form.apiKeyInput || secretNames.has(keyRef().name));
 
   return (
     <>
@@ -517,7 +661,7 @@ const ModelConnectionsPage: React.FC = () => {
                 id={`kind-${k}`}
                 name="kind"
                 isChecked={form.kind === k}
-                onChange={() => patch({ kind: k })}
+                onChange={() => patch({ kind: k, models: [] })}
                 isDisabled={editing !== 'new'}
                 label={
                   k === 'endpoint'
@@ -568,15 +712,44 @@ const ModelConnectionsPage: React.FC = () => {
           )}
           {form.kind === 'endpoint' && (
             <>
-              <FormGroup label="Base URL" isRequired>
-                <TextInput
-                  value={form.baseUrl}
-                  onChange={(_e, v) => patch({ baseUrl: v })}
-                  placeholder="http://model-desk.model-desk.svc.cluster.local:4000/v1"
-                />
+              <FormGroup label="Endpoint" isRequired>
+                <FormSelect
+                  value={form.baseUrlCustom || !endpointOptions.includes(form.baseUrl) && form.baseUrl ? '__custom__' : form.baseUrl}
+                  onChange={(_e, v) =>
+                    v === '__custom__'
+                      ? patch({ baseUrlCustom: true })
+                      : patch({ baseUrl: v, baseUrlCustom: false })
+                  }
+                >
+                  <FormSelectOption value="" label="Pick a discovered endpoint…" isDisabled />
+                  {endpointOptions.map((u) => (
+                    <FormSelectOption key={u} value={u} label={u} />
+                  ))}
+                  <FormSelectOption value="__custom__" label="Custom URL…" />
+                </FormSelect>
+                {(form.baseUrlCustom || (!!form.baseUrl && !endpointOptions.includes(form.baseUrl))) && (
+                  <TextInput
+                    style={{ marginTop: 8 }}
+                    value={form.baseUrl}
+                    onChange={(_e, v) => patch({ baseUrl: v })}
+                    placeholder="http://model-desk.model-desk.svc.cluster.local:4000/v1"
+                  />
+                )}
+                <FormHelperText>
+                  <HelperText>
+                    <HelperTextItem>
+                      Discovered from in-cluster model servers and already-published
+                      connections. Custom is the escape hatch.
+                    </HelperTextItem>
+                  </HelperText>
+                </FormHelperText>
               </FormGroup>
               <FormGroup label="API dialect">
-                <TextInput value={form.api} onChange={(_e, v) => patch({ api: v })} />
+                <FormSelect value={form.api} onChange={(_e, v) => patch({ api: v })}>
+                  {API_DIALECTS.map((d) => (
+                    <FormSelectOption key={d} value={d} label={d} />
+                  ))}
+                </FormSelect>
               </FormGroup>
               <FormGroup label="API key">
                 <TextInput
@@ -600,39 +773,132 @@ const ModelConnectionsPage: React.FC = () => {
               </FormGroup>
             </>
           )}
-          <FormGroup label="Models" isRequired={form.kind === 'endpoint'}>
-            <TextArea
-              value={form.modelsText}
-              onChange={(_e, v) => patch({ modelsText: v })}
-              rows={3}
-              placeholder={'gpt-4o-mini | GPT-4o mini\ngranite-3-3-8b | Granite 8B (sovereign)'}
-            />
-            <FormHelperText>
-              <HelperText>
-                <HelperTextItem>
-                  One per line: <code>id | label</code>. The first is the default.
-                </HelperTextItem>
-              </HelperText>
-            </FormHelperText>
+          <FormGroup label="Models" isRequired>
+            {form.kind === 'endpoint' && (
+              <>
+                <Button
+                  variant="secondary"
+                  icon={probing ? <Spinner size="sm" /> : <SearchIcon />}
+                  isDisabled={!canProbe || probing}
+                  onClick={fetchModels}
+                >
+                  Fetch models from the endpoint
+                </Button>
+                {!canProbe && (
+                  <FormHelperText>
+                    <HelperText>
+                      <HelperTextItem>
+                        Needs the endpoint URL and a key (typed above, or already stored).
+                      </HelperTextItem>
+                    </HelperText>
+                  </FormHelperText>
+                )}
+                {probeError && (
+                  <Alert variant="warning" isInline title={probeError} style={{ marginTop: 8 }} />
+                )}
+                {probed && probed.length > 0 && (
+                  <div
+                    style={{
+                      marginTop: 8,
+                      maxHeight: 180,
+                      overflowY: 'auto',
+                      border: '1px solid var(--pf-v5-global--BorderColor--100)',
+                      borderRadius: 4,
+                      padding: 8,
+                    }}
+                  >
+                    {probed.map((id) => (
+                      <Checkbox
+                        key={id}
+                        id={`probed-${id}`}
+                        label={id}
+                        isChecked={form.models.some((m) => m.id === id)}
+                        onChange={() => toggleModel(id)}
+                      />
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
+            {form.kind !== 'endpoint' && (
+              <div>
+                {KNOWN_SUBSCRIPTION_MODELS.map((m) => (
+                  <Checkbox
+                    key={m.id}
+                    id={`known-${m.id}`}
+                    label={`${m.name} (${m.id})`}
+                    isChecked={form.models.some((x) => x.id === m.id)}
+                    onChange={() =>
+                      setForm((f) => ({
+                        ...f,
+                        models: f.models.some((x) => x.id === m.id)
+                          ? f.models.filter((x) => x.id !== m.id)
+                          : [...f.models, m],
+                      }))
+                    }
+                  />
+                ))}
+              </div>
+            )}
+            {form.models.length > 0 && (
+              <div style={{ marginTop: 12 }}>
+                <HelperText>
+                  <HelperTextItem>
+                    Offered on the picker (first is the default). Labels are optional.
+                  </HelperTextItem>
+                </HelperText>
+                {form.models.map((m) => (
+                  <Flex key={m.id} style={{ marginTop: 6 }} alignItems={{ default: 'alignItemsCenter' }}>
+                    <FlexItem style={{ minWidth: 180 }}>
+                      <code>{m.id}</code>
+                    </FlexItem>
+                    <FlexItem>
+                      <TextInput
+                        aria-label={`label for ${m.id}`}
+                        value={m.name ?? ''}
+                        onChange={(_e, v) => setModelLabel(m.id, v)}
+                        placeholder="Friendly label (optional)"
+                      />
+                    </FlexItem>
+                    <FlexItem>
+                      <Button
+                        variant="plain"
+                        aria-label={`remove ${m.id}`}
+                        onClick={() => toggleModel(m.id)}
+                      >
+                        <TimesIcon />
+                      </Button>
+                    </FlexItem>
+                  </Flex>
+                ))}
+              </div>
+            )}
           </FormGroup>
           <FormGroup label="Visible to groups">
-            <TextInput
-              value={form.groupsText}
-              onChange={(_e, v) => patch({ groupsText: v })}
-              placeholder="attendees, developers"
+            <MultiPicker
+              id="groups-picker"
+              options={groupOptions}
+              value={form.groups}
+              onChange={(groups) => patch({ groups })}
+              placeholder="Pick groups…"
+              addHint="Add SSO-only group"
             />
           </FormGroup>
           <FormGroup label="Visible to users">
-            <TextInput
-              value={form.usersText}
-              onChange={(_e, v) => patch({ usersText: v })}
-              placeholder="deanpeterson"
+            <MultiPicker
+              id="users-picker"
+              options={userOptions}
+              value={form.users}
+              onChange={(users) => patch({ users })}
+              placeholder="Pick users…"
+              addHint="Add SSO-only user"
             />
             <FormHelperText>
               <HelperText>
                 <HelperTextItem>
                   Matched against the Developer Hub sign-in (group memberships and
-                  username). Leave both empty and nobody sees it.
+                  username). Names already granted on other connections appear in
+                  the lists even when they only exist in SSO.
                 </HelperTextItem>
               </HelperText>
             </FormHelperText>
