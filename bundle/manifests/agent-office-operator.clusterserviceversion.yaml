@@ -44,12 +44,44 @@ metadata:
             "name": "memorymodule-sample"
           },
           "spec": null
+        },
+        {
+          "apiVersion": "agentoffice.ai/v1alpha1",
+          "kind": "ModelConnection",
+          "metadata": {
+            "name": "model-desk"
+          },
+          "spec": {
+            "access": {
+              "groups": [
+                "attendees",
+                "developers"
+              ]
+            },
+            "api": "openai-completions",
+            "apiKeySecretRef": {
+              "key": "api-key",
+              "name": "model-desk-agent-key",
+              "namespace": "agent-office"
+            },
+            "baseUrl": "http://model-desk.model-desk.svc.cluster.local:4000/v1",
+            "description": "Metered OpenAI-compatible front door; per-seat budgets",
+            "displayName": "Models-as-a-Service",
+            "keyStrategy": "shared",
+            "kind": "endpoint",
+            "models": [
+              {
+                "id": "gpt-4o-mini",
+                "name": "GPT-4o mini"
+              }
+            ]
+          }
         }
       ]
     capabilities: Basic Install
     categories: AI/Machine Learning, Developer Tools
     containerImage: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-operator:v0.0.1
-    createdAt: "2026-08-28T03:20:49Z"
+    createdAt: "2026-08-31T05:29:29Z"
     description: OLM-managed operator for the Governed Agent Platform. Owns the AgentWorkstation
       and MemoryModule CRDs and reconciles the per-agent runtime artifacts (Deployment,
       Service, ConfigMap, PVC) on OpenShift.
@@ -57,7 +89,7 @@ metadata:
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
     repository: https://github.com/enterprisewebservice/agent-office-operator
     support: Red Hat Solution Architecture
-  name: agent-office-operator.v1.7.57
+  name: agent-office-operator.v1.7.58
   namespace: placeholder
 spec:
   apiservicedefinitions: {}
@@ -106,6 +138,9 @@ spec:
       displayName: Memory Module
       kind: MemoryModule
       name: memorymodules.agentoffice.ai
+      version: v1alpha1
+    - kind: ModelConnection
+      name: modelconnections.agentoffice.ai
       version: v1alpha1
     - description: |-
         SkillBinding attaches one or more Skill resources to an
@@ -241,12 +276,21 @@ spec:
           - autoresearchprojects/status
           - knowledgebases/status
           - memorymodules/status
+          - modelconnections/status
           - skillbindings/status
           - skills/status
           verbs:
           - get
           - patch
           - update
+        - apiGroups:
+          - agentoffice.ai
+          resources:
+          - modelconnections
+          verbs:
+          - get
+          - list
+          - watch
         - apiGroups:
           - apps
           resources:
@@ -358,7 +402,7 @@ spec:
                       fieldPath: metadata.annotations['olm.targetNamespaces']
                 - name: CLUSTER_APPS_DOMAIN
                   value: apps.salamander.aimlworkbench.com
-                image: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-operator:v1.7.57
+                image: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-operator:v1.7.58
                 imagePullPolicy: Always
                 livenessProbe:
                   httpGet:
@@ -465,4 +509,4 @@ spec:
   provider:
     name: Red Hat Solution Architecture
     url: https://github.com/enterprisewebservice
-  version: 1.7.57
+  version: 1.7.58

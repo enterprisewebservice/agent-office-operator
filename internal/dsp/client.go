@@ -318,9 +318,13 @@ func (c *Client) ListPipelineVersions(ctx context.Context, pipelineID string) ([
 // query parameter.
 //
 // Note on the URL: kfp v2 does NOT expose
-//   /apis/v2beta1/pipelines/{id}/versions/upload
+//
+//	/apis/v2beta1/pipelines/{id}/versions/upload
+//
 // (that returns 501 Method Not Allowed). The correct endpoint is
-//   /apis/v2beta1/pipelines/upload_version?pipelineid={id}&name=...
+//
+//	/apis/v2beta1/pipelines/upload_version?pipelineid={id}&name=...
+//
 // Verified empirically against RHOAI 3.3.1 DSP. We had this
 // wrong in the initial drift-detection commit (operator v0.0.36)
 // which is why the drift fix silently no-op'd on first try.
@@ -402,8 +406,8 @@ func (c *Client) FindOrCreateExperiment(ctx context.Context, displayName, descri
 // created Run's ID + initial state.
 func (c *Client) CreateRun(ctx context.Context, runDisplayName, experimentID, pipelineID string, params map[string]any) (*Run, error) {
 	create := map[string]any{
-		"display_name":   runDisplayName,
-		"experiment_id":  experimentID,
+		"display_name":  runDisplayName,
+		"experiment_id": experimentID,
 		"pipeline_version_reference": map[string]any{
 			"pipeline_id": pipelineID,
 		},

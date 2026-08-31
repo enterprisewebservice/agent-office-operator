@@ -20,13 +20,13 @@ import (
 func qloraSpace() Space {
 	return Space{
 		Ints: map[string]IntSpec{
-			"lora_rank":                  {Low: 4, High: 64, Step: 2},
-			"lora_alpha":                 {Low: 8, High: 128, Step: 4},
-			"num_training_steps":         {Low: 100, High: 500, Step: 20},
-			"per_device_batch_size":      {Low: 1, High: 8},
+			"lora_rank":                   {Low: 4, High: 64, Step: 2},
+			"lora_alpha":                  {Low: 8, High: 128, Step: 4},
+			"num_training_steps":          {Low: 100, High: 500, Step: 20},
+			"per_device_batch_size":       {Low: 1, High: 8},
 			"gradient_accumulation_steps": {Low: 1, High: 8},
-			"max_seq_length":             {Low: 512, High: 2048, Step: 256},
-			"warmup_steps":               {Low: 0, High: 50, Step: 5},
+			"max_seq_length":              {Low: 512, High: 2048, Step: 256},
+			"warmup_steps":                {Low: 0, High: 50, Step: 5},
 		},
 		Floats: map[string]FloatSpec{
 			"lora_dropout":  {Low: 0.0, High: 0.2},

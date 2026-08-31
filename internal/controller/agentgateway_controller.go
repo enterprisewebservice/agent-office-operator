@@ -53,6 +53,12 @@ type AgentGatewayReconciler struct {
 	// alongside the on-disk paired.json (file-only edits leave the
 	// daemon rejecting the node until pod restart).
 	RestConfig *rest.Config
+	// Reader is an uncached API reader for Secrets referenced by
+	// cluster-scoped ModelConnections: those live in the admin
+	// namespace, which may sit outside the pinned core-type cache
+	// namespaces (cmd/main.go coreByObject), where a cached Get
+	// fails with "unknown namespace".
+	Reader client.Reader
 }
 
 // +kubebuilder:rbac:groups=agentoffice.ai,resources=agentgateways,verbs=get;list;watch;create;update;patch;delete
@@ -382,6 +388,15 @@ type desiredOpenAIConfig struct {
 	Profiles map[string]map[string]string `json:"profiles"`
 	Order    map[string][]string          `json:"order"`
 
+	// ExtraProviders are the ModelConnection-rendered provider blocks
+	// (endpoint kind), keyed by connection name. Always sent — an
+	// empty map is how a removed connection's block gets deleted from
+	// the live config. Lifecycle bookkeeping lives in a sidecar file,
+	// NOT in openclaw.json (openclaw refuses to start on a config
+	// with unknown keys, and a refusing gateway can never be exec'd
+	// into to fix itself).
+	ExtraProviders map[string]map[string]interface{} `json:"extraProviders"`
+
 	// GatewayHTTP is the operator-owned gateway.http block from
 	// spec.http (nil = the spec declares no HTTP surfaces, and any
 	// stale block in the live file is deleted). The CM template
@@ -499,12 +514,19 @@ func (r *AgentGatewayReconciler) reconcileModelProvidersAndAuth(ctx context.Cont
 	}
 	provider["models"] = models
 
+	// ModelConnection provider blocks for agents on this gateway.
+	extraProviders, _, err := r.collectModelConnections(ctx, gw)
+	if err != nil {
+		return false, fmt.Errorf("collect model connections: %w", err)
+	}
+
 	desired := desiredOpenAIConfig{
 		Provider:        provider,
 		Profiles:        map[string]map[string]string{},
 		Order:           map[string][]string{},
 		AcceptableOrder: map[string][]string{},
 		ProfileMode:     "oauth",
+		ExtraProviders:  extraProviders,
 	}
 	if mode == agentofficev1alpha1.ModelAuthModeAPIKey {
 		desired.ProfileMode = "api_key"
@@ -607,6 +629,34 @@ if (!eq(cfg.models.providers.openai, desired.provider)) {
 if (cfg.models.providers["openai-codex"]) {
   delete cfg.models.providers["openai-codex"];
   changed = true;
+}
+
+// ModelConnection provider blocks. Declarative overwrite, like the
+// canonical openai block. Lifecycle bookkeeping (which extra ids the
+// operator owns, so a dropped connection's block gets DELETED) lives
+// in a sidecar file — never inside openclaw.json, which openclaw
+// validates strictly at process start.
+const managedPath = "/home/node/.openclaw/.operator-managed-providers.json";
+let managed = [];
+try { managed = JSON.parse(fs.readFileSync(managedPath, "utf8")); } catch (_e) {}
+if (!Array.isArray(managed)) managed = [];
+const extras = desired.extraProviders || {};
+for (const [id, block] of Object.entries(extras)) {
+  if (id === "openai") continue; // canonical block is owned above
+  if (!eq(cfg.models.providers[id], block)) {
+    cfg.models.providers[id] = block;
+    changed = true;
+  }
+}
+for (const id of managed) {
+  if (id !== "openai" && !(id in extras) && cfg.models.providers[id]) {
+    delete cfg.models.providers[id];
+    changed = true;
+  }
+}
+const managedNow = Object.keys(extras).filter((id) => id !== "openai").sort();
+if (!eq(managed.slice().sort(), managedNow)) {
+  fs.writeFileSync(managedPath, JSON.stringify(managedNow));
 }
 
 // auth.profiles carries routing metadata only (provider + mode) —
@@ -989,6 +1039,25 @@ func (r *AgentGatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		}}}
 	}
 
+	// When a ModelConnection changes, re-reconcile every gateway:
+	// any of them may render its provider block, and connections are
+	// few while gateways are cheap to reconcile. Filtering to actual
+	// referencers would need the AW→gateway join here for no real
+	// saving.
+	mapMC := func(ctx context.Context, obj client.Object) []reconcile.Request {
+		var gws agentofficev1alpha1.AgentGatewayList
+		if err := r.List(ctx, &gws); err != nil {
+			return nil
+		}
+		reqs := make([]reconcile.Request, 0, len(gws.Items))
+		for _, gw := range gws.Items {
+			reqs = append(reqs, reconcile.Request{NamespacedName: types.NamespacedName{
+				Namespace: gw.Namespace, Name: gw.Name,
+			}})
+		}
+		return reqs
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&agentofficev1alpha1.AgentGateway{}).
 		Owns(&appsv1.Deployment{}).
@@ -997,6 +1066,7 @@ func (r *AgentGatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Secret{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Watches(&agentofficev1alpha1.KnowledgeBase{}, handler.EnqueueRequestsFromMapFunc(mapKB)).
+		Watches(&agentofficev1alpha1.ModelConnection{}, handler.EnqueueRequestsFromMapFunc(mapMC)).
 		Watches(&agentofficev1alpha1.AgentWorkstation{}, handler.EnqueueRequestsFromMapFunc(mapAW)).
 		// spec.hooks.tokenSecretRef names a Secret the operator does not
 		// own; react to it appearing or rotating (see

@@ -81,6 +81,15 @@ type ModelSpec struct {
 	// +optional
 	ModelName string `json:"modelName,omitempty"`
 
+	// ConnectionRef names a cluster-scoped ModelConnection. When set
+	// (endpoint kind), it wins over Provider: the agent's model string
+	// becomes `<connection-name>/<modelName>` and the bound gateway
+	// gets a matching provider block rendered by the operator. A ref
+	// that doesn't resolve falls back to the Provider path and is
+	// reported on the workstation status — never a silent dead lane.
+	// +optional
+	ConnectionRef string `json:"connectionRef,omitempty"`
+
 	// ModelRouterRef references a SmallModelRouter CR (used when provider
 	// is smr).
 	// +optional

@@ -22,10 +22,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/apimachinery/pkg/types"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -700,6 +700,24 @@ func (r *AgentGatewayReconciler) reconcileGatewayDeployment(ctx context.Context,
 	mcpEnvSecrets, mcpHashSecrets, err := r.collectMCPEnvFromSecrets(ctx, gw)
 	if err != nil {
 		return fmt.Errorf("collecting mcp envFrom secrets: %w", err)
+	}
+
+	// ModelConnection keys: aggregate the referenced connections'
+	// API keys into a gateway-owned derived Secret and envFrom it —
+	// openclaw.json carries only ${MODELCONN_*_API_KEY} references.
+	// In the hash list too: these are env-var consumers, so rotation
+	// must roll the pod.
+	_, connSecretData, err := r.collectModelConnections(ctx, gw)
+	if err != nil {
+		return fmt.Errorf("collecting model connections: %w", err)
+	}
+	connSecretName, err := r.ensureModelConnectionsSecret(ctx, gw, connSecretData)
+	if err != nil {
+		return err
+	}
+	if connSecretName != "" {
+		mcpEnvSecrets = append(mcpEnvSecrets, connSecretName)
+		mcpHashSecrets = append(mcpHashSecrets, connSecretName)
 	}
 
 	dep := &appsv1.Deployment{

@@ -94,12 +94,21 @@ rules:
   - autoresearchprojects/status
   - knowledgebases/status
   - memorymodules/status
+  - modelconnections/status
   - skillbindings/status
   - skills/status
   verbs:
   - get
   - patch
   - update
+- apiGroups:
+  - agentoffice.ai
+  resources:
+  - modelconnections
+  verbs:
+  - get
+  - list
+  - watch
 - apiGroups:
   - apps
   resources:

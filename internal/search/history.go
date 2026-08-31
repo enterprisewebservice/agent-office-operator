@@ -33,7 +33,7 @@ var roundRE = regexp.MustCompile(`^round-(\d+)\.(yaml|md)$`)
 // table row. The renderer (autoresearchproject_agent.go's
 // wikiPushResult) emits the row as:
 //
-//     | eval_loss | 0.521735 |
+//	| eval_loss | 0.521735 |
 //
 // so a forgiving extractor that finds "| eval_loss | <number> |"
 // covers both the current format and any sensible variants

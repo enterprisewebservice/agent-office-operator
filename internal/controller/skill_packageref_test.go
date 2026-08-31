@@ -17,7 +17,10 @@ import (
 )
 
 func TestParsePackageCoordinate(t *testing.T) {
-	for _, tc := range []struct{ in, name, ver string; wantErr bool }{
+	for _, tc := range []struct {
+		in, name, ver string
+		wantErr       bool
+	}{
 		{"platform-incident-triage:1.1.0", "platform-incident-triage", "1.1.0", false},
 		{"agent-office/platform-incident-triage:1.1.0", "platform-incident-triage", "1.1.0", false},
 		{"no-version", "", "", true},

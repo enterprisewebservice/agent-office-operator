@@ -123,7 +123,7 @@ func (h *HooksRender) ConfigJSON() (string, error) {
 // OpenClawConfigData holds the data for rendering the gateway's base
 // openclaw.json.
 type OpenClawConfigData struct {
-	GatewayToken string
+	GatewayToken    string
 	ChatCompletions bool
 	// AllowedOrigins is the list of hostnames the OpenClaw Control UI
 	// accepts cross-origin requests from. Computed by the reconciler

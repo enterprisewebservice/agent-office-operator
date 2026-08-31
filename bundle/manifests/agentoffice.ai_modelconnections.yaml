@@ -1,0 +1,240 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  creationTimestamp: null
+  name: modelconnections.agentoffice.ai
+spec:
+  group: agentoffice.ai
+  names:
+    kind: ModelConnection
+    listKind: ModelConnectionList
+    plural: modelconnections
+    shortNames:
+    - mconn
+    singular: modelconnection
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.displayName
+      name: Display Name
+      type: string
+    - jsonPath: .spec.kind
+      name: Kind
+      type: string
+    - jsonPath: .spec.baseUrl
+      name: Base URL
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          ModelConnection is an admin-published, permissioned model route
+          agents can be hired onto.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              ModelConnectionSpec is a reusable, admin-published model route:
+              "a brain the platform offers", with visibility rules. Workstations
+              reference one by name via spec.model.connectionRef.
+            properties:
+              access:
+                description: |-
+                  Access declares who may pick this connection in the hiring UI.
+                  Empty means admins only (the UI hides it from everyone else).
+                properties:
+                  groups:
+                    description: |-
+                      Groups whose members may use this connection (matched against
+                      the identity provider's group claims, e.g. `cluster-admins`,
+                      `attendees`).
+                    items:
+                      type: string
+                    type: array
+                  users:
+                    description: Users allowed individually, by username.
+                    items:
+                      type: string
+                    type: array
+                type: object
+              api:
+                default: openai-completions
+                description: API is the OpenClaw wire dialect for the endpoint.
+                type: string
+              apiKeySecretRef:
+                description: APIKeySecretRef locates the endpoint's API key (endpoint
+                  kind).
+                properties:
+                  key:
+                    default: api-key
+                    description: Key within the Secret.
+                    type: string
+                  name:
+                    description: Name of the Secret.
+                    type: string
+                  namespace:
+                    default: agent-office
+                    description: Namespace the Secret lives in.
+                    type: string
+                required:
+                - name
+                type: object
+              baseUrl:
+                description: BaseURL of the OpenAI-compatible endpoint (endpoint kind).
+                type: string
+              description:
+                description: Description is the one-liner under the label.
+                type: string
+              displayName:
+                description: DisplayName is the label the hiring UI shows on the picker.
+                type: string
+              keyStrategy:
+                default: shared
+                description: |-
+                  KeyStrategy: `shared` uses the referenced key for every
+                  consumer; `perSeat` marks the connection for per-consumer key
+                  minting (budget/TTL) — recorded now, minted by the seat
+                  tooling, not yet by the operator.
+                enum:
+                - shared
+                - perSeat
+                type: string
+              kind:
+                description: |-
+                  Kind classifies the route. Only `endpoint` connections are
+                  rendered into gateway provider blocks by the operator.
+                enum:
+                - subscription
+                - apiKey
+                - endpoint
+                type: string
+              models:
+                description: |-
+                  Models this connection offers. The first entry is the default
+                  when a workstation names no model.
+                items:
+                  description: |-
+                    ModelCatalogEntry is one model advertised to agents on the
+                    canonical `openai` provider.
+                  properties:
+                    id:
+                      description: ID is the provider-side model id (e.g. "gpt-5.6-sol").
+                      type: string
+                    name:
+                      description: Name is the human-readable label. Defaults to ID.
+                      type: string
+                  required:
+                  - id
+                  type: object
+                type: array
+              provider:
+                description: |-
+                  Provider names the legacy provider preset for subscription and
+                  apiKey kinds (the hiring flow maps those onto the existing
+                  AgentWorkstation provider path). Ignored for endpoint kind.
+                enum:
+                - smr
+                - anthropic
+                - openai
+                - openai-codex
+                - custom
+                type: string
+            required:
+            - displayName
+            - kind
+            type: object
+          status:
+            description: ModelConnectionStatus reports resolution health.
+            properties:
+              conditions:
+                description: |-
+                  Conditions: `Ready` means the referenced Secret resolves (for
+                  kinds that need one).
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+status:
+  acceptedNames:
+    kind: ""
+    plural: ""
+  conditions: null
+  storedVersions: null

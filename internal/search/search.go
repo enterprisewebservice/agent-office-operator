@@ -25,13 +25,13 @@ you may not use this file except in compliance with the License.
 // Storage interface directly (not Study.Optimize) so we get
 // Ask/Tell semantics. Every Suggest call:
 //
-//   1. Creates a fresh in-memory study with the configured sampler.
-//   2. Replays the supplied history into the study via Storage primitives
-//      (CreateNewTrial → SetTrialParam → SetTrialValue → SetTrialState).
-//   3. Creates one new running trial, calls the appropriate Suggest*
-//      method on it for each param in the search space — this is what
-//      causes the sampler to fit the history and produce the next point.
-//   4. Reads the suggested params back from Storage and returns them.
+//  1. Creates a fresh in-memory study with the configured sampler.
+//  2. Replays the supplied history into the study via Storage primitives
+//     (CreateNewTrial → SetTrialParam → SetTrialValue → SetTrialState).
+//  3. Creates one new running trial, calls the appropriate Suggest*
+//     method on it for each param in the search space — this is what
+//     causes the sampler to fit the history and produce the next point.
+//  4. Reads the suggested params back from Storage and returns them.
 //
 // Stateless across calls. Identical (history, Config, Seed) → identical
 // suggestion. Re-fitting the sampler on every Suggest is cheap (TPE is

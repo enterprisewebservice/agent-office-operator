@@ -9,6 +9,7 @@ resources:
 - bases/agentoffice.ai_skillbindings.yaml
 - bases/agentoffice.ai_knowledgebases.yaml
 - bases/agentoffice.ai_autoresearchprojects.yaml
+- bases/agentoffice.ai_modelconnections.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

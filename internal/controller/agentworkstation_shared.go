@@ -112,6 +112,36 @@ func (r *AgentWorkstationReconciler) reconcileSharedFull(ctx context.Context, aw
 	if aw.Spec.Model.ModelName != "" {
 		model = agentofficev1alpha1.CanonicalProviderID(aw.Spec.Model.Provider) + "/" + aw.Spec.Model.ModelName
 	}
+	// A resolvable ModelConnection ref wins over Provider: the model
+	// string keys into the provider block the gateway reconcile
+	// renders for the same connection. An unresolvable ref must NOT
+	// emit `<conn>/<model>` — that is the silent dead lane (a model
+	// string with no matching provider block fails every turn with no
+	// status anywhere), so fall back to the Provider path and say so.
+	if ref := aw.Spec.Model.ConnectionRef; ref != "" {
+		var conn agentofficev1alpha1.ModelConnection
+		if err := r.Get(ctx, client.ObjectKey{Name: ref}, &conn); err != nil {
+			log.Info("model connectionRef does not resolve; using provider path", "connection", ref, "err", err)
+			aw.Status.Message = fmt.Sprintf("ModelConnection %q not found; using provider %s", ref, aw.Spec.Model.Provider)
+		} else if conn.Spec.Kind != agentofficev1alpha1.ModelConnectionKindEndpoint {
+			// subscription/apiKey connections ride the legacy provider
+			// path (gateway modelAuth); nothing to re-key here.
+			log.V(1).Info("connectionRef is not endpoint kind; provider path applies", "connection", ref)
+		} else {
+			name := aw.Spec.Model.ModelName
+			if name == "" || name == "auto" {
+				if len(conn.Spec.Models) > 0 {
+					name = conn.Spec.Models[0].ID
+				}
+			}
+			if name == "" || name == "auto" {
+				log.Info("connectionRef set but no model name resolvable; using provider path", "connection", ref)
+				aw.Status.Message = fmt.Sprintf("ModelConnection %q lists no models and spec.model.modelName is empty", ref)
+			} else {
+				model = conn.Name + "/" + name
+			}
+		}
+	}
 	agentEntry := map[string]interface{}{
 		"id":        agentID,
 		"name":      defaultIfEmpty(aw.Spec.DisplayName, agentID),

@@ -210,6 +210,15 @@ spec:
               model:
                 description: Model selects the LLM backend.
                 properties:
+                  connectionRef:
+                    description: |-
+                      ConnectionRef names a cluster-scoped ModelConnection. When set
+                      (endpoint kind), it wins over Provider: the agent's model string
+                      becomes `<connection-name>/<modelName>` and the bound gateway
+                      gets a matching provider block rendered by the operator. A ref
+                      that doesn't resolve falls back to the Provider path and is
+                      reported on the workstation status — never a silent dead lane.
+                    type: string
                   modelName:
                     default: auto
                     description: ModelName is the specific model name, or "auto" for

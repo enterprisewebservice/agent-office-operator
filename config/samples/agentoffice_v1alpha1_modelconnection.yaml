@@ -1,0 +1,22 @@
+apiVersion: agentoffice.ai/v1alpha1
+kind: ModelConnection
+metadata:
+  name: model-desk
+spec:
+  displayName: "Models-as-a-Service"
+  description: "Metered OpenAI-compatible front door; per-seat budgets"
+  kind: endpoint
+  baseUrl: "http://model-desk.model-desk.svc.cluster.local:4000/v1"
+  api: openai-completions
+  apiKeySecretRef:
+    name: model-desk-agent-key
+    namespace: agent-office
+    key: api-key
+  models:
+    - id: gpt-4o-mini
+      name: "GPT-4o mini"
+  keyStrategy: shared
+  access:
+    groups:
+      - attendees
+      - developers
