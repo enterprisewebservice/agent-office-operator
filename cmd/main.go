@@ -325,6 +325,19 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	// v1.7.63: namespaces labelled agentoffice.ai/managed=true (dynamic
+	// workshop seats) are cached on boot and trigger a restart when one
+	// appears later — pinned scope or not. See labelWatchdog.
+	{
+		labelSet := map[string]struct{}{}
+		for _, ns := range coreNamespaces {
+			labelSet[ns] = struct{}{}
+		}
+		if err := mgr.Add(&labelWatchdog{client: mgr.GetClient(), cached: labelSet}); err != nil {
+			setupLog.Error(err, "unable to add label watchdog")
+			os.Exit(1)
+		}
+	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up health check")

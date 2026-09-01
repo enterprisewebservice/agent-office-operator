@@ -133,6 +133,31 @@ func crNamespaces(ctx context.Context, cfg *rest.Config, scheme *runtime.Scheme)
 	return out, nil
 }
 
+// ManagedNamespaceLabel marks a namespace the operator must cache even
+// though no CR lives in it yet and the env list does not name it. It
+// exists for dynamically provisioned workshop seats (factory-hub, since
+// v1.7.63): the Subscription's MANAGED_NAMESPACES is GitOps-owned and a
+// live patch is reverted by Argo within seconds, so per-person seats
+// are declared by labelling their namespace instead. Reversible by
+// removing the label.
+const ManagedNamespaceLabel = "agentoffice.ai/managed"
+
+// labeledNamespaces lists namespaces carrying ManagedNamespaceLabel=true
+// with a direct (uncached) client.
+func labeledNamespaces(ctx context.Context, c client.Client) (map[string]struct{}, error) {
+	var nsl corev1.NamespaceList
+	if err := c.List(ctx, &nsl, client.MatchingLabels{ManagedNamespaceLabel: "true"}); err != nil {
+		return nil, err
+	}
+	out := map[string]struct{}{}
+	for _, ns := range nsl.Items {
+		if ns.DeletionTimestamp == nil {
+			out[ns.Name] = struct{}{}
+		}
+	}
+	return out, nil
+}
+
 func extractNamespaces(l client.ObjectList) ([]string, error) {
 	var out []string
 	err := meta.EachListItem(l, func(o runtime.Object) error {
@@ -183,6 +208,19 @@ func coreCacheNamespaces(ctx context.Context, cfg *rest.Config, scheme *runtime.
 		} else {
 			ctrl.Log.WithName("cache-scope").Error(err,
 				"could not discover CR namespaces; caching operator namespace only")
+		}
+	}
+
+	// Labelled namespaces join the set in every mode — pinned or
+	// discovered — so a workshop seat minted after boot is cached the
+	// next time this process starts (the label watchdog arranges that).
+	if c, err := client.New(cfg, client.Options{Scheme: scheme}); err == nil {
+		if found, err := labeledNamespaces(ctx, c); err == nil {
+			for ns := range found {
+				set[ns] = struct{}{}
+			}
+		} else {
+			ctrl.Log.WithName("cache-scope").Error(err, "could not list labelled namespaces")
 		}
 	}
 
@@ -269,6 +307,49 @@ func (w *namespaceWatchdog) Start(ctx context.Context) error {
 				log.Info("agent-office CRs found in namespaces this process does not cache; "+
 					"exiting so the cache is rebuilt with them included",
 					"namespaces", missing)
+				os.Exit(0)
+			}
+		}
+	}
+}
+
+// labelWatchdog restarts the operator when a namespace gains
+// ManagedNamespaceLabel after boot. Unlike namespaceWatchdog it runs
+// even when the scope was pinned by env: a pinned list is the
+// platform's standing seats, and a labelled namespace is a seat the
+// hub minted afterwards — both are deliberate, and the newer one can
+// only take effect on a fresh process (same exit-0 mechanism).
+type labelWatchdog struct {
+	client client.Client
+	cached map[string]struct{}
+}
+
+func (w *labelWatchdog) NeedLeaderElection() bool { return false }
+
+func (w *labelWatchdog) Start(ctx context.Context) error {
+	log := ctrl.Log.WithName("cache-scope")
+	t := time.NewTicker(60 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-t.C:
+			found, err := labeledNamespaces(ctx, w.client)
+			if err != nil {
+				continue
+			}
+			var missing []string
+			for ns := range found {
+				if _, ok := w.cached[ns]; !ok {
+					missing = append(missing, ns)
+				}
+			}
+			if len(missing) > 0 {
+				sort.Strings(missing)
+				log.Info("labelled namespaces are not in this process's cache scope; "+
+					"exiting so the cache is rebuilt with them included",
+					"label", ManagedNamespaceLabel, "namespaces", missing)
 				os.Exit(0)
 			}
 		}
