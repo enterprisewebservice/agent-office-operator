@@ -115,28 +115,15 @@ func (h *CatalogSkillsHandler) readyGatewayPod(ctx context.Context, gwName strin
 	return nil, fmt.Errorf("no Ready pod for gateway %q", gwName)
 }
 
-// recommendViaGateway asks the model — through the gateway, on the
-// subscription — to choose packs and draft an identity.
-func (h *CatalogSkillsHandler) recommendViaGateway(
-	ctx context.Context, desc string, packs []catalogPack, teams []gatewayCandidate,
-) (*recommendResponse, error) {
-	gw := strings.TrimSpace(os.Getenv("AGENT_RECOMMENDER_GATEWAY"))
-	agent := strings.TrimSpace(os.Getenv("AGENT_RECOMMENDER_AGENT"))
-	model := strings.TrimSpace(os.Getenv("AGENT_RECOMMENDER_MODEL"))
-	if gw == "" || agent == "" {
-		return nil, fmt.Errorf("gateway recommender not configured")
-	}
-	pod, err := h.readyGatewayPod(ctx, gw)
-	if err != nil {
-		return nil, err
-	}
-
-	// Render the CONTAINMENT, not just the names. A flat list makes a
-	// parent and its child look like two unrelated options that merely
-	// share vocabulary, and the model duly picks both — selecting
-	// unreal-scripting AND parkforge-unreal-blueprint-scripting, the one
-	// skill that pack contains. It also cannot weigh a meta-pack as
-	// "the whole family" when nothing says it holds the other packs.
+// renderCatalogLines renders the CONTAINMENT, not just the names. A
+// flat list makes a parent and its child look like two unrelated
+// options that merely share vocabulary, and the model duly picks both —
+// selecting unreal-scripting AND parkforge-unreal-blueprint-scripting,
+// the one skill that pack contains. It also cannot weigh a meta-pack as
+// "the whole family" when nothing says it holds the other packs.
+// Shared by the recommend and refine prompts so both engines argue over
+// the same rendering of the same hierarchy.
+func renderCatalogLines(packs []catalogPack) string {
 	var lines []string
 	for _, p := range packs {
 		kind := p.Type
@@ -181,6 +168,77 @@ func (h *CatalogSkillsHandler) recommendViaGateway(
 		}
 		lines = append(lines, line)
 	}
+	return strings.Join(lines, "\n")
+}
+
+// runGatewayTurn runs one prompt as a model turn through the configured
+// recommender gateway and returns the raw CLI output plus the model
+// label used. The transport details — base64 through a temp file so
+// user text never meets the shell, the double timeout so the CLI exits
+// on its own — live here once, shared by recommend and refine.
+func (h *CatalogSkillsHandler) runGatewayTurn(ctx context.Context, prompt string) (string, string, error) {
+	gw := strings.TrimSpace(os.Getenv("AGENT_RECOMMENDER_GATEWAY"))
+	agent := strings.TrimSpace(os.Getenv("AGENT_RECOMMENDER_AGENT"))
+	model := strings.TrimSpace(os.Getenv("AGENT_RECOMMENDER_MODEL"))
+	if gw == "" || agent == "" {
+		return "", model, fmt.Errorf("gateway recommender not configured")
+	}
+	pod, err := h.readyGatewayPod(ctx, gw)
+	if err != nil {
+		return "", model, err
+	}
+
+	// base64 the prompt rather than interpolating it into a shell
+	// command: descriptions and chat turns are user input and contain
+	// quotes, newlines and $.
+	b64 := base64.StdEncoding.EncodeToString([]byte(prompt))
+	modelArg := ""
+	if model != "" {
+		modelArg = "--model " + model + " "
+	}
+
+	// Hard budget. This request is answering a browser: it reaches the
+	// operator through the RHDH route, and an OpenShift route gives up
+	// at 30s by default — that route is Helm-managed, so raising it
+	// would drift on the next upgrade. A turn measures ~14s, which
+	// leaves little room, so cap the model at a budget that always
+	// returns in time and let the deterministic path answer if the
+	// model is slower. A useful answer late is a 504.
+	budget := 20 * time.Second
+	if v := strings.TrimSpace(os.Getenv("AGENT_RECOMMENDER_TIMEOUT")); v != "" {
+		if d, perr := time.ParseDuration(v); perr == nil && d > 0 {
+			budget = d
+		}
+	}
+	ctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+
+	// Give the CLI a slightly shorter deadline so it exits on its own
+	// and we see its output, rather than having the exec stream torn
+	// out from under it.
+	cliTimeout := int(budget.Seconds()) - 2
+	if cliTimeout < 5 {
+		cliTimeout = 5
+	}
+	// $$-scoped temp file: recommend and refine can run concurrently in
+	// the same pod, and a shared name would interleave their prompts.
+	script := fmt.Sprintf(
+		`cd /home/node && F=/tmp/rec-prompt.$$.txt && printf %%s '%s' | base64 -d > "$F" && `+
+			`openclaw agent --agent %s %s-m "$(cat "$F")" --timeout %d 2>/dev/null; S=$?; rm -f "$F"; exit $S`,
+		b64, agent, modelArg, cliTimeout)
+
+	out, err := h.execInPod(ctx, pod, "openclaw", []string{"sh", "-c", script})
+	if err != nil {
+		return "", model, fmt.Errorf("gateway turn: %w", err)
+	}
+	return out, model, nil
+}
+
+// recommendViaGateway asks the model — through the gateway, on the
+// subscription — to choose packs and draft an identity.
+func (h *CatalogSkillsHandler) recommendViaGateway(
+	ctx context.Context, desc string, packs []catalogPack, teams []gatewayCandidate,
+) (*recommendResponse, error) {
 	prompt := "You compose governed AI agents from a fixed catalog.\n" +
 		"Choose ONLY entries from the catalog below — never invent names — and draft an identity.\n" +
 		"COVER THE WHOLE JOB. Break the description into the distinct capabilities it calls for " +
@@ -211,53 +269,16 @@ func (h *CatalogSkillsHandler) recommendViaGateway(
 		`{"name":"<dns-safe-short-name>","displayName":"...","emoji":"<one emoji>","role":"<one word>",` +
 		`"systemPrompt":"<2-4 sentences: the job, which governed tools/skills to lean on, and: never fabricate data — if a tool cannot answer, say so>",` +
 		`"packs":[{"name":"<exact catalog name>","reason":"<why, one clause>"}]}` +
-		"\n\nCATALOG:\n" + strings.Join(lines, "\n") +
+		"\n\nCATALOG:\n" + renderCatalogLines(packs) +
 		// No TEAMS section: since 2026-08-25 every hire starts on its own
 		// gateway (ownTeamFor overrides whatever a model proposes), so
 		// asking the model to place the agent on a crew is wasted tokens
 		// and a policy contradiction.
 		"\n\nJOB DESCRIPTION:\n" + desc + "\n"
 
-	// base64 the prompt rather than interpolating it into a shell
-	// command: descriptions are user input and contain quotes, newlines
-	// and $.
-	b64 := base64.StdEncoding.EncodeToString([]byte(prompt))
-	modelArg := ""
-	if model != "" {
-		modelArg = "--model " + model + " "
-	}
-
-	// Hard budget. This request is answering a browser: it reaches the
-	// operator through the RHDH route, and an OpenShift route gives up
-	// at 30s by default — that route is Helm-managed, so raising it
-	// would drift on the next upgrade. A turn measures ~14s, which
-	// leaves little room, so cap the model at a budget that always
-	// returns in time and let the deterministic scorer answer if the
-	// model is slower. A useful answer late is a 504.
-	budget := 20 * time.Second
-	if v := strings.TrimSpace(os.Getenv("AGENT_RECOMMENDER_TIMEOUT")); v != "" {
-		if d, perr := time.ParseDuration(v); perr == nil && d > 0 {
-			budget = d
-		}
-	}
-	ctx, cancel := context.WithTimeout(ctx, budget)
-	defer cancel()
-
-	// Give the CLI a slightly shorter deadline so it exits on its own
-	// and we see its output, rather than having the exec stream torn
-	// out from under it.
-	cliTimeout := int(budget.Seconds()) - 2
-	if cliTimeout < 5 {
-		cliTimeout = 5
-	}
-	script := fmt.Sprintf(
-		`cd /home/node && printf %%s '%s' | base64 -d > /tmp/rec-prompt.txt && `+
-			`openclaw agent --agent %s %s-m "$(cat /tmp/rec-prompt.txt)" --timeout %d 2>/dev/null`,
-		b64, agent, modelArg, cliTimeout)
-
-	out, err := h.execInPod(ctx, pod, "openclaw", []string{"sh", "-c", script})
+	out, model, err := h.runGatewayTurn(ctx, prompt)
 	if err != nil {
-		return nil, fmt.Errorf("gateway turn: %w", err)
+		return nil, err
 	}
 
 	var sel struct {

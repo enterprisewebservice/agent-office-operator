@@ -160,6 +160,12 @@ func (h *CatalogSkillsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		h.recommend(w, r)
 		return
 	}
+	// v1.7.61: the conversational half of the composer — targeted ops
+	// against the current composition, same engine chain as recommend.
+	if len(parts) == 2 && parts[0] == "catalog" && parts[1] == "refine" {
+		h.refine(w, r)
+		return
+	}
 	if len(parts) == 2 && parts[0] == "catalog" && parts[1] == "install" {
 		h.install(w, r)
 		return
