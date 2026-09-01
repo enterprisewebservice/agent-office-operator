@@ -144,7 +144,7 @@ const ManagedNamespaceLabel = "agentoffice.ai/managed"
 
 // labeledNamespaces lists namespaces carrying ManagedNamespaceLabel=true
 // with a direct (uncached) client.
-func labeledNamespaces(ctx context.Context, c client.Client) (map[string]struct{}, error) {
+func labeledNamespaces(ctx context.Context, c client.Reader) (map[string]struct{}, error) {
 	var nsl corev1.NamespaceList
 	if err := c.List(ctx, &nsl, client.MatchingLabels{ManagedNamespaceLabel: "true"}); err != nil {
 		return nil, err
@@ -320,7 +320,11 @@ func (w *namespaceWatchdog) Start(ctx context.Context) error {
 // hub minted afterwards — both are deliberate, and the newer one can
 // only take effect on a fresh process (same exit-0 mechanism).
 type labelWatchdog struct {
-	client client.Client
+	// An UNCACHED reader (mgr.GetAPIReader()). The manager cache has
+	// DefaultNamespaces set, and a namespaced cache cannot list
+	// cluster-scoped Namespaces — v1.7.63 wired the cached client here
+	// and every tick failed silently.
+	client client.Reader
 	cached map[string]struct{}
 }
 
@@ -337,6 +341,7 @@ func (w *labelWatchdog) Start(ctx context.Context) error {
 		case <-t.C:
 			found, err := labeledNamespaces(ctx, w.client)
 			if err != nil {
+				log.Error(err, "label watchdog: listing namespaces failed")
 				continue
 			}
 			var missing []string

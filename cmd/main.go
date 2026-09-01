@@ -333,7 +333,7 @@ func main() {
 		for _, ns := range coreNamespaces {
 			labelSet[ns] = struct{}{}
 		}
-		if err := mgr.Add(&labelWatchdog{client: mgr.GetClient(), cached: labelSet}); err != nil {
+		if err := mgr.Add(&labelWatchdog{client: mgr.GetAPIReader(), cached: labelSet}); err != nil {
 			setupLog.Error(err, "unable to add label watchdog")
 			os.Exit(1)
 		}
