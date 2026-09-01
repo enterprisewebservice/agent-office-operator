@@ -381,6 +381,10 @@ func main() {
 		// identity + pack selection back (model-constrained-to-catalog
 		// with deterministic fallback). See catalog_recommend.go.
 		mux.Handle("/catalog/recommend", catalogSkills)
+		// v1.7.62: POST /catalog/refine — the conversational half of
+		// the composer: chat history + current composition in, targeted
+		// ops applied server-side out. See catalog_refine.go.
+		mux.Handle("/catalog/refine", catalogSkills)
 		// v1.7.16: POST /catalog/install — materialize a registry
 		// artifact as Skill CRs on this cluster. See catalog_install.go.
 		mux.Handle("/catalog/install", catalogSkills)
