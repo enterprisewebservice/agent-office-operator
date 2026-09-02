@@ -40,13 +40,13 @@ import (
 // Secret references are deliberately absent from the wire shape.
 
 type modelConnectionEntry struct {
-	Name        string                                    `json:"name"`
-	DisplayName string                                    `json:"displayName"`
-	Description string                                    `json:"description,omitempty"`
-	Kind        string                                    `json:"kind"`
-	Provider    string                                    `json:"provider,omitempty"`
-	Models      []modelConnectionModel                    `json:"models,omitempty"`
-	KeyStrategy string                                    `json:"keyStrategy,omitempty"`
+	Name        string                                     `json:"name"`
+	DisplayName string                                     `json:"displayName"`
+	Description string                                     `json:"description,omitempty"`
+	Kind        string                                     `json:"kind"`
+	Provider    string                                     `json:"provider,omitempty"`
+	Models      []modelConnectionModel                     `json:"models,omitempty"`
+	KeyStrategy string                                     `json:"keyStrategy,omitempty"`
 	Access      *agentofficev1alpha1.ModelConnectionAccess `json:"access,omitempty"`
 	// Default marks the connection the hiring form pre-selects for a
 	// user who can see it (annotation agentoffice.ai/default-brain=true,
@@ -75,7 +75,7 @@ func (h *CatalogSkillsHandler) listModelConnections(w http.ResponseWriter, r *ht
 	items := make([]modelConnectionEntry, 0, len(conns.Items))
 	for _, c := range conns.Items {
 		e := modelConnectionEntry{
-			Default: c.Annotations["agentoffice.ai/default-brain"] == "true",
+			Default:     c.Annotations["agentoffice.ai/default-brain"] == "true",
 			Name:        c.Name,
 			DisplayName: c.Spec.DisplayName,
 			Description: c.Spec.Description,

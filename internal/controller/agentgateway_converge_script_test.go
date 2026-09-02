@@ -83,6 +83,11 @@ func runConverge(t *testing.T, script string, cfg map[string]interface{}, desire
 	if runnable == script {
 		t.Fatal("could not redirect the config path; the script's `const p = ...` line changed")
 	}
+	// The ModelConnection bookkeeping sidecar is hardcoded too; point it
+	// at the fixture dir so extraProviders cases can run outside a pod.
+	runnable = strings.Replace(runnable,
+		`const managedPath = "/home/node/.openclaw/.operator-managed-providers.json";`,
+		`const managedPath = process.env.TEST_MANAGED_PATH;`, 1)
 
 	desiredJSON, err := json.Marshal(desired)
 	if err != nil {
@@ -90,7 +95,8 @@ func runConverge(t *testing.T, script string, cfg map[string]interface{}, desire
 	}
 
 	cmd := exec.Command("node", "-e", runnable, string(desiredJSON))
-	cmd.Env = append(os.Environ(), "TEST_CFG_PATH="+cfgPath, "OPENCLAW_GATEWAY_TOKEN=")
+	cmd.Env = append(os.Environ(), "TEST_CFG_PATH="+cfgPath,
+		"TEST_MANAGED_PATH="+filepath.Join(dir, ".operator-managed-providers.json"), "OPENCLAW_GATEWAY_TOKEN=")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("run converge script: %v\noutput:\n%s", err, out)
@@ -285,5 +291,94 @@ func TestConvergeScriptReplacesAnInvalidPin(t *testing.T) {
 	}
 	if !strings.Contains(out, "RECONCILED_MODEL_AUTH") {
 		t.Errorf("expected a change when the pin was invalid, out=%s", out)
+	}
+}
+
+// keylessDesired mirrors reconcileModelProvidersAndAuth for a gateway
+// that declares NO openai credential and whose agents ride a
+// ModelConnection (v1.7.66): a keyless canonical block, the connection
+// as an extra provider, and the default model pointed at it.
+func keylessDesired() desiredOpenAIConfig {
+	return desiredOpenAIConfig{
+		Provider: map[string]interface{}{
+			"baseUrl": "https://api.openai.com/v1",
+			"api":     "openai-completions",
+			"models":  []map[string]interface{}{{"id": "gpt-4o-mini", "name": "gpt-4o-mini"}},
+		},
+		Profiles:        map[string]map[string]string{},
+		Order:           map[string][]string{},
+		AcceptableOrder: map[string][]string{},
+		ProfileMode:     "api_key",
+		ExtraProviders: map[string]map[string]interface{}{
+			"claude-work": {
+				"baseUrl": "http://model-desk.model-desk.svc.cluster.local:4000/v1",
+				"api":     "openai-completions",
+				"apiKey":  "${MODELCONN_CLAUDE_WORK_API_KEY}",
+				"models":  []map[string]interface{}{{"id": "claude-sonnet-5", "name": "Claude Sonnet 5"}},
+			},
+		},
+		DefaultModel: "claude-work/claude-sonnet-5",
+	}
+}
+
+// TestConvergeScriptKeylessGatewayRidesTheConnection is the fresh-seat
+// regression: with no openai credential the canonical block must carry
+// no ${OPENAI_API_KEY} (openclaw refuses to boot on an unresolvable
+// secret ref), the connection block must land, and the seeded
+// openai/* default must move to the connection.
+func TestConvergeScriptKeylessGatewayRidesTheConnection(t *testing.T) {
+	mustNode(t)
+	script := extractConvergeScript(t)
+
+	seeded := map[string]interface{}{
+		"models": map[string]interface{}{
+			"providers": map[string]interface{}{
+				"openai": map[string]interface{}{
+					"baseUrl": "https://chatgpt.com/backend-api",
+					"api":     "openai-chatgpt-responses",
+				},
+			},
+		},
+		"agents": map[string]interface{}{
+			"defaults": map[string]interface{}{"model": map[string]interface{}{"primary": "openai/gpt-5.6-sol"}},
+		},
+	}
+
+	updated, out := runConverge(t, script, seeded, keylessDesired())
+	if !strings.Contains(out, "RECONCILED_MODEL_AUTH") {
+		t.Fatalf("expected a change to be reported, got: %s", out)
+	}
+	provs := providers(t, updated)
+	openai := provs["openai"].(map[string]interface{})
+	if _, hasKey := openai["apiKey"]; hasKey {
+		t.Error("keyless gateway got an apiKey reference; openclaw would refuse to boot")
+	}
+	if _, ok := provs["claude-work"]; !ok {
+		t.Error("connection provider block did not land")
+	}
+	primary := updated["agents"].(map[string]interface{})["defaults"].(map[string]interface{})["model"].(map[string]interface{})["primary"]
+	if primary != "claude-work/claude-sonnet-5" {
+		t.Errorf("defaults.model.primary = %v, want the connection", primary)
+	}
+
+	// An admin-chosen default on another provider is left alone.
+	updated["agents"].(map[string]interface{})["defaults"].(map[string]interface{})["model"].(map[string]interface{})["primary"] = "litemaas/qwen"
+	again, _ := runConverge(t, script, updated, keylessDesired())
+	if got := again["agents"].(map[string]interface{})["defaults"].(map[string]interface{})["model"].(map[string]interface{})["primary"]; got != "litemaas/qwen" {
+		t.Errorf("non-openai default was overridden to %v", got)
+	}
+}
+
+func TestFirstConnectionModel(t *testing.T) {
+	got := firstConnectionModel(map[string]map[string]interface{}{
+		"zeta":        {"models": []map[string]interface{}{{"id": "z1"}}},
+		"claude-work": {"models": []map[string]interface{}{{"id": "claude-sonnet-5"}, {"id": "claude-opus-4-6"}}},
+		"empty":       {"models": []map[string]interface{}{}},
+	})
+	if got != "claude-work/claude-sonnet-5" {
+		t.Errorf("firstConnectionModel = %q, want claude-work/claude-sonnet-5", got)
+	}
+	if got := firstConnectionModel(nil); got != "" {
+		t.Errorf("firstConnectionModel(nil) = %q, want empty", got)
 	}
 }

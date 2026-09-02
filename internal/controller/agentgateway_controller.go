@@ -397,6 +397,13 @@ type desiredOpenAIConfig struct {
 	// into to fix itself).
 	ExtraProviders map[string]map[string]interface{} `json:"extraProviders"`
 
+	// DefaultModel, when set, replaces an agents.defaults.model.primary
+	// that still points at the canonical openai provider. Set only for
+	// a gateway with NO openai credential of its own whose agents ride
+	// ModelConnections — the seeded default (openai/gpt-5.6-sol) is a
+	// dead route there (v1.7.66).
+	DefaultModel string `json:"defaultModel,omitempty"`
+
 	// GatewayHTTP is the operator-owned gateway.http block from
 	// spec.http (nil = the spec declares no HTTP surfaces, and any
 	// stale block in the live file is deleted). The CM template
@@ -480,6 +487,18 @@ func (r *AgentGatewayReconciler) reconcileModelProvidersAndAuth(ctx context.Cont
 
 	mode := resolveModelAuthMode(gw)
 
+	// A gateway that declares NO openai credential at all — no
+	// spec.modelAuth, no codex credential, no envFromSecretRef — used
+	// to get the implicit apiKey shape with `apiKey: ${OPENAI_API_KEY}`.
+	// OpenClaw treats an unresolvable secret ref as fatal ("required
+	// secrets are unavailable"), so the gateway crash-looped on its
+	// first restart, this reconcile needs a Ready pod to run, and the
+	// hire never came up. That is exactly a fresh gateway whose agents
+	// ride a ModelConnection (v1.7.66). Keep the canonical block
+	// keyless there — the seeded config already boots that way.
+	keyless := mode == agentofficev1alpha1.ModelAuthModeAPIKey &&
+		gw.Spec.ModelAuth == nil && gw.Spec.EnvFromSecretRef == ""
+
 	// Model catalog: spec override, else built-in default for the mode.
 	catalog := defaultSubscriptionModels
 	if mode == agentofficev1alpha1.ModelAuthModeAPIKey {
@@ -499,7 +518,9 @@ func (r *AgentGatewayReconciler) reconcileModelProvidersAndAuth(ctx context.Cont
 	case agentofficev1alpha1.ModelAuthModeAPIKey:
 		provider["baseUrl"] = "https://api.openai.com/v1"
 		provider["api"] = "openai-completions"
-		provider["apiKey"] = "${OPENAI_API_KEY}"
+		if !keyless {
+			provider["apiKey"] = "${OPENAI_API_KEY}"
+		}
 		for _, m := range catalog {
 			models = append(models, map[string]interface{}{"id": m.ID, "name": defaultIfEmpty(m.Name, m.ID)})
 		}
@@ -531,6 +552,9 @@ func (r *AgentGatewayReconciler) reconcileModelProvidersAndAuth(ctx context.Cont
 	if mode == agentofficev1alpha1.ModelAuthModeAPIKey {
 		desired.ProfileMode = "api_key"
 	}
+	if keyless {
+		desired.DefaultModel = firstConnectionModel(extraProviders)
+	}
 	if gw.Spec.HTTP != nil && gw.Spec.HTTP.ChatCompletions {
 		desired.GatewayHTTP = map[string]interface{}{
 			"endpoints": map[string]interface{}{
@@ -552,7 +576,7 @@ func (r *AgentGatewayReconciler) reconcileModelProvidersAndAuth(ctx context.Cont
 		if gw.Spec.ModelAuth != nil {
 			profileID = gw.Spec.ModelAuth.ProfileID
 		}
-		if profileID == "" {
+		if profileID == "" && !keyless {
 			profileID, acceptable, err = r.discoverOpenAIAuthProfile(ctx, pod, mode)
 			if err != nil {
 				// In apiKey mode a stored profile is optional — the
@@ -657,6 +681,21 @@ for (const id of managed) {
 const managedNow = Object.keys(extras).filter((id) => id !== "openai").sort();
 if (!eq(managed.slice().sort(), managedNow)) {
   fs.writeFileSync(managedPath, JSON.stringify(managedNow));
+}
+
+// A credential-less gateway whose agents ride ModelConnections: the
+// seeded default (openai/...) is a dead route, so point the default at
+// the first connection. Only an openai/* default is replaced — an
+// admin-chosen default on another provider is left alone.
+if (desired.defaultModel) {
+  cfg.agents = cfg.agents || {};
+  cfg.agents.defaults = cfg.agents.defaults || {};
+  cfg.agents.defaults.model = cfg.agents.defaults.model || {};
+  const cur = cfg.agents.defaults.model.primary || "";
+  if (cur !== desired.defaultModel && (cur === "" || cur.startsWith("openai/"))) {
+    cfg.agents.defaults.model.primary = desired.defaultModel;
+    changed = true;
+  }
 }
 
 // auth.profiles carries routing metadata only (provider + mode) —
@@ -1119,6 +1158,26 @@ func matchNodePairing(pending []pendingPairing, nodeHostName string) string {
 			continue
 		}
 		return p.RequestID
+	}
+	return ""
+}
+
+// firstConnectionModel returns "<connection>/<first model id>" for the
+// lowest-named connection block that lists a model, or "" when none do.
+func firstConnectionModel(providers map[string]map[string]interface{}) string {
+	names := make([]string, 0, len(providers))
+	for n := range providers {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		models, _ := providers[n]["models"].([]map[string]interface{})
+		if len(models) == 0 {
+			continue
+		}
+		if id, _ := models[0]["id"].(string); id != "" {
+			return n + "/" + id
+		}
 	}
 	return ""
 }
