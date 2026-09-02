@@ -48,6 +48,11 @@ type modelConnectionEntry struct {
 	Models      []modelConnectionModel                    `json:"models,omitempty"`
 	KeyStrategy string                                    `json:"keyStrategy,omitempty"`
 	Access      *agentofficev1alpha1.ModelConnectionAccess `json:"access,omitempty"`
+	// Default marks the connection the hiring form pre-selects for a
+	// user who can see it (annotation agentoffice.ai/default-brain=true,
+	// v1.7.65). Without it the form fell through to the platform Codex
+	// subscription for anyone who never touched the Brain section.
+	Default bool `json:"default,omitempty"`
 }
 
 type modelConnectionModel struct {
@@ -70,6 +75,7 @@ func (h *CatalogSkillsHandler) listModelConnections(w http.ResponseWriter, r *ht
 	items := make([]modelConnectionEntry, 0, len(conns.Items))
 	for _, c := range conns.Items {
 		e := modelConnectionEntry{
+			Default: c.Annotations["agentoffice.ai/default-brain"] == "true",
 			Name:        c.Name,
 			DisplayName: c.Spec.DisplayName,
 			Description: c.Spec.Description,
