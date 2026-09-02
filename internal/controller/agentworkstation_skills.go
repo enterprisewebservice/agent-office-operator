@@ -427,3 +427,54 @@ func skillDeclaresSource(s *agentofficev1alpha1.Skill) bool {
 	src := s.Spec.Source
 	return src.PackageRef != nil || src.ConfigMapRef != nil || src.Inline != ""
 }
+
+// platformCatalogNamespace is where the platform's own Skill CRs live —
+// the same namespace the catalog HTTP handler serves (catalog_skills.go)
+// and the set the skills-catalog image is baked from.
+const platformCatalogNamespace = "agent-office"
+
+// listRefSkills resolves spec.skillRefs (v1.7.68): each ref is looked up
+// as a Skill in the agent's namespace first, then in the platform catalog
+// namespace; a version pin must match spec.version. Returns the rendered
+// skills in stable order plus the refs that resolved nowhere (with a
+// reason), so the caller can seed exactly the resolved set and report the
+// rest in status instead of silently dropping them.
+func (r *AgentWorkstationReconciler) listRefSkills(ctx context.Context, aw *agentofficev1alpha1.AgentWorkstation) ([]ResolvedSkill, []string) {
+	seen := map[string]bool{}
+	resolved := make([]ResolvedSkill, 0, len(aw.Spec.SkillRefs))
+	var unresolved []string
+	for _, ref := range aw.Spec.SkillRefs {
+		if ref.Name == "" || seen[ref.Name] {
+			continue
+		}
+		seen[ref.Name] = true
+		var skill agentofficev1alpha1.Skill
+		found := false
+		for _, ns := range []string{aw.Namespace, platformCatalogNamespace} {
+			if err := r.Get(ctx, types.NamespacedName{Namespace: ns, Name: ref.Name}, &skill); err == nil {
+				found = true
+				break
+			}
+		}
+		if !found {
+			unresolved = append(unresolved, ref.Name+" (no such Skill in "+aw.Namespace+" or "+platformCatalogNamespace+")")
+			continue
+		}
+		if ref.Version != "" && skill.Spec.Version != ref.Version {
+			unresolved = append(unresolved, fmt.Sprintf("%s (pinned %s, catalog has %s)", ref.Name, ref.Version, skill.Spec.Version))
+			continue
+		}
+		base, err := r.resolveSkillContent(ctx, &skill)
+		if err != nil && skillDeclaresSource(&skill) {
+			unresolved = append(unresolved, fmt.Sprintf("%s (content: %v)", ref.Name, err))
+			continue
+		}
+		resolved = append(resolved, ResolvedSkill{
+			Skill:    skill,
+			Version:  skill.Spec.Version,
+			Rendered: renderSkill(skill, base, nil),
+		})
+	}
+	sort.Slice(resolved, func(i, j int) bool { return resolved[i].Skill.Name < resolved[j].Skill.Name })
+	return resolved, unresolved
+}

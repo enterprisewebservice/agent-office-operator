@@ -15,6 +15,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"os"
 	"strings"
 	"time"
@@ -200,10 +202,40 @@ func (r *AgentWorkstationReconciler) reconcileSharedFull(ctx context.Context, aw
 	//      disclosure (scan dir + read frontmatter only at session
 	//      start; lazy-load body on trigger) find the files in the
 	//      shape they expect — no rework when OpenClaw catches up.
-	resolvedSkills, skillResolveErr := r.listAllCatalogSkills(ctx, aw.Namespace)
-	if skillResolveErr != nil {
-		log.Info("skill catalog list failed; proceeding without skills",
-			"err", skillResolveErr, "aw", aw.Name)
+	// v1.7.68: an agent that declares spec.skillRefs gets EXACTLY that
+	// set — resolved by name in its namespace, then the platform catalog —
+	// and the baked image is filtered to the same names. No refs = the
+	// legacy behaviour (baked image + every Skill in the namespace).
+	var resolvedSkills []ResolvedSkill
+	var restrictSkills map[string]bool // nil = unrestricted (legacy)
+	var unresolvedRefs []string
+	if len(aw.Spec.SkillRefs) > 0 {
+		var rs []ResolvedSkill
+		rs, unresolvedRefs = r.listRefSkills(ctx, aw)
+		resolvedSkills = rs
+		restrictSkills = map[string]bool{}
+		for _, ref := range aw.Spec.SkillRefs {
+			if ref.Name != "" {
+				restrictSkills[ref.Name] = true
+			}
+		}
+		cond := metav1.Condition{Type: "SkillRefsResolved", Status: metav1.ConditionTrue, Reason: "Resolved",
+			Message: fmt.Sprintf("%d of %d skill refs resolved", len(rs), len(restrictSkills))}
+		if len(unresolvedRefs) > 0 {
+			cond.Status = metav1.ConditionFalse
+			cond.Reason = "SkillNotFound"
+			cond.Message = "unresolved skill refs: " + strings.Join(unresolvedRefs, "; ")
+			log.Info("skill refs unresolved", "aw", aw.Name, "refs", unresolvedRefs)
+		}
+		meta.SetStatusCondition(&aw.Status.Conditions, cond)
+	} else {
+		var skillResolveErr error
+		resolvedSkills, skillResolveErr = r.listAllCatalogSkills(ctx, aw.Namespace)
+		if skillResolveErr != nil {
+			log.Info("skill catalog list failed; proceeding without skills",
+				"err", skillResolveErr, "aw", aw.Name)
+		}
+		meta.RemoveStatusCondition(&aw.Status.Conditions, "SkillRefsResolved")
 	}
 
 	// Resolve KnowledgeBases attached to the gateway this AW
@@ -240,6 +272,7 @@ func (r *AgentWorkstationReconciler) reconcileSharedFull(ctx context.Context, aw
 	writesJSON, _ := json.Marshal(writes)
 	inlineSkillJSON, _ := json.Marshal(inlineSkillWrites)
 	keepJSON, _ := json.Marshal(keepSkillDirs)
+	restrictJSON, _ := json.Marshal(restrictSkills) // "null" when unrestricted
 
 	seedScript := fmt.Sprintf(`
 const fs = require("fs"); const path = require("path");
@@ -249,6 +282,9 @@ const writes = %[2]s;
 const inlineSkillWrites = %[3]s;
 const keepSkillDirs = %[4]s;
 const catalogDir = %[5]q;
+// v1.7.68: with spec.skillRefs the agent gets EXACTLY these names — the
+// image copy is filtered to them and everything else is GC'd below.
+const restrict = %[6]s;
 
 // 1. Non-skill files (IDENTITY/SOUL/WIKI) — write-if-changed.
 let touched = 0;
@@ -285,6 +321,7 @@ try {
 fs.mkdirSync(skillsRoot, { recursive: true });
 const fromImage = {};
 for (const name of catalogNames) {
+  if (restrict && !restrict[name]) continue;
   // cpSync(recursive) brings SKILL.md + scripts/ + references/ etc.
   fs.cpSync(path.join(catalogDir, name), path.join(skillsRoot, name),
     { recursive: true, force: true });
@@ -304,7 +341,7 @@ for (const [f, content] of Object.entries(inlineSkillWrites)) {
   if (cur !== content) { fs.writeFileSync(p, content); touched++; }
   if (sname) { keep[sname] = true; extra++; }
 }
-for (const k of Object.keys(keepSkillDirs)) keep[k] = true;
+for (const k of Object.keys(keepSkillDirs)) { if (!restrict || restrict[k]) keep[k] = true; }
 skillSrc = catalogNames.length > 0 ? ("image+" + extra + "-cluster") : "cluster-only";
 
 // GC #1: remove workspace skill folders not in the current source set.
@@ -334,7 +371,7 @@ console.log("SEEDED dir=" + dir +
   " skills=" + Object.keys(keep).length +
   " gcd=" + gcd +
   " legacy_gcd=" + legacyGcd);
-`, agentID, string(writesJSON), string(inlineSkillJSON), string(keepJSON), skillsCatalogSkillsDir)
+`, agentID, string(writesJSON), string(inlineSkillJSON), string(keepJSON), skillsCatalogSkillsDir, string(restrictJSON))
 
 	// Keep the output. execInPod returns stdout+stderr as its first
 	// value precisely so a failure is diagnosable, and discarding it

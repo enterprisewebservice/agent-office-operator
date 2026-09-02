@@ -1,13 +1,3 @@
-//go:build ignore
-// +build ignore
-
-// NOTE: build-tagged out (2026-05-28) because this WIP file
-// references AgentWorkstationSpec.SkillRefs which doesn't exist
-// yet. Part of task #51 (v1.6.0 spec.skillRefs normalization).
-// Remove the build tag when the spec field lands. Until then,
-// keeping the WIP visible (rather than deleting it) so the design
-// notes aren't lost.
-
 /*
 Copyright 2026.
 
@@ -104,8 +94,20 @@ func (r *AgentWorkstationReconciler) reconcileSkillRefs(
 		existingByName[sb.Name] = sb
 	}
 
-	// 1. Create or update one SkillBinding per desired ref.
+	// 1. Create or update one SkillBinding per desired ref that names a
+	//    Skill in THIS namespace. Refs that resolve from the platform
+	//    catalog (or nowhere) get no binding — the SkillBinding
+	//    controller cannot see other namespaces, and a binding it would
+	//    only ever mark SkillNotFound is noise, not state. Seeding
+	//    (listRefSkills) is what delivers those; status reports the rest.
 	for skillName, ref := range desired {
+		var local agentofficev1alpha1.Skill
+		if err := r.Get(ctx, client.ObjectKey{Namespace: aw.Namespace, Name: skillName}, &local); err != nil {
+			if !apierrors.IsNotFound(err) {
+				return fmt.Errorf("get Skill %s/%s: %w", aw.Namespace, skillName, err)
+			}
+			continue
+		}
 		sbName := managedSkillBindingName(aw.Name, skillName)
 		sb := &agentofficev1alpha1.SkillBinding{
 			ObjectMeta: metav1.ObjectMeta{

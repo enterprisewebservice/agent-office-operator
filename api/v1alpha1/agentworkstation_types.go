@@ -457,6 +457,18 @@ type AgentWorkstationSpec struct {
 	// deferred to v1.6.0.
 	// +optional
 	KnowledgeBaseRefs []KnowledgeBaseRef `json:"knowledgeBaseRefs,omitempty"`
+
+	// SkillRefs is this agent's OWN skill list (v1.7.68). When set, the
+	// workspace holds exactly these skills and nothing else: each name is
+	// resolved first as a Skill in the agent's namespace, then in the
+	// platform catalog namespace (where the baked set is declared); a
+	// version pin must match spec.version. A name that resolves nowhere
+	// is reported in status (condition SkillRefsResolved) rather than
+	// silently skipped. The operator maintains one SkillBinding per ref
+	// that resolves in the agent's namespace. Unset = the pre-v1.7.68
+	// behaviour: the baked catalog plus every Skill in the namespace.
+	// +optional
+	SkillRefs []SkillRef `json:"skillRefs,omitempty"`
 }
 
 // KnowledgeBaseRef attaches a KnowledgeBase to an AgentWorkstation

@@ -146,6 +146,12 @@ func (r *AgentWorkstationReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	if err := r.reconcileMattermost(ctx, &aw); err != nil {
 		log.Error(err, "mattermost provisioning failed (non-fatal)", "aw", aw.Name)
 	}
+	// spec.skillRefs (v1.7.68): one operator-managed SkillBinding per ref
+	// that names a Skill in this namespace; the seed delivers the exact
+	// set. Non-fatal — a binding hiccup must not block the agent.
+	if err := r.reconcileSkillRefs(ctx, &aw); err != nil {
+		log.Error(err, "skill refs reconcile failed (non-fatal)", "aw", aw.Name)
+	}
 
 	return r.reconcileShared(ctx, &aw)
 }

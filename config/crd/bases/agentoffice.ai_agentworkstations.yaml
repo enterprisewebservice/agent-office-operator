@@ -365,6 +365,42 @@ spec:
                     - gatewayRef
                     type: object
                 type: object
+              skillRefs:
+                description: |-
+                  SkillRefs is this agent's OWN skill list (v1.7.68). When set, the
+                  workspace holds exactly these skills and nothing else: each name is
+                  resolved first as a Skill in the agent's namespace, then in the
+                  platform catalog namespace (where the baked set is declared); a
+                  version pin must match spec.version. A name that resolves nowhere
+                  is reported in status (condition SkillRefsResolved) rather than
+                  silently skipped. The operator maintains one SkillBinding per ref
+                  that resolves in the agent's namespace. Unset = the pre-v1.7.68
+                  behaviour: the baked catalog plus every Skill in the namespace.
+                items:
+                  description: |-
+                    SkillRef points to a Skill in the same namespace. Optional
+                    `version` pins a specific Skill spec.version; if empty, the
+                    binding floats with whatever the Skill CR currently declares.
+
+                    Floating refs are convenient in dev (Skill CR rev is the source
+                    of truth, no churn on every bump). Pinned refs are the right
+                    posture in prod where you want explicit control over which
+                    version of a skill an agent picks up — surface the resolved
+                    version in `status.resolvedSkillVersion` either way.
+                  properties:
+                    name:
+                      description: Name of the Skill CR in the same namespace.
+                      type: string
+                    version:
+                      description: |-
+                        Optional version pin. When set, the binding only resolves
+                        successfully if the referenced Skill's `spec.version`
+                        matches this value (semver string equality).
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
               systemPrompt:
                 description: |-
                   SystemPrompt defines the agent's behavior. Owned by the
