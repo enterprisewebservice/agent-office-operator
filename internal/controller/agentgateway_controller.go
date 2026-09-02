@@ -118,8 +118,17 @@ func (r *AgentGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	//    container is seed-only, so existing PVCs need this in-place.
 	//    Idempotent: a converged config reports NO_CHANGE and we
 	//    leave the pod alone.
+	// A skip here is almost always "no Ready openclaw container yet".
+	// Reconciles are event-driven, and the Deployment-status event that
+	// follows a pod becoming Ready can arrive while the pod cache still
+	// says not-Ready — after which nothing re-triggers this pass, and a
+	// fresh gateway sits with its ModelConnection provider unwritten
+	// until something else changes (seen live 2026-09-02). Remember the
+	// skip and come back shortly (v1.7.67).
+	convergePending := false
 	if changed, err := r.reconcileModelProvidersAndAuth(ctx, &gw); err != nil {
 		log.Info("model provider/auth reconcile skipped", "err", err)
+		convergePending = true
 	} else if changed {
 		// openclaw.json is read at process start — the write above is
 		// inert until the gateway restarts.
@@ -163,7 +172,11 @@ func (r *AgentGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// 5. Compute status from observed Deployment + Route + AW count.
-	return r.reconcileGatewayStatus(ctx, &gw)
+	res, err := r.reconcileGatewayStatus(ctx, &gw)
+	if err == nil && convergePending && res.RequeueAfter == 0 {
+		res.RequeueAfter = 30 * time.Second
+	}
+	return res, err
 }
 
 // maybeMergeAllowedUsers writes the configured spec.allowedUsers IDs
