@@ -193,5 +193,12 @@ func (r *AgentWorkstationReconciler) mmNotify(ctx context.Context, aw *agentoffi
 	if st != 200 || chID == "" {
 		return
 	}
-	mmAPI("POST", base, token, "/api/v4/posts", map[string]interface{}{"channel_id": chID, "message": text})
+	// Marked as a platform notice: the chat bridge does not relay posts carrying
+	// agentoffice.ai/notice to the agent (they are for the attendee), and
+	// from_bot renders Mattermost's BOT tag so nobody mistakes it for a person.
+	mmAPI("POST", base, token, "/api/v4/posts", map[string]interface{}{
+		"channel_id": chID,
+		"message":    text,
+		"props":      map[string]interface{}{"agentoffice.ai/notice": "platform", "from_bot": "true"},
+	})
 }
