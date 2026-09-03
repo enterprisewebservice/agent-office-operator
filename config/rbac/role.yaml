@@ -83,6 +83,7 @@ rules:
   - autoresearchprojects/finalizers
   - knowledgebases/finalizers
   - memorymodules/finalizers
+  - modelconnections/finalizers
   - skillbindings/finalizers
   - skills/finalizers
   verbs:

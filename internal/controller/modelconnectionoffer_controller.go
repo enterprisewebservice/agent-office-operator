@@ -50,6 +50,11 @@ type ModelConnectionOfferReconciler struct {
 // +kubebuilder:rbac:groups=agentoffice.ai,resources=modelconnectionoffers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=agentoffice.ai,resources=modelconnectionoffers/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=agentoffice.ai,resources=modelconnections,verbs=get;list;watch
+// Offers carry a controller owner reference to their ModelConnection; the
+// OwnerReferencesPermissionEnforcement admission plugin (on by default on
+// OpenShift) only admits blockOwnerDeletion when the writer may update the
+// owner's finalizers.
+// +kubebuilder:rbac:groups=agentoffice.ai,resources=modelconnections/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
 
 // Reconcile converges the offers of one ModelConnection across all
