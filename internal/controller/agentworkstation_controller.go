@@ -63,6 +63,7 @@ type AgentWorkstationReconciler struct {
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=route.openshift.io,resources=routes,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=mcp.kuadrant.io,resources=mcpserverregistrations,verbs=get;list;watch
 
 // awSharedGatewayFinalizer guards shared-runtime AgentWorkstations.
 // A shared agent is registered into the gateway's openclaw.json via
@@ -278,6 +279,22 @@ func (r *AgentWorkstationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// hot-reloads it. This is the config-delivery twin of the AG
 	// reconciler's mapHooksSecretToGateways watch — that one recomputes
 	// the pod template (env fallback), this one rewrites the config.
+	// MCPServerRegistration fan-out (v1.7.69): a registration appearing,
+	// changing or vanishing in a namespace re-reconciles every AW there, so
+	// reconcileGatewayRegistrations can reload the gateway runtimes.
+	mapRegistration := func(ctx context.Context, obj client.Object) []reconcile.Request {
+		var aws agentofficev1alpha1.AgentWorkstationList
+		if err := r.List(ctx, &aws, client.InNamespace(obj.GetNamespace())); err != nil {
+			return nil
+		}
+		out := make([]reconcile.Request, 0, len(aws.Items))
+		for i := range aws.Items {
+			out = append(out, reconcile.Request{NamespacedName: client.ObjectKey{
+				Namespace: aws.Items[i].Namespace, Name: aws.Items[i].Name,
+			}})
+		}
+		return out
+	}
 	mapCredentialSecret := func(ctx context.Context, obj client.Object) []reconcile.Request {
 		sec, ok := obj.(*corev1.Secret)
 		if !ok {
@@ -305,7 +322,7 @@ func (r *AgentWorkstationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return out
 	}
 
-	return ctrl.NewControllerManagedBy(mgr).
+	b := ctrl.NewControllerManagedBy(mgr).
 		For(&agentofficev1alpha1.AgentWorkstation{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
@@ -316,7 +333,13 @@ func (r *AgentWorkstationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&agentofficev1alpha1.SkillBinding{}, handler.EnqueueRequestsFromMapFunc(mapSkillBinding)).
 		Watches(&agentofficev1alpha1.Skill{}, handler.EnqueueRequestsFromMapFunc(mapSkill)).
 		Watches(&agentofficev1alpha1.KnowledgeBase{}, handler.EnqueueRequestsFromMapFunc(mapKB)).
-		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(mapCredentialSecret)).
-		Named("agentworkstation").
-		Complete(r)
+		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(mapCredentialSecret))
+	// The Kuadrant MCP gateway CRD may be absent on a cluster without the
+	// gateway; watch it only when the API is served.
+	if _, err := mgr.GetRESTMapper().RESTMapping(schema.GroupKind{Group: mcpRegistrationGVK.Group, Kind: mcpRegistrationGVK.Kind}, mcpRegistrationGVK.Version); err == nil {
+		reg := &unstructured.Unstructured{}
+		reg.SetGroupVersionKind(mcpRegistrationGVK)
+		b = b.Watches(reg, handler.EnqueueRequestsFromMapFunc(mapRegistration))
+	}
+	return b.Named("agentworkstation").Complete(r)
 }

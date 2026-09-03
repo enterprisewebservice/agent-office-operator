@@ -622,6 +622,21 @@ spec:
               gatewayEndpoint:
                 description: GatewayEndpoint is the public URL the agent listens on.
                 type: string
+              gatewayRegistrations:
+                description: |-
+                  GatewayRegistrations lists the MCPServerRegistrations in this
+                  namespace (the seat's own governed servers) as last delivered to the
+                  runtime.
+                items:
+                  type: string
+                type: array
+              gatewayRegistrationsHash:
+                description: |-
+                  GatewayRegistrationsHash fingerprints the registration set
+                  (name, readiness, tool count). When it changes the operator reloads
+                  the gateway's cached MCP runtimes so the agent re-lists its governed
+                  tools on its next turn -- no attendee step.
+                type: string
               lastActivity:
                 description: LastActivity records the last time the agent processed
                   a request.
@@ -640,6 +655,21 @@ spec:
                 - Stopped
                 - Error
                 type: string
+              sessionEpoch:
+                description: |-
+                  SessionEpoch increments each time the delivered skill set changes
+                  after the first delivery. Skills load when a session starts, so chat
+                  layers key their sessions on this value: a new epoch is a fresh
+                  session in which the agent can use its current skills.
+                format: int64
+                type: integer
+              skillSet:
+                description: |-
+                  SkillSet is the resolved skill set (name@version) last delivered to
+                  the workspace for an agent that declares spec.skillRefs.
+                items:
+                  type: string
+                type: array
             type: object
         type: object
     served: true

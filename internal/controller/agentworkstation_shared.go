@@ -213,6 +213,7 @@ func (r *AgentWorkstationReconciler) reconcileSharedFull(ctx context.Context, aw
 		var rs []ResolvedSkill
 		rs, unresolvedRefs = r.listRefSkills(ctx, aw)
 		resolvedSkills = rs
+		r.noteSkillSetDelivery(ctx, aw, rs)
 		restrictSkills = map[string]bool{}
 		for _, ref := range aw.Spec.SkillRefs {
 			if ref.Name != "" {
@@ -616,6 +617,14 @@ if (after === before) {
 	//     system prompt can teach the agent to read
 	//     ~/.openclaw/workspaces/<agent>/KBS.md at conversation start.
 	if len(aw.Spec.KnowledgeBaseRefs) > 0 {
+		// 6b. The seat's own gateway registrations: when the set changes,
+		//     reload the gateway's cached MCP runtimes so the agent re-lists
+		//     its governed tools on its next turn (Module 6). Non-fatal.
+		if aw.Spec.Tools != nil && len(aw.Spec.Tools.MCPServers) > 0 {
+			if err := r.reconcileGatewayRegistrations(ctx, aw, gwPod); err != nil {
+				log.Info("gateway registrations reconcile failed (continuing)", "err", err, "aw", aw.Name)
+			}
+		}
 		if err := r.reconcileKnowledgeBaseRefs(ctx, aw, &gw, gwPod); err != nil {
 			log.Info("knowledgeBaseRefs reconcile partial; will retry",
 				"err", err)

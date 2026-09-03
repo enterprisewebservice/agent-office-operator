@@ -530,6 +530,31 @@ type AgentWorkstationStatus struct {
 	// state. Standard types: Ready, Available, Progressing.
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// SkillSet is the resolved skill set (name@version) last delivered to
+	// the workspace for an agent that declares spec.skillRefs.
+	// +optional
+	SkillSet []string `json:"skillSet,omitempty"`
+
+	// SessionEpoch increments each time the delivered skill set changes
+	// after the first delivery. Skills load when a session starts, so chat
+	// layers key their sessions on this value: a new epoch is a fresh
+	// session in which the agent can use its current skills.
+	// +optional
+	SessionEpoch int64 `json:"sessionEpoch,omitempty"`
+
+	// GatewayRegistrations lists the MCPServerRegistrations in this
+	// namespace (the seat's own governed servers) as last delivered to the
+	// runtime.
+	// +optional
+	GatewayRegistrations []string `json:"gatewayRegistrations,omitempty"`
+
+	// GatewayRegistrationsHash fingerprints the registration set
+	// (name, readiness, tool count). When it changes the operator reloads
+	// the gateway's cached MCP runtimes so the agent re-lists its governed
+	// tools on its next turn -- no attendee step.
+	// +optional
+	GatewayRegistrationsHash string `json:"gatewayRegistrationsHash,omitempty"`
 }
 
 // +kubebuilder:object:root=true
