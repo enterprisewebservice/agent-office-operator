@@ -78,6 +78,15 @@ spec:
       kind: MemoryModule
       name: memorymodules.agentoffice.ai
       version: v1alpha1
+    - description: |-
+        ModelConnectionOffer is a published brain as seen from one tenant
+        workspace: the operator projects one per ModelConnection whose access
+        list admits the workspace's principal. Listing them in a workspace is
+        exactly the hiring menu the Developer Hub shows that principal.
+      displayName: Model Connection Offer
+      kind: ModelConnectionOffer
+      name: modelconnectionoffers.agentoffice.ai
+      version: v1alpha1
   description: |
     The Agent Office Operator manages governed coding agents on OpenShift.
 

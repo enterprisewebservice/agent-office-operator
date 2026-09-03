@@ -10,6 +10,7 @@ resources:
 - bases/agentoffice.ai_knowledgebases.yaml
 - bases/agentoffice.ai_autoresearchprojects.yaml
 - bases/agentoffice.ai_modelconnections.yaml
+- bases/agentoffice.ai_modelconnectionoffers.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

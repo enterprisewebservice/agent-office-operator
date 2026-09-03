@@ -31,6 +31,9 @@ resources:
 - skill_admin_role.yaml
 - skill_editor_role.yaml
 - skill_viewer_role.yaml
+- modelconnectionoffer_admin_role.yaml
+- modelconnectionoffer_editor_role.yaml
+- modelconnectionoffer_viewer_role.yaml
 - skillbinding_admin_role.yaml
 - skillbinding_editor_role.yaml
 - skillbinding_viewer_role.yaml

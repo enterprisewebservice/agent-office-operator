@@ -1,0 +1,164 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  creationTimestamp: null
+  name: modelconnectionoffers.agentoffice.ai
+spec:
+  group: agentoffice.ai
+  names:
+    kind: ModelConnectionOffer
+    listKind: ModelConnectionOfferList
+    plural: modelconnectionoffers
+    shortNames:
+    - mcoffer
+    singular: modelconnectionoffer
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.connectionRef
+      name: Connection
+      type: string
+    - jsonPath: .spec.kind
+      name: Kind
+      type: string
+    - jsonPath: .spec.displayName
+      name: Display
+      type: string
+    - jsonPath: .spec.offeredTo
+      name: Offered-To
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          ModelConnectionOffer is a published brain as seen from one tenant
+          workspace: the operator projects one per ModelConnection whose access
+          list admits the workspace's principal. Listing them in a workspace is
+          exactly the hiring menu the Developer Hub shows that principal.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              ModelConnectionOfferSpec is the non-secret face of a published
+              ModelConnection as offered to one tenant workspace. The operator
+              writes it; hand edits are overwritten on the next reconcile, and an
+              offer grants nothing by itself — the gateway decides from the
+              namespace's principal and the connection's access list.
+            properties:
+              access:
+                description: |-
+                  Access is the connection's access list, copied so the reader can
+                  see why the offer exists.
+                properties:
+                  groups:
+                    description: |-
+                      Groups whose members may use this connection (matched against
+                      the identity provider's group claims, e.g. `cluster-admins`,
+                      `attendees`).
+                    items:
+                      type: string
+                    type: array
+                  users:
+                    description: Users allowed individually, by username.
+                    items:
+                      type: string
+                    type: array
+                type: object
+              connectionRef:
+                description: |-
+                  ConnectionRef is the ModelConnection this offer mirrors — the
+                  value a workstation puts in spec.model.connectionRef.
+                type: string
+              description:
+                type: string
+              displayName:
+                type: string
+              kind:
+                description: ModelConnectionKind classifies how a connection reaches
+                  its model.
+                enum:
+                - subscription
+                - apiKey
+                - endpoint
+                type: string
+              models:
+                description: |-
+                  Models the connection publishes (ids and labels — no endpoint,
+                  no credential).
+                items:
+                  description: |-
+                    ModelCatalogEntry is one model advertised to agents on the
+                    canonical `openai` provider.
+                  properties:
+                    id:
+                      description: ID is the provider-side model id (e.g. "gpt-5.6-sol").
+                      type: string
+                    name:
+                      description: Name is the human-readable label. Defaults to ID.
+                      type: string
+                  required:
+                  - id
+                  type: object
+                type: array
+              offeredTo:
+                description: |-
+                  OfferedTo names what matched the access list for this workspace:
+                  "user:<name>" or "group:<name>".
+                type: string
+              provider:
+                description: ModelProvider identifies which LLM backend an AgentWorkstation
+                  uses.
+                enum:
+                - smr
+                - anthropic
+                - openai
+                - openai-codex
+                - custom
+                type: string
+            required:
+            - connectionRef
+            type: object
+          status:
+            description: |-
+              ModelConnectionOfferStatus records which revision of the connection
+              the offer mirrors.
+            properties:
+              connectionGeneration:
+                description: |-
+                  ConnectionGeneration is the metadata.generation of the
+                  ModelConnection this offer was last projected from.
+                format: int64
+                type: integer
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+status:
+  acceptedNames:
+    kind: ""
+    plural: ""
+  conditions: null
+  storedVersions: null

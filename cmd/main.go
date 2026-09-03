@@ -276,6 +276,13 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "SkillBinding")
 		os.Exit(1)
 	}
+	if err := (&controller.ModelConnectionOfferReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "ModelConnectionOffer")
+		os.Exit(1)
+	}
 	if err := (&controller.KnowledgeBaseReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),

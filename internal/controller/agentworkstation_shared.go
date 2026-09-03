@@ -238,6 +238,7 @@ func (r *AgentWorkstationReconciler) reconcileSharedFull(ctx context.Context, aw
 		}
 		meta.RemoveStatusCondition(&aw.Status.Conditions, "SkillRefsResolved")
 	}
+	r.noteModelConnectionOffer(ctx, aw)
 
 	// Resolve KnowledgeBases attached to the gateway this AW
 	// shares. Each KB shows up at /home/node/.openclaw/wiki/<kb>/

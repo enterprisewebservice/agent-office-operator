@@ -102,6 +102,19 @@ func (r *AgentGatewayReconciler) collectModelConnections(ctx context.Context, gw
 	providers := map[string]map[string]interface{}{}
 	secretData := map[string][]byte{}
 
+	// Tenant gate. A workspace that acts for a principal (namespace
+	// annotations agentoffice.ai/user|groups) renders only the
+	// connections offered to that principal — the same rule that
+	// projects its ModelConnectionOffers and filters the Developer Hub
+	// menu. Refused refs get no provider block and no projected key; the
+	// workstation carries the reason (ModelConnectionOffered=False).
+	// Platform namespaces (no annotations) render every ref, as before.
+	var gwNS corev1.Namespace
+	if err := r.Get(ctx, client.ObjectKey{Name: gw.Namespace}, &gwNS); err != nil {
+		return nil, nil, fmt.Errorf("reading namespace %s for the model connection gate: %w", gw.Namespace, err)
+	}
+	tenant, gated := tenantOf(&gwNS)
+
 	names := make([]string, 0, len(refs))
 	for n := range refs {
 		names = append(names, n)
@@ -113,6 +126,13 @@ func (r *AgentGatewayReconciler) collectModelConnections(ctx context.Context, gw
 		if err := r.Get(ctx, client.ObjectKey{Name: name}, &conn); err != nil {
 			log.Info("referenced ModelConnection not found; skipping", "connection", name, "err", err)
 			continue
+		}
+		if gated {
+			if offered, _ := connectionOfferedTo(&conn, tenant); !offered {
+				log.Info("ModelConnection not offered to this workspace; not rendered",
+					"connection", name, "namespace", gw.Namespace, "user", tenant.User, "groups", tenant.Groups)
+				continue
+			}
 		}
 		if conn.Spec.Kind != agentofficev1alpha1.ModelConnectionKindEndpoint {
 			// subscription/apiKey connections ride the gateway's

@@ -64,6 +64,7 @@ rules:
   - autoresearchprojects
   - knowledgebases
   - memorymodules
+  - modelconnectionoffers
   - skillbindings
   - skills
   verbs:
@@ -94,6 +95,7 @@ rules:
   - autoresearchprojects/status
   - knowledgebases/status
   - memorymodules/status
+  - modelconnectionoffers/status
   - modelconnections/status
   - skillbindings/status
   - skills/status
