@@ -115,6 +115,31 @@ func (r *AgentGatewayReconciler) collectModelConnections(ctx context.Context, gw
 	}
 	tenant, gated := tenantOf(&gwNS)
 
+	// Carry-over. The gateway's persisted openclaw.json keeps every
+	// provider block ever written into it (the init container seeds the
+	// file once; the provider write needs a Ready pod to exec into), and
+	// openclaw refuses to boot while a provider's ${MODELCONN_*_API_KEY}
+	// is missing. Dropping a key the persisted config still references
+	// therefore wedges the gateway: the pod rolls on the Secret change,
+	// fails to boot, and the write that would have removed the block never
+	// finds a Ready pod (seen live 2026-09-03: the Module 7 brain swap left
+	// a seat in CrashLoopBackOff). So a connection whose key is already
+	// projected stays rendered — block and key — for as long as it exists
+	// and is offered here. A swap is additive; the old lane is simply
+	// unused. Only a deleted or no-longer-offered connection is dropped.
+	var projected corev1.Secret
+	if err := r.Get(ctx, types.NamespacedName{Namespace: gw.Namespace, Name: modelConnectionsSecretName(gw.Name)}, &projected); err == nil && len(projected.Data) > 0 {
+		var all agentofficev1alpha1.ModelConnectionList
+		if err := r.List(ctx, &all); err == nil {
+			for _, c := range all.Items {
+				if _, has := projected.Data[connEnvVarName(c.Name)]; has && !refs[c.Name] {
+					refs[c.Name] = true
+					log.V(1).Info("carrying projected ModelConnection", "connection", c.Name)
+				}
+			}
+		}
+	}
+
 	names := make([]string, 0, len(refs))
 	for n := range refs {
 		names = append(names, n)
