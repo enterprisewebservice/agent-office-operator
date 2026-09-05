@@ -365,6 +365,48 @@ spec:
                     - gatewayRef
                     type: object
                 type: object
+              schedules:
+                description: |-
+                  Schedules are the agent's recurring shifts: a cron expression that
+                  wakes the agent with a message, in an isolated session, delivered
+                  best-effort. The operator renders them into the gateway's openclaw
+                  cron table on every reconcile — adding what is missing, editing
+                  what drifted, removing what this workstation declared before and
+                  no longer does — so the schedule lives in git next to the agent
+                  and comes back on its own after any loss of the gateway's runtime
+                  state (v1.7.74; before this the desks' shifts were runtime-only
+                  and vanished with a re-created gateway). Names are unique per
+                  workstation and are how the operator matches jobs.
+                items:
+                  description: |-
+                    AgentSchedule is one recurring shift of an agent (see
+                    AgentWorkstationSpec.Schedules).
+                  properties:
+                    cron:
+                      description: |-
+                        Cron is the 5-field cron expression the gateway evaluates (UTC),
+                        e.g. "5 * * * *".
+                      type: string
+                    description:
+                      description: Description is an optional human note kept on the
+                        job.
+                      type: string
+                    message:
+                      description: Message is the shift trigger the agent receives
+                        as its turn.
+                      type: string
+                    name:
+                      description: |-
+                        Name identifies the job in the gateway's cron table (unique per
+                        workstation, e.g. "wire-hourly").
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      type: string
+                  required:
+                  - cron
+                  - message
+                  - name
+                  type: object
+                type: array
               skillRefs:
                 description: |-
                   SkillRefs is this agent's OWN skill list (v1.7.68). When set, the
@@ -655,6 +697,14 @@ spec:
                 - Stopped
                 - Error
                 type: string
+              schedules:
+                description: |-
+                  Schedules lists the cron job names this workstation currently
+                  declares and the operator converged into the gateway (so a name
+                  removed from spec is removed from the gateway too).
+                items:
+                  type: string
+                type: array
               sessionEpoch:
                 description: |-
                   SessionEpoch increments each time the delivered skill set changes

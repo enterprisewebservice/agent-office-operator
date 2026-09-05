@@ -469,6 +469,19 @@ type AgentWorkstationSpec struct {
 	// behaviour: the baked catalog plus every Skill in the namespace.
 	// +optional
 	SkillRefs []SkillRef `json:"skillRefs,omitempty"`
+
+	// Schedules are the agent's recurring shifts: a cron expression that
+	// wakes the agent with a message, in an isolated session, delivered
+	// best-effort. The operator renders them into the gateway's openclaw
+	// cron table on every reconcile — adding what is missing, editing
+	// what drifted, removing what this workstation declared before and
+	// no longer does — so the schedule lives in git next to the agent
+	// and comes back on its own after any loss of the gateway's runtime
+	// state (v1.7.74; before this the desks' shifts were runtime-only
+	// and vanished with a re-created gateway). Names are unique per
+	// workstation and are how the operator matches jobs.
+	// +optional
+	Schedules []AgentSchedule `json:"schedules,omitempty"`
 }
 
 // KnowledgeBaseRef attaches a KnowledgeBase to an AgentWorkstation
@@ -549,6 +562,12 @@ type AgentWorkstationStatus struct {
 	// +optional
 	GatewayRegistrations []string `json:"gatewayRegistrations,omitempty"`
 
+	// Schedules lists the cron job names this workstation currently
+	// declares and the operator converged into the gateway (so a name
+	// removed from spec is removed from the gateway too).
+	// +optional
+	Schedules []string `json:"schedules,omitempty"`
+
 	// GatewayRegistrationsHash fingerprints the registration set
 	// (name, readiness, tool count). When it changes the operator reloads
 	// the gateway's cached MCP runtimes so the agent re-lists its governed
@@ -587,4 +606,24 @@ type AgentWorkstationList struct {
 
 func init() {
 	SchemeBuilder.Register(&AgentWorkstation{}, &AgentWorkstationList{})
+}
+
+// AgentSchedule is one recurring shift of an agent (see
+// AgentWorkstationSpec.Schedules).
+type AgentSchedule struct {
+	// Name identifies the job in the gateway's cron table (unique per
+	// workstation, e.g. "wire-hourly").
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Name string `json:"name"`
+
+	// Cron is the 5-field cron expression the gateway evaluates (UTC),
+	// e.g. "5 * * * *".
+	Cron string `json:"cron"`
+
+	// Message is the shift trigger the agent receives as its turn.
+	Message string `json:"message"`
+
+	// Description is an optional human note kept on the job.
+	// +optional
+	Description string `json:"description,omitempty"`
 }
