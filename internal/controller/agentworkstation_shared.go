@@ -617,15 +617,26 @@ if (after === before) {
 	//     markdown file in the agent's workspace dir. The agent's
 	//     system prompt can teach the agent to read
 	//     ~/.openclaw/workspaces/<agent>/KBS.md at conversation start.
-	if len(aw.Spec.KnowledgeBaseRefs) > 0 {
-		// 6b. The seat's own gateway registrations: when the set changes,
-		//     reload the gateway's cached MCP runtimes so the agent re-lists
-		//     its governed tools on its next turn (Module 6). Non-fatal.
-		if aw.Spec.Tools != nil && len(aw.Spec.Tools.MCPServers) > 0 {
-			if err := r.reconcileGatewayRegistrations(ctx, aw, gwPod); err != nil {
-				log.Info("gateway registrations reconcile failed (continuing)", "err", err, "aw", aw.Name)
-			}
+	// 6b. The seat's own gateway registrations: when the set changes,
+	//     reload the gateway's cached MCP runtimes so the agent re-lists
+	//     its governed tools on its next turn (Module 6). Runs for every
+	//     workstation with MCP servers, knowledge bases or not. Non-fatal.
+	if aw.Spec.Tools != nil && len(aw.Spec.Tools.MCPServers) > 0 {
+		if err := r.reconcileGatewayRegistrations(ctx, aw, gwPod); err != nil {
+			log.Info("gateway registrations reconcile failed (continuing)", "err", err, "aw", aw.Name)
 		}
+	}
+
+	// 6c. v1.7.75: the workstation's declared schedules (spec.schedules)
+	//     converge into the gateway's cron table — missing jobs are added,
+	//     drifted ones edited, jobs we declared earlier and no longer
+	//     declare are removed. Adopts identical hand-made jobs silently.
+	//     Non-fatal; the verdict lives in the SchedulesConverged condition.
+	if err := r.reconcileSchedules(ctx, aw, gwPod); err != nil {
+		log.Info("schedules reconcile failed (continuing)", "err", err, "aw", aw.Name)
+	}
+
+	if len(aw.Spec.KnowledgeBaseRefs) > 0 {
 		if err := r.reconcileKnowledgeBaseRefs(ctx, aw, &gw, gwPod); err != nil {
 			log.Info("knowledgeBaseRefs reconcile partial; will retry",
 				"err", err)
