@@ -93,17 +93,23 @@ func planSchedules(agent string, declared []agentofficev1alpha1.AgentSchedule, p
 	var ops []scheduleOp
 	want := map[string]bool{}
 	for _, s := range declared {
+		// v1.7.76: openclaw stores the message and expression trimmed. A YAML
+		// block scalar (`message: |`) carries a trailing newline, which made
+		// every reconcile see drift and re-edit the job forever. Compare and
+		// send the trimmed forms so an identical job is adopted silently.
+		msg := strings.TrimSpace(s.Message)
+		cron := strings.TrimSpace(s.Cron)
 		want[s.Name] = true
 		j, exists := byName[s.Name]
 		switch {
 		case !exists:
-			args := []string{"openclaw", "cron", "add", s.Name, s.Message, "--cron", s.Cron, "--agent", agent, "--best-effort-deliver", "--display-name", s.Name}
+			args := []string{"openclaw", "cron", "add", s.Name, msg, "--cron", cron, "--agent", agent, "--best-effort-deliver", "--display-name", s.Name}
 			if s.Description != "" {
 				args = append(args, "--description", s.Description)
 			}
 			ops = append(ops, scheduleOp{Kind: "add", Name: s.Name, Args: args})
-		case j.Schedule.Expr != s.Cron || j.Payload.Message != s.Message || (j.AgentID != "" && j.AgentID != agent):
-			ops = append(ops, scheduleOp{Kind: "edit", Name: s.Name, Args: []string{"openclaw", "cron", "edit", j.ID, "--cron", s.Cron, "--message", s.Message, "--agent", agent, "--best-effort-deliver"}})
+		case strings.TrimSpace(j.Schedule.Expr) != cron || strings.TrimSpace(j.Payload.Message) != msg || (j.AgentID != "" && j.AgentID != agent):
+			ops = append(ops, scheduleOp{Kind: "edit", Name: s.Name, Args: []string{"openclaw", "cron", "edit", j.ID, "--cron", cron, "--message", msg, "--agent", agent, "--best-effort-deliver"}})
 		}
 	}
 	// Removals: names we declared before and no longer do.

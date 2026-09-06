@@ -51,3 +51,20 @@ func TestPlanSchedulesAdoptsEditsAddsAndRemoves(t *testing.T) {
 		t.Fatalf("message must be passed verbatim as argv, got %q", ops[0].Args)
 	}
 }
+
+// v1.7.76: a block-scalar message (trailing newline) must adopt the stored,
+// trimmed job silently instead of editing it on every reconcile.
+func TestPlanSchedulesTrailingNewlineIsNotDrift(t *testing.T) {
+	declared := []agentofficev1alpha1.AgentSchedule{{Name: "ub-scout-daily", Cron: "10 13 * * *", Message: "Shift trigger (daily): run your pass.\n"}}
+	jobs := []cronJob{{ID: "j1", Name: "ub-scout-daily", AgentID: "upstreambeat-scout"}}
+	jobs[0].Schedule.Expr = "10 13 * * *"
+	jobs[0].Payload.Message = "Shift trigger (daily): run your pass."
+	if ops := planSchedules("upstreambeat-scout", declared, []string{"ub-scout-daily"}, jobs); len(ops) != 0 {
+		t.Fatalf("expected no ops for a trailing-newline-only difference, got %+v", ops)
+	}
+	// and when it IS missing, the add sends the trimmed message
+	ops := planSchedules("upstreambeat-scout", declared, nil, nil)
+	if len(ops) != 1 || ops[0].Kind != "add" || ops[0].Args[4] != "Shift trigger (daily): run your pass." {
+		t.Fatalf("expected one add with trimmed message, got %+v", ops)
+	}
+}
