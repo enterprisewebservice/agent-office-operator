@@ -34,13 +34,35 @@ import (
 	agentofficev1alpha1 "github.com/enterprisewebservice/agent-office-operator/api/v1alpha1"
 )
 
+// activityFindPath returns a PATH under which `find` understands the one
+// invocation the activity script makes (`find DIR -path
+// '*/sessions/*.jsonl' -printf '%T@\n'`): the host's own when it is GNU
+// find, otherwise a perl stand-in, so the loop and its exit status are
+// tested on macOS too.
+func activityFindPath(t *testing.T) string {
+	t.Helper()
+	if out, err := exec.Command("find", ".", "-maxdepth", "0", "-printf", "%T@").CombinedOutput(); err == nil && len(out) > 0 {
+		return os.Getenv("PATH")
+	}
+	if _, err := exec.LookPath("perl"); err != nil {
+		t.Skip("neither GNU find nor perl on this host; the gateway image has GNU find")
+	}
+	bin := t.TempDir()
+	stub := "#!/bin/sh\n" +
+		`exec perl -MFile::Find -e 'find(sub { print((stat($_))[9], "\n") if -f $_ && $File::Find::name =~ m{/sessions/.*\.jsonl$} }, $ARGV[0])' "$1"` + "\n"
+	if err := os.WriteFile(filepath.Join(bin, "find"), []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return bin + string(os.PathListSeparator) + os.Getenv("PATH")
+}
+
 // The shipped activity script, run against a fixture agents dir. The
 // sqlite side files are touched AFTER the transcript — exactly what a
-// config reload does — and must not count.
+// config reload does — and must not count. The last agent listed has no
+// transcript, like "main" on a real gateway, and the script must still
+// exit 0 (v1.7.77 exited 1 there and the pass was dropped).
 func TestAgentActivityScriptCountsTranscriptsOnly(t *testing.T) {
-	if out, err := exec.Command("find", ".", "-maxdepth", "0", "-printf", "%T@").CombinedOutput(); err != nil || len(out) == 0 {
-		t.Skip("find without -printf on this host; the gateway image has GNU find")
-	}
+	path := activityFindPath(t)
 	root := t.TempDir()
 	touch := func(rel string, at time.Time) {
 		p := filepath.Join(root, rel)
@@ -66,14 +88,17 @@ func TestAgentActivityScriptCountsTranscriptsOnly(t *testing.T) {
 	touch("busy/agent/openclaw-agent.sqlite-wal", reload)
 	touch("idle/agent/openclaw-agent.sqlite-shm", reload)
 	touch("idle/agent/models.json", reload)
+	touch("main/agent/openclaw-agent.sqlite-wal", reload) // sorts last, no transcript
 
 	script := strings.Replace(agentActivityScript, "/home/node/.openclaw/agents/*/", root+"/*/", 1)
 	if script == agentActivityScript {
 		t.Fatal("could not redirect the agents dir; the script's loop line changed")
 	}
-	out, err := exec.Command("sh", "-c", script).CombinedOutput()
+	cmd := exec.Command("sh", "-c", script)
+	cmd.Env = append(os.Environ(), "PATH="+path)
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("run activity script: %v\n%s", err, out)
+		t.Fatalf("activity script must exit 0 even when the last agent has no transcript: %v\n%s", err, out)
 	}
 	seen := parseAgentActivity(string(out))
 	if len(seen) != 1 || !seen["busy"].Equal(turn) {

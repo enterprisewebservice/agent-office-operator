@@ -100,12 +100,15 @@ func (r *AgentGatewayReconciler) recordAgentActivity(
 }
 
 // agentActivityScript prints "<agent-id> <unix-seconds>" for every agent
-// that has a session transcript, using the newest one.
+// that has a session transcript, using the newest one. It must exit 0
+// when the last agent listed has no transcript (the "main" agent usually
+// doesn't): a trailing `[ -n "$t" ] && echo` made the loop exit 1 and the
+// exec error dropped the whole pass (v1.7.77).
 const agentActivityScript = `for d in /home/node/.openclaw/agents/*/; do
   [ -d "$d" ] || continue
   n=$(basename "$d")
   t=$(find "$d" -path '*/sessions/*.jsonl' -printf '%T@\n' 2>/dev/null | sort -rn | head -1)
-  [ -n "$t" ] && echo "$n ${t%%.*}"
+  if [ -n "$t" ]; then echo "$n ${t%%.*}"; fi
 done`
 
 // activitySignalCondition marks an AgentWorkstation whose
