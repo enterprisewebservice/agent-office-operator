@@ -32,6 +32,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -176,8 +177,18 @@ func (r *AgentGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if err == nil && convergePending && res.RequeueAfter == 0 {
 		res.RequeueAfter = 30 * time.Second
 	}
+	// v1.7.77: a settled gateway comes back on its own so 3b keeps
+	// lastActivity current. Until now the agent reconcile re-ran this one
+	// on every pass by stamping an annotation; that stamp is gone.
+	if err == nil && res.RequeueAfter == 0 {
+		res.RequeueAfter = gatewayResyncInterval
+	}
 	return res, err
 }
+
+// gatewayResyncInterval is how often a settled gateway is reconciled
+// without an event — the freshness of status.lastActivity.
+const gatewayResyncInterval = 5 * time.Minute
 
 // maybeMergeAllowedUsers writes the configured spec.allowedUsers IDs
 // into the matching <channel>-<accountId>-allowFrom.json on the
@@ -1119,7 +1130,10 @@ func (r *AgentGatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Watches(&agentofficev1alpha1.KnowledgeBase{}, handler.EnqueueRequestsFromMapFunc(mapKB)).
 		Watches(&agentofficev1alpha1.ModelConnection{}, handler.EnqueueRequestsFromMapFunc(mapMC)).
-		Watches(&agentofficev1alpha1.AgentWorkstation{}, handler.EnqueueRequestsFromMapFunc(mapAW)).
+		// Status-only AW updates (lastActivity, which this reconciler writes
+		// itself) carry nothing the gateway renders.
+		Watches(&agentofficev1alpha1.AgentWorkstation{}, handler.EnqueueRequestsFromMapFunc(mapAW),
+			builder.WithPredicates(ignoreStatusOnlyUpdates())).
 		// spec.hooks.tokenSecretRef names a Secret the operator does not
 		// own; react to it appearing or rotating (see
 		// mapHooksSecretToGateways).

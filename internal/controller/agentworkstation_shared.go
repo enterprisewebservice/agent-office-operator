@@ -855,24 +855,23 @@ func truncate(s string, n int) string {
 // AW. Added in v1.4.0; substantially refactored in v1.4.1 to fix a
 // race with the AgentGateway reconciler.
 //
-// Two responsibilities here:
+// For each declared MCP server, render its openclaw entry and — only if
+// the live entry differs (v1.7.77, see mcp_servers_drift.go) — exec
+// `openclaw mcp set <name> '<json>'` inside the gateway pod. openclaw
+// replaces by name, and the runtime hot-reloads mcp.* changes. A
+// rotated header credential is a difference, so rotation still lands:
+// Secret watch → AW reconcile → mcp set.
 //
-//  1. For each declared MCP server, exec `openclaw mcp set
-//     <name> '<json>'` inside the gateway pod. Idempotent — openclaw
-//     replaces by name. The pod auto-reloads on openclaw.json change.
-//
-//  2. If any server declares an EnvFromSecret, TOUCH the AgentGateway
-//     CR (annotation bump) so the AgentGateway reconciler runs
-//     immediately and picks up the new EnvFromSecret in its
-//     collectMCPEnvFromSecrets() pass — which is where the envFrom
-//     + Reloader annotation actually get applied to the Deployment.
-//
-// v1.4.0 tried to do step 2's work HERE (patch the Deployment
-// directly). That lost the race against the AG reconciler, which
-// owns the Deployment via SetControllerReference and rebuilds the
-// pod template from scratch every pass — wiping our patches. v1.4.1
-// moves the merge into the AG reconciler and uses this AW reconciler
-// only to nudge it.
+// The envFrom + Reloader wiring for EnvFromSecret lives in the
+// AgentGateway reconciler (collectMCPEnvFromSecrets), which owns the
+// Deployment and rebuilds its pod template every pass — v1.4.0 patched
+// the Deployment from here and lost that race. The AG controller
+// watches AgentWorkstations, so the AW change that adds or drops a
+// Secret re-runs it directly. Until v1.7.77 this function also stamped
+// time.Now() onto the AgentGateway on every pass "for promptness"; that
+// re-ran the gateway reconcile each time, whose activity patch re-ran
+// this reconcile — the loop that rewrote openclaw.json every few
+// seconds. The stamp is gone, and the stale annotation is removed.
 //
 // Errors are returned for the caller to surface in status; the
 // caller treats partial failure as non-fatal (the agent itself is
@@ -891,104 +890,70 @@ func (r *AgentWorkstationReconciler) reconcileMCPServers(
 ) error {
 	log := logf.FromContext(ctx)
 
-	// Step 1: openclaw mcp set per server.
+	// The pre-v1.7.77 per-pass touch left a frozen timestamp behind.
+	// Nothing reads it; drop it so the gateway carries no stale state.
+	if _, stale := gw.Annotations[legacyMCPSecretsTouchAnnotation]; stale {
+		patch := client.MergeFrom(gw.DeepCopy())
+		delete(gw.Annotations, legacyMCPSecretsTouchAnnotation)
+		if err := r.Patch(ctx, gw, patch); err != nil {
+			log.Info("could not remove legacy mcp touch annotation (continuing)",
+				"gateway", gw.Name, "err", err.Error())
+		}
+	}
+
+	desired := make(map[string]map[string]interface{}, len(aw.Spec.Tools.MCPServers))
+	order := make([]string, 0, len(aw.Spec.Tools.MCPServers))
 	for _, srv := range aw.Spec.Tools.MCPServers {
-		// Translate the CRD transport to openclaw's config value.
-		//
-		// The CRD's "http" means "modern Streamable HTTP". But openclaw's
-		// "http" value selects its LEGACY GET-first SSE client, which
-		// CANNOT talk to a Streamable-HTTP gateway: it opens GET /mcp as
-		// the primary connection and either blocks on the broker's silent
-		// 200 stream (30s timeout) or fatals on a 405 — either way it
-		// fails to start the server and the agent loads ZERO tools.
-		// openclaw's value for the POST-first transport (initialize via
-		// POST, optional/graceful notification stream) is "streamable-http".
-		// So map "http"/"" → "streamable-http"; pass "sse" through.
-		openclawType := "streamable-http"
-		if srv.Type == "sse" {
-			openclawType = "sse"
-		}
-		// openclaw selects its MCP client from the "transport" field, NOT
-		// "type" (verified in /app/dist: `else if (config.transport)
-		// transport = config.transport`). Writing "type" was silently
-		// ignored — openclaw fell back to its legacy SSE client, which
-		// can't talk to the Streamable-HTTP gateway, so agents loaded ZERO
-		// tools. Write "transport"; openclaw infers the http server kind
-		// from the URL. (Proven: with transport=streamable-http an agent
-		// loaded github_/projectboard_ tools and created a real board.)
-		cfg := map[string]interface{}{
-			"url":       srv.URL,
-			"transport": openclawType,
-		}
-		// v1.7.46: header credentials are CONFIG-delivered. A `${KEY}`
-		// that resolves from the server's EnvFromSecret is rendered as
-		// the LITERAL Secret value here — the runtime classifies any
-		// mcp.* config change as hot (dispose-mcp-runtimes) and the
-		// next tool call reconnects with the fresh credential, no pod
-		// roll. The matching envFrom/envSecretsHash exclusion lives in
-		// collectMCPEnvFromSecrets; the Secret watch in
-		// SetupWithManager re-runs this on every rotation. Refs that
-		// don't resolve stay literal `${KEY}` for openclaw's own env
-		// expansion (the env-delivery fallback path).
-		headers := srv.Headers
+		var secretData map[string][]byte
 		if srv.EnvFromSecret != "" && len(srv.Headers) > 0 {
 			var sec corev1.Secret
 			if err := r.Get(ctx, client.ObjectKey{Namespace: gw.Namespace, Name: srv.EnvFromSecret}, &sec); err != nil {
 				log.Info("mcp header credential secret unreadable; leaving env-var refs for env delivery",
 					"secret", srv.EnvFromSecret, "server", srv.Name, "err", err.Error())
-			} else if resolved, n := resolveMCPHeaderCredentials(srv.Headers, sec.Data); n > 0 {
-				headers = resolved
+			} else {
+				secretData = sec.Data
 			}
 		}
-		if len(headers) > 0 {
-			cfg["headers"] = headers
+		if _, dup := desired[srv.Name]; !dup {
+			order = append(order, srv.Name)
 		}
+		desired[srv.Name] = renderMCPServerConfig(srv, secretData)
+	}
+
+	drift, err := r.mcpServersDrift(ctx, gwPod, desired)
+	if err != nil {
+		return err
+	}
+	for _, name := range order {
+		fields, differs := drift[name]
+		if !differs {
+			continue
+		}
+		cfg := desired[name]
 		cfgJSON, err := json.Marshal(cfg)
 		if err != nil {
-			return fmt.Errorf("marshal mcp config for %q: %w", srv.Name, err)
+			return fmt.Errorf("marshal mcp config for %q: %w", name, err)
 		}
 		out, err := r.execInPod(ctx, gwPod, []string{
-			"openclaw", "mcp", "set", srv.Name, string(cfgJSON),
+			"openclaw", "mcp", "set", name, string(cfgJSON),
 		})
 		if err != nil {
 			return fmt.Errorf("openclaw mcp set %q: %w (out=%s)",
-				srv.Name, err, strings.TrimSpace(out))
+				name, err, scrubHeaderValues(strings.TrimSpace(out), cfg))
 		}
 		log.Info("mcp server registered with openclaw",
-			"name", srv.Name, "agent", aw.Name,
-			"url", srv.URL, "type", openclawType)
+			"name", name, "agent", aw.Name, "url", cfg["url"],
+			"transport", cfg["transport"], "changed", strings.Join(fields, ","))
 	}
-
-	// Step 2: any EnvFromSecret declared? Touch the AgentGateway so
-	// its reconciler runs and re-builds the Deployment with the new
-	// secrets in envFrom + Reloader annotation. Watches on
-	// AgentWorkstation also trigger this, but the explicit touch
-	// guarantees promptness for users testing manually.
-	hasEnvFromSecret := false
-	for _, srv := range aw.Spec.Tools.MCPServers {
-		if srv.EnvFromSecret != "" {
-			hasEnvFromSecret = true
-			break
-		}
-	}
-	if !hasEnvFromSecret {
-		return nil
-	}
-	if gw.Annotations == nil {
-		gw.Annotations = map[string]string{}
-	}
-	desired := fmt.Sprintf("%d", time.Now().Unix())
-	if gw.Annotations["agentoffice.ai/mcp-secrets-touch"] != desired {
-		gw.Annotations["agentoffice.ai/mcp-secrets-touch"] = desired
-		if err := r.Update(ctx, gw); err != nil {
-			return fmt.Errorf("touch gateway %s/%s for mcp reconcile: %w",
-				gw.Namespace, gw.Name, err)
-		}
-		log.Info("touched gateway for mcp envFrom reconcile",
-			"gateway", gw.Name, "agent", aw.Name)
+	if len(drift) == 0 {
+		log.V(1).Info("mcp servers already current", "agent", aw.Name, "servers", len(order))
 	}
 	return nil
 }
+
+// legacyMCPSecretsTouchAnnotation is the AgentGateway annotation
+// reconcileMCPServers bumped to time.Now() on every pass until v1.7.77.
+const legacyMCPSecretsTouchAnnotation = "agentoffice.ai/mcp-secrets-touch"
 
 // reconcileKnowledgeBaseRefs (v1.5.0+) renders a per-agent KBS.md into
 // the agent's workspace directory inside the gateway pod, describing
