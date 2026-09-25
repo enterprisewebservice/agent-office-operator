@@ -54,8 +54,9 @@ func TestCodexAuthSyncContainerWiring(t *testing.T) {
 // Guard the embed: a renamed or mis-pathed script file would compile
 // to an empty (or wrong) CM key and the sidecar would crash-loop on a
 // missing file. Marker strings pin the parts the operator's contract
-// depends on: the store tables, the agent-store path layout, and the
-// two files the mirror step copies between.
+// depends on: the store tables, the agent-store path layout, the two
+// files the mirror step copies between, and the provision pass's
+// inputs (agents.list, the runtime's plugin-sdk initializer).
 func TestCodexAuthSyncScriptEmbedded(t *testing.T) {
 	s := templates.CodexAuthSyncScript
 	for _, marker := range []string{
@@ -65,6 +66,14 @@ func TestCodexAuthSyncScriptEmbedded(t *testing.T) {
 		"/home/node/.openclaw/agents",
 		"/var/lib/codex-auth/auth.json",
 		"/home/node/.codex/auth.json",
+		// v1.7.79 provision pass: the roster it reads, the runtime
+		// initializer it prefers, the schema it falls back to.
+		"/home/node/.openclaw/openclaw.json",
+		"agents.list",
+		"/app/dist/plugin-sdk",
+		"sqlite-runtime.js",
+		"ensureOpenClawAgentDatabaseSchema",
+		"schema_meta",
 	} {
 		if !strings.Contains(s, marker) {
 			t.Errorf("embedded codex-auth-sync.mjs lacks %q", marker)

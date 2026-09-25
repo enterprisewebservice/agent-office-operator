@@ -226,6 +226,56 @@ oc exec -n agent-office deploy/newsroom-gateway -c openclaw -- node -e 'fetch("h
 
 `200` means the ingress is live; a wrong token answers `401`.
 
+## AgentGateway `spec.codexCredentialsSecretRef` — the codex-auth-sync sidecar
+
+A gateway that bills to the ChatGPT/Codex subscription names the Secret
+holding `auth.json` (ESO keeps it fresh from Vault; the Dev Hub Codex card
+re-authenticates it). The operator mounts that Secret read-only, and the
+`codex-auth-sync` sidecar — `internal/templates/codex-auth-sync.mjs`,
+rendered into the gateway's config ConfigMap and run on the gateway's own
+OpenClaw image so `node:sqlite` matches the runtime — does three things
+every 30 s:
+
+1. **Mirror** the Secret projection into the writable
+   `/home/node/.codex/auth.json`, the path OpenClaw and codex-acp read
+   (copy on content change only).
+2. **Provision** (v1.7.79) the per-agent store
+   `/home/node/.openclaw/agents/<id>/agent/openclaw-agent.sqlite` for every
+   agent in the gateway's `agents.list` that lacks one. OpenClaw creates
+   that store lazily on the agent's first *write* — an OAuth login or a
+   refresh it persists itself — and a Codex hire never writes, because its
+   credential arrives from outside. Until v1.7.79 the store never appeared,
+   the seed pass had nothing to seed, and the agent's first turn failed with
+   `No API key found for provider "openai"` even though the pod held a good
+   `auth.json`. The store is created by the runtime's own initializer
+   (`ensureOpenClawAgentDatabaseSchema` from the image's public plugin SDK,
+   `/app/dist/plugin-sdk/sqlite-runtime.js` — the same function the gateway
+   runs on that first write), so schema, `user_version` and the `schema_meta`
+   ownership row are whatever the running runtime says. Only when that entry
+   is missing does an embedded copy of the 2026.7.1 schema stand in, and the
+   sidecar log says so. Directories with no `agents.list` entry (`main`, a
+   de-registered agent) are never provisioned.
+3. **Seed** each agent store with the shared OAuth profile when it holds no
+   usable `openai` profile or `auth.json` carries a strictly newer token.
+   Never downgrades (OpenClaw's own refresh may be fresher than the Secret;
+   an expired-but-refreshable profile still counts), never touches other
+   providers' profiles or state it does not own, and never copies another
+   agent's store (a shared refresh-token lineage strands both).
+
+Watch it, and run one tick by hand, from the sidecar container:
+
+```bash
+oc logs -n agent-office deploy/research-gateway -c codex-auth-sync --tail=20
+```
+
+```bash
+oc exec -n agent-office deploy/research-gateway -c codex-auth-sync -- env CODEX_SYNC_ONCE=1 node /var/lib/codex-auth-sync/codex-auth-sync.mjs
+```
+
+A script change rolls every Codex gateway once (the pod template carries
+the script's hash), so a release that touches the sidecar restarts those
+gateways.
+
 ## Build pipeline
 
 Three Tekton PipelineRuns in `.tekton/`, all triggered by Pipelines-as-Code

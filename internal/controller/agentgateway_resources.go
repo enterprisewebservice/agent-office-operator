@@ -283,6 +283,20 @@ func codexAuthSyncScriptHash() string {
 // container, and the only image guaranteed to carry the node:sqlite
 // runtime matching the DBs it touches — and therefore needs the
 // workspace PVC mount the shell loop never had.
+//
+// v1.7.79 adds a provision pass ahead of the seed pass: the store
+// itself. OpenClaw creates agents/<id>/agent/openclaw-agent.sqlite
+// lazily, on the agent's first WRITE to it, and a Codex hire never
+// writes — its credential comes from auth.json — so a new hire's dir
+// held only models.json, the seed pass found nothing, and the first
+// turn failed with `No API key found for provider "openai"`
+// (runtab-help, 2026-09-25). The sidecar now creates the store for
+// every agent in the gateway's agents.list that lacks one, through
+// the runtime's own initializer (ensureOpenClawAgentDatabaseSchema
+// from the image's public plugin SDK — which is why the sidecar must
+// keep running on the gateway image, where /app/dist/plugin-sdk
+// lives), falling back to an embedded copy of the runtime's schema
+// only when that entry is missing.
 func codexAuthSyncContainer(image string) corev1.Container {
 	return corev1.Container{
 		Name:            "codex-auth-sync",
@@ -779,8 +793,11 @@ func (r *AgentGatewayReconciler) reconcileGatewayDeployment(ctx context.Context,
 					// overwrote. Also: if Codex creds are wired,
 					// copy auth.json from the read-only Secret mount
 					// into the writable .codex/ emptyDir so codex-acp
-					// can boot. Subsequent ESO refreshes are
-					// propagated by the codex-auth-sync sidecar.
+					// can boot. Subsequent ESO refreshes — and the
+					// per-agent auth stores themselves (v1.7.79) —
+					// are handled by the codex-auth-sync sidecar,
+					// which runs node on the gateway image; this
+					// ubi-minimal step has neither.
 					Command: []string{"/bin/sh", "-c", `
 						set -eu
 						if [ ! -f /workspace/openclaw.json ]; then
