@@ -64,15 +64,15 @@ const MemoryModulesPage: React.FC = () => {
 
   return (
     <>
-      <PageSection variant="light">
+      <PageSection hasBodyWrapper={false} >
         <Title headingLevel="h1">Memory Modules</Title>
-        <p style={{ marginTop: 8, color: 'var(--pf-v5-global--Color--200)' }}>
+        <p style={{ marginTop: 8, color: 'var(--pf-t--global--text--color--subtle)' }}>
           Shared <code>.md</code> content (AGENTS.md / USER.md / SKILL_*.md) referenced by one or
           more AgentWorkstations. The operator computes a content hash so the UI can show which
           agents share which memory.
         </p>
       </PageSection>
-      <PageSection>
+      <PageSection hasBodyWrapper={false}>
         {!loaded && (
           <Bullseye>
             <Spinner />
@@ -135,7 +135,7 @@ const MemoryModulesPage: React.FC = () => {
                         <strong>filename:</strong> <code>{m.spec?.filename}</code>
                       </p>
                       {m.spec?.description && (
-                        <p style={{ marginBottom: 8, color: 'var(--pf-v5-global--Color--200)' }}>
+                        <p style={{ marginBottom: 8, color: 'var(--pf-t--global--text--color--subtle)' }}>
                           {m.spec.description}
                         </p>
                       )}

@@ -42,7 +42,7 @@ const phaseColor = (phase?: string) => {
     case 'Provisioning':
       return 'orange';
     case 'Pending':
-      return 'gold';
+      return 'yellow';
     case 'Error':
       return 'red';
     default:
@@ -59,16 +59,16 @@ const AgentGatewaysPage: React.FC = () => {
 
   return (
     <>
-      <PageSection variant="light">
+      <PageSection hasBodyWrapper={false} >
         <Title headingLevel="h1">Agent Gateways</Title>
-        <p style={{ marginTop: 8, color: 'var(--pf-v5-global--Color--200)' }}>
+        <p style={{ marginTop: 8, color: 'var(--pf-t--global--text--color--subtle)' }}>
           Shared OpenClaw gateway runtimes. Each gateway pod hosts one or more
           AgentWorkstations as logical openclaw agents (per
           <code> spec.runtime.shared.gatewayRef</code>) and pairs with a single
           node-host VM that serves the browser via per-agent Chromium profiles.
         </p>
       </PageSection>
-      <PageSection>
+      <PageSection hasBodyWrapper={false}>
         {!loaded && (
           <Bullseye>
             <Spinner />
@@ -112,7 +112,7 @@ const AgentGatewaysPage: React.FC = () => {
                   <CardBody style={{ display: 'flex', flexDirection: 'column', flex: 1 }}>
                     <div>
                       {gw.spec?.description && (
-                        <p style={{ marginBottom: 8, color: 'var(--pf-v5-global--Color--200)' }}>
+                        <p style={{ marginBottom: 8, color: 'var(--pf-t--global--text--color--subtle)' }}>
                           {gw.spec.description}
                         </p>
                       )}

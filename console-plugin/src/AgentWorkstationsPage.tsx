@@ -52,7 +52,7 @@ const phaseColor = (phase?: string) => {
     case 'Creating':
       return 'orange';
     case 'Pending':
-      return 'gold';
+      return 'yellow';
     case 'Stopped':
       return 'grey';
     case 'Error':
@@ -104,7 +104,7 @@ const activityColor = (iso: string | undefined, now: number) => {
   if (Number.isNaN(age)) return 'grey';
   if (age < 15 * 60 * 1000) return 'green';
   if (age < 2 * 60 * 60 * 1000) return 'blue';
-  if (age < 24 * 60 * 60 * 1000) return 'gold';
+  if (age < 24 * 60 * 60 * 1000) return 'yellow';
   return 'grey';
 };
 
@@ -198,9 +198,9 @@ const AgentWorkstationsPage: React.FC = () => {
 
   return (
     <>
-      <PageSection variant="light">
+      <PageSection hasBodyWrapper={false} >
         <Title headingLevel="h1">Agents &amp; Teams</Title>
-        <p style={{ marginTop: 8, color: 'var(--pf-v5-global--Color--200)' }}>
+        <p style={{ marginTop: 8, color: 'var(--pf-t--global--text--color--subtle)' }}>
           Every governed agent on this cluster, grouped into the team it works on. A team is one
           crew in one namespace — that namespace is its quota and blast-radius boundary — so a team
           whose members are scattered across namespaces is called out rather than quietly merged.
@@ -232,7 +232,7 @@ const AgentWorkstationsPage: React.FC = () => {
           </Flex>
         )}
       </PageSection>
-      <PageSection>
+      <PageSection hasBodyWrapper={false}>
         {!loaded && (
           <Bullseye>
             <Spinner />
@@ -303,14 +303,14 @@ const AgentWorkstationsPage: React.FC = () => {
                       </Label>
                     ))}
                     {team.gateways.map((gw) => (
-                      <Label key={gw} variant="outline" color="cyan">
+                      <Label key={gw} variant="outline" color="teal">
                         gw/{gw}
                       </Label>
                     ))}
                   </LabelGroup>
                 </FlexItem>
                 <FlexItem align={{ default: 'alignRight' }}>
-                  <span style={{ color: 'var(--pf-v5-global--Color--200)', fontSize: 13 }}>
+                  <span style={{ color: 'var(--pf-t--global--text--color--subtle)', fontSize: 13 }}>
                     {team.agents.length} {team.agents.length === 1 ? 'agent' : 'agents'} · last
                     active{' '}
                     {team.lastActivity
@@ -353,7 +353,7 @@ const AgentWorkstationsPage: React.FC = () => {
                       <CardBody style={{ display: 'flex', flexDirection: 'column', flex: 1 }}>
                         <div>
                           {a.spec?.description && (
-                            <p style={{ marginBottom: 8, color: 'var(--pf-v5-global--Color--200)' }}>
+                            <p style={{ marginBottom: 8, color: 'var(--pf-t--global--text--color--subtle)' }}>
                               {a.spec.description}
                             </p>
                           )}

@@ -16,7 +16,10 @@ import { Label } from '@patternfly/react-core/dist/dynamic/components/Label';
 import { Spinner } from '@patternfly/react-core/dist/dynamic/components/Spinner';
 import { EmptyState, EmptyStateBody } from '@patternfly/react-core/dist/dynamic/components/EmptyState';
 import { Button } from '@patternfly/react-core/dist/dynamic/components/Button';
-import { Modal, ModalVariant } from '@patternfly/react-core/dist/dynamic/components/Modal';
+import {
+	Modal,
+	ModalVariant
+} from '@patternfly/react-core/dist/dynamic/deprecated/components/Modal';
 import { Form, FormGroup, FormHelperText } from '@patternfly/react-core/dist/dynamic/components/Form';
 import { TextInput } from '@patternfly/react-core/dist/dynamic/components/TextInput';
 import { FormSelect, FormSelectOption } from '@patternfly/react-core/dist/dynamic/components/FormSelect';
@@ -24,11 +27,8 @@ import { Radio } from '@patternfly/react-core/dist/dynamic/components/Radio';
 import { Checkbox } from '@patternfly/react-core/dist/dynamic/components/Checkbox';
 import { Alert } from '@patternfly/react-core/dist/dynamic/components/Alert';
 import { HelperText, HelperTextItem } from '@patternfly/react-core/dist/dynamic/components/HelperText';
-import {
-  Select,
-  SelectOption,
-  SelectVariant,
-} from '@patternfly/react-core/dist/dynamic/deprecated/components/Select';
+import { Select, SelectList, SelectOption } from '@patternfly/react-core/dist/dynamic/components/Select';
+import { MenuToggle, MenuToggleElement } from '@patternfly/react-core/dist/dynamic/components/MenuToggle';
 import { Bullseye } from '@patternfly/react-core/dist/dynamic/layouts/Bullseye';
 import { Flex, FlexItem } from '@patternfly/react-core/dist/dynamic/layouts/Flex';
 import { Gallery } from '@patternfly/react-core/dist/dynamic/layouts/Gallery';
@@ -118,7 +118,7 @@ const SecretModel = {
 } as K8sModel;
 
 const kindColor = (k?: string) =>
-  k === 'endpoint' ? 'blue' : k === 'subscription' ? 'purple' : 'gold';
+  k === 'endpoint' ? 'blue' : k === 'subscription' ? 'purple' : 'yellow';
 
 const kindHelp: Record<string, string> = {
   endpoint:
@@ -137,7 +137,10 @@ const slugify = (s: string) =>
     .slice(0, 63);
 
 /** Checkbox multi-select over a known vocabulary, with a guarded
- *  "add another" for names that only exist in the SSO provider. */
+ *  "add another" for names that only exist in the SSO provider.
+ *  PatternFly 6: the composable Select (checkbox options keep the menu
+ *  open) plus a small text field for the add-another case, which the
+ *  removed deprecated Select used to fold into its typeahead. */
 const MultiPicker: React.FC<{
   id: string;
   options: string[];
@@ -147,34 +150,66 @@ const MultiPicker: React.FC<{
   addHint: string;
 }> = ({ id, options, value, onChange, placeholder, addHint }) => {
   const [open, setOpen] = React.useState(false);
+  const [draft, setDraft] = React.useState('');
   const all = React.useMemo(
     () => Array.from(new Set([...options, ...value])).sort(),
     [options, value],
   );
+  const toggleOne = (s: string) =>
+    onChange(value.includes(s) ? value.filter((v) => v !== s) : [...value, s]);
+  const addDraft = () => {
+    const s = draft.trim();
+    if (s && !value.includes(s)) onChange([...value, s]);
+    setDraft('');
+  };
   return (
-    <Select
-      id={id}
-      variant={SelectVariant.checkbox}
-      isOpen={open}
-      onToggle={(_e: unknown, o: boolean) => setOpen(o)}
-      selections={value}
-      onSelect={(_e: unknown, sel: unknown) => {
-        const s = String(sel);
-        onChange(value.includes(s) ? value.filter((v) => v !== s) : [...value, s]);
-      }}
-      placeholderText={placeholder}
-      isCreatable
-      createText={addHint}
-      onCreateOption={(newVal: string) => {
-        const s = newVal.trim();
-        if (s && !value.includes(s)) onChange([...value, s]);
-      }}
-      maxHeight={260}
-    >
-      {all.map((o) => (
-        <SelectOption key={o} value={o} />
-      ))}
-    </Select>
+    <>
+      <Select
+        id={id}
+        role="menu"
+        isOpen={open}
+        onOpenChange={(o) => setOpen(o)}
+        selected={value}
+        onSelect={(_e, sel) => toggleOne(String(sel))}
+        isScrollable
+        maxMenuHeight="260px"
+        toggle={(toggleRef: React.Ref<MenuToggleElement>) => (
+          <MenuToggle ref={toggleRef} onClick={() => setOpen(!open)} isExpanded={open} isFullWidth>
+            {value.length ? value.join(', ') : placeholder}
+          </MenuToggle>
+        )}
+      >
+        <SelectList>
+          {all.map((o) => (
+            <SelectOption key={o} value={o} hasCheckbox isSelected={value.includes(o)}>
+              {o}
+            </SelectOption>
+          ))}
+        </SelectList>
+      </Select>
+      <Flex spaceItems={{ default: 'spaceItemsSm' }} style={{ marginTop: 6 }}>
+        <FlexItem grow={{ default: 'grow' }}>
+          <TextInput
+            id={`${id}-add`}
+            aria-label={addHint}
+            placeholder={addHint}
+            value={draft}
+            onChange={(_e, v) => setDraft(v)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                addDraft();
+              }
+            }}
+          />
+        </FlexItem>
+        <FlexItem>
+          <Button variant="secondary" onClick={addDraft} isDisabled={!draft.trim()}>
+            Add
+          </Button>
+        </FlexItem>
+      </Flex>
+    </>
   );
 };
 
@@ -504,11 +539,11 @@ const ModelConnectionsPage: React.FC = () => {
 
   return (
     <>
-      <PageSection variant="light">
+      <PageSection hasBodyWrapper={false} >
         <Flex>
           <FlexItem>
             <Title headingLevel="h1">Model Connections</Title>
-            <p style={{ marginTop: 8, color: 'var(--pf-v5-global--Color--200)' }}>
+            <p style={{ marginTop: 8, color: 'var(--pf-t--global--text--color--subtle)' }}>
               The brains this platform publishes. Each connection is a model route
               with an access list — the hiring UI shows people only the
               connections you granted their group. Keys live in the{' '}
@@ -523,7 +558,7 @@ const ModelConnectionsPage: React.FC = () => {
           </FlexItem>
         </Flex>
       </PageSection>
-      <PageSection>
+      <PageSection hasBodyWrapper={false}>
         {!loaded && (
           <Bullseye>
             <Spinner />
@@ -562,7 +597,7 @@ const ModelConnectionsPage: React.FC = () => {
                   </CardHeader>
                   <CardBody>
                     {c.spec?.description && (
-                      <p style={{ marginBottom: 8, color: 'var(--pf-v5-global--Color--200)' }}>
+                      <p style={{ marginBottom: 8, color: 'var(--pf-t--global--text--color--subtle)' }}>
                         {c.spec.description}
                       </p>
                     )}
@@ -802,7 +837,7 @@ const ModelConnectionsPage: React.FC = () => {
                       marginTop: 8,
                       maxHeight: 180,
                       overflowY: 'auto',
-                      border: '1px solid var(--pf-v5-global--BorderColor--100)',
+                      border: '1px solid var(--pf-t--global--border--color--default)',
                       borderRadius: 4,
                       padding: 8,
                     }}
@@ -861,13 +896,11 @@ const ModelConnectionsPage: React.FC = () => {
                       />
                     </FlexItem>
                     <FlexItem>
-                      <Button
+                      <Button icon={<TimesIcon />}
                         variant="plain"
                         aria-label={`remove ${m.id}`}
                         onClick={() => toggleModel(m.id)}
-                      >
-                        <TimesIcon />
-                      </Button>
+                       />
                     </FlexItem>
                   </Flex>
                 ))}

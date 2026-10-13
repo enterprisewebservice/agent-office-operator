@@ -78,7 +78,7 @@ interface Row {
 
 const cell: React.CSSProperties = {
   padding: '10px 12px',
-  borderBottom: '1px solid var(--pf-v5-global--BorderColor--100)',
+  borderBottom: '1px solid var(--pf-t--global--border--color--default)',
   fontSize: 13,
   verticalAlign: 'top',
 };
@@ -166,9 +166,9 @@ const ModelCatalogPage: React.FC = () => {
 
   return (
     <>
-      <PageSection variant="light">
+      <PageSection hasBodyWrapper={false} >
         <Title headingLevel="h1">Model Catalog</Title>
-        <p style={{ marginTop: 8, color: 'var(--pf-v5-global--Color--200)' }}>
+        <p style={{ marginTop: 8, color: 'var(--pf-t--global--text--color--subtle)' }}>
           Every model on the platform, one row each, reconciled across its
           lanes: the <strong>agent picker</strong> (ModelConnections the hiring
           UI offers per group) and the <strong>governed MaaS lane</strong>{' '}
@@ -177,7 +177,7 @@ const ModelCatalogPage: React.FC = () => {
           differs, so the RHOAI dashboard list maps back here.
         </p>
       </PageSection>
-      <PageSection>
+      <PageSection hasBodyWrapper={false}>
         {!connsLoaded && (
           <Bullseye>
             <Spinner />
@@ -191,11 +191,11 @@ const ModelCatalogPage: React.FC = () => {
         )}
         {connsLoaded && rows.length > 0 && (
           <div style={{ overflowX: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', background: 'var(--pf-v5-global--BackgroundColor--100)' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', background: 'var(--pf-t--global--background--color--primary--default)' }}>
               <thead>
                 <tr>
                   {['Model', 'Lanes', 'Agent picker access', 'MaaS access & budget'].map((h) => (
-                    <th key={h} style={{ ...cell, textAlign: 'left', fontSize: 12, color: 'var(--pf-v5-global--Color--200)', borderBottom: '2px solid var(--pf-v5-global--BorderColor--100)' }}>
+                    <th key={h} style={{ ...cell, textAlign: 'left', fontSize: 12, color: 'var(--pf-t--global--text--color--subtle)', borderBottom: '1px solid var(--pf-t--global--border--color--default)' }}>
                       {h}
                     </th>
                   ))}
@@ -207,10 +207,10 @@ const ModelCatalogPage: React.FC = () => {
                     <td style={cell}>
                       <strong>{r.id}</strong>
                       {r.label && r.label !== r.id && (
-                        <div style={{ color: 'var(--pf-v5-global--Color--200)', fontSize: 12 }}>{r.label}</div>
+                        <div style={{ color: 'var(--pf-t--global--text--color--subtle)', fontSize: 12 }}>{r.label}</div>
                       )}
                       {r.maas && r.maas.refName !== r.id && (
-                        <div style={{ fontSize: 11, color: 'var(--pf-v5-global--Color--200)' }}>
+                        <div style={{ fontSize: 11, color: 'var(--pf-t--global--text--color--subtle)' }}>
                           in RHOAI list as <code>{r.maas.refName}</code>
                         </div>
                       )}
@@ -237,14 +237,14 @@ const ModelCatalogPage: React.FC = () => {
                         </Label>
                       )}
                       {!r.maas && r.pickerConns.length > 0 && (
-                        <div style={{ fontSize: 11, color: 'var(--pf-v5-global--Color--200)' }}>picker only — not MaaS-governed</div>
+                        <div style={{ fontSize: 11, color: 'var(--pf-t--global--text--color--subtle)' }}>picker only — not MaaS-governed</div>
                       )}
                       {r.maas && r.pickerConns.length === 0 && !r.subscriptionLane && (
-                        <div style={{ fontSize: 11, color: 'var(--pf-v5-global--Color--200)' }}>governed only — not on the hiring menu</div>
+                        <div style={{ fontSize: 11, color: 'var(--pf-t--global--text--color--subtle)' }}>governed only — not on the hiring menu</div>
                       )}
                     </td>
                     <td style={cell}>
-                      {r.pickerConns.length === 0 && <span style={{ color: 'var(--pf-v5-global--Color--200)' }}>—</span>}
+                      {r.pickerConns.length === 0 && <span style={{ color: 'var(--pf-t--global--text--color--subtle)' }}>—</span>}
                       {Array.from(
                         new Set(
                           r.pickerConns.flatMap(({ conn }) => [
@@ -259,11 +259,11 @@ const ModelCatalogPage: React.FC = () => {
                       ))}
                     </td>
                     <td style={cell}>
-                      {!r.maas && <span style={{ color: 'var(--pf-v5-global--Color--200)' }}>—</span>}
+                      {!r.maas && <span style={{ color: 'var(--pf-t--global--text--color--subtle)' }}>—</span>}
                       {r.maas &&
                         r.maas.budgets.map((b) => (
                           <Tooltip key={`bt-${r.id}-${b.sub}`} content={`subscription ${b.sub}`}>
-                            <Label color="gold" isCompact style={{ marginRight: 4, marginBottom: 2 }}>
+                            <Label color="yellow" isCompact style={{ marginRight: 4, marginBottom: 2 }}>
                               {b.owners.join(', ') || b.sub} · {b.limits}
                             </Label>
                           </Tooltip>

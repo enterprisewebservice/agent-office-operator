@@ -21,7 +21,7 @@ spec:
     - name: revision
       value: '{{revision}}'
     - name: output-image
-      value: 'quay.io/dpeterso/agent-office-plugin:v0.0.6'
+      value: 'quay.io/dpeterso/agent-office-plugin:v0.0.7'
     - name: dockerfile
       value: console-plugin/Dockerfile
     - name: path-context
