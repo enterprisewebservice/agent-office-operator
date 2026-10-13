@@ -29,6 +29,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 
 	agentofficev1alpha1 "github.com/enterprisewebservice/agent-office-operator/api/v1alpha1"
 )
@@ -233,16 +234,46 @@ func coreCacheNamespaces(ctx context.Context, cfg *rest.Config, scheme *runtime.
 }
 
 // coreByObject pins the expensive informers to the given namespaces.
-func coreByObject(namespaces []string) map[client.Object]cache.ByObject {
+//
+// The unstructured pins (Route, MCPServerRegistration, Argo Workflow)
+// belong to operators a cluster may not carry, and controller-runtime
+// refuses to start a manager whose ByObject names a kind its RESTMapper
+// cannot resolve ("failed to determine if *unstructured.Unstructured is
+// namespaced"). An ordered RHDP cluster has no Argo Workflows (2026-10-13),
+// so a kind the API server does not serve is left out, logged, and the
+// code paths that list it get the same NoKindMatch they would get from
+// an unpinned client. A nil mapper pins everything, as before.
+func coreByObject(namespaces []string, mapper meta.RESTMapper) map[client.Object]cache.ByObject {
 	scoped := map[string]cache.Config{}
 	for _, ns := range namespaces {
 		scoped[ns] = cache.Config{}
 	}
 	byObject := map[client.Object]cache.ByObject{}
 	for _, obj := range coreTypes() {
+		if u, ok := obj.(*unstructured.Unstructured); ok && mapper != nil {
+			gvk := u.GroupVersionKind()
+			if _, err := mapper.RESTMapping(gvk.GroupKind(), gvk.Version); err != nil {
+				setupLog.Info("not pinning a kind this cluster does not serve", "gvk", gvk.String(), "reason", err.Error())
+				continue
+			}
+		}
 		byObject[obj] = cache.ByObject{Namespaces: scoped}
 	}
 	return byObject
+}
+
+// restMapperFor resolves kinds against the live API server. nil when the
+// mapper cannot be built; coreByObject then pins everything, unchanged.
+func restMapperFor(cfg *rest.Config) meta.RESTMapper {
+	httpClient, err := rest.HTTPClientFor(cfg)
+	if err != nil {
+		return nil
+	}
+	mapper, err := apiutil.NewDynamicRESTMapper(cfg, httpClient)
+	if err != nil {
+		return nil
+	}
+	return mapper
 }
 
 // stripManagedFields drops the server-side-apply bookkeeping before an

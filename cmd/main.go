@@ -235,7 +235,7 @@ func main() {
 		LeaderElectionID:       "80a9df54.ai",
 		Cache: cache.Options{
 			DefaultNamespaces: defaultNamespaces,
-			ByObject:          coreByObject(coreNamespaces),
+			ByObject:          coreByObject(coreNamespaces, restMapperFor(restCfg)),
 			DefaultTransform:  stripManagedFields(),
 		},
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
