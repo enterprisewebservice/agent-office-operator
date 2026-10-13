@@ -634,7 +634,7 @@ func TestResolveTrainerImage_Precedence(t *testing.T) {
 	constP := &agentofficev1alpha1.AutoResearchProject{
 		ObjectMeta: metav1.ObjectMeta{Name: "no-cm", Namespace: "other-ns"},
 	}
-	if got := r.resolveTrainerImage(context.Background(), constP); got != defaultTrainerImage {
-		t.Errorf("const fallback: want %q, got %q", defaultTrainerImage, got)
+	if got := r.resolveTrainerImage(context.Background(), constP); got != defaultTrainerImage() {
+		t.Errorf("const fallback: want %q, got %q", defaultTrainerImage(), got)
 	}
 }

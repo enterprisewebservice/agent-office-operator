@@ -46,7 +46,6 @@ type AgentGatewaySpec struct {
 	Description string `json:"description,omitempty"`
 
 	// Image is the container image for the gateway runtime.
-	// +kubebuilder:default="quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/openclaw:latest"
 	// +optional
 	Image string `json:"image,omitempty"`
 

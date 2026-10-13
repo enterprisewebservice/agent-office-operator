@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -29,13 +30,17 @@ import (
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
+	"k8s.io/client-go/rest"
 
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -205,6 +210,18 @@ func main() {
 	// cachescope.go — without this the operator caches every ConfigMap
 	// on the cluster and OOMs before it serves anything.
 	restCfg := ctrl.GetConfigOrDie()
+
+	// CLUSTER_APPS_DOMAIN: set by the CSV when an administrator wants to pin it;
+	// otherwise derived from the cluster's Ingress config so one catalog works on
+	// every cluster (RHDP orders, the reference cluster, anything else).
+	if os.Getenv("CLUSTER_APPS_DOMAIN") == "" {
+		if d, derr := clusterAppsDomain(restCfg); derr != nil {
+			setupLog.Info("could not derive the apps domain; Route-based origins stay localhost-only", "error", derr.Error())
+		} else {
+			_ = os.Setenv("CLUSTER_APPS_DOMAIN", d)
+			setupLog.Info("derived CLUSTER_APPS_DOMAIN from ingresses.config.openshift.io/cluster", "domain", d)
+		}
+	}
 	coreNamespaces, scopePinned := coreCacheNamespaces(context.Background(), restCfg, scheme)
 	setupLog.Info("caching core types in namespaces (CRDs stay cluster-wide)",
 		"namespaces", coreNamespaces, "pinnedByEnv", scopePinned)
@@ -434,4 +451,22 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+// clusterAppsDomain reads spec.domain from ingresses.config.openshift.io/cluster.
+func clusterAppsDomain(cfg *rest.Config) (string, error) {
+	c, err := client.New(cfg, client.Options{})
+	if err != nil {
+		return "", err
+	}
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(schema.GroupVersionKind{Group: "config.openshift.io", Version: "v1", Kind: "Ingress"})
+	if err := c.Get(context.Background(), client.ObjectKey{Name: "cluster"}, u); err != nil {
+		return "", err
+	}
+	d, _, _ := unstructured.NestedString(u.Object, "spec", "domain")
+	if d == "" {
+		return "", fmt.Errorf("ingresses.config.openshift.io/cluster has no spec.domain")
+	}
+	return d, nil
 }

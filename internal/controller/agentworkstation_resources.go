@@ -16,11 +16,7 @@ import (
 	"os"
 )
 
-// DefaultOpenClawImage is the OpenClaw runtime image used when the AW
-// spec doesn't pin one. The cluster Quay only has `openclaw:latest`
-// today; `openclaw-browser:0.1.0` referenced in earlier code never
-// existed there.
-const DefaultOpenClawImage = "quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/openclaw:latest"
+// DefaultOpenClawImage lives in images.go (env-overridable).
 
 // appsDomain returns the cluster's apps domain (e.g.
 // "apps.salamander.aimlworkbench.com") used to build the Route

@@ -264,7 +264,6 @@ spec:
                     type: boolean
                 type: object
               image:
-                default: quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/openclaw:latest
                 description: Image is the container image for the gateway runtime.
                 type: string
               modelAuth:

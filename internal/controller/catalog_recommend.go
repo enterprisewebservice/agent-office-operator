@@ -23,8 +23,9 @@ import (
 	"sort"
 	"strings"
 
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"time"
+
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // POST /catalog/recommend — the one-step composer's brain.

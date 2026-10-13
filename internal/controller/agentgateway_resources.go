@@ -386,7 +386,6 @@ func gatewayVolumeMounts(gw *agentofficev1alpha1.AgentGateway, attachedKBs []age
 // Bump the tag here + re-release the operator to roll a new skill
 // catalog (incl. bundled scripts/references) into agents.
 const (
-	defaultSkillsImage = "quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/agent-office-skills:v0.0.1"
 	// MUST be a top-level path, NOT under /home/node/.openclaw. The
 	// workspace PVC mounts at /home/node/.openclaw; a nested image
 	// volume there gets shadowed by the PVC mount (the PVC mounts at
@@ -473,7 +472,7 @@ func gatewayVolumes(gw *agentofficev1alpha1.AgentGateway, dshmSize resource.Quan
 	// changed Reference ⇒ a fresh pull when the gateway pod is re-created).
 	skillsImg := gw.Spec.SkillsImage
 	if skillsImg == "" {
-		skillsImg = defaultSkillsImage
+		skillsImg = defaultSkillsImage()
 	}
 	vols = append(vols, corev1.Volume{
 		Name: skillsCatalogVolName,
@@ -668,7 +667,7 @@ func (r *AgentGatewayReconciler) reconcileGatewayPVC(ctx context.Context, gw *ag
 func (r *AgentGatewayReconciler) reconcileGatewayDeployment(ctx context.Context, gw *agentofficev1alpha1.AgentGateway, hooksSecret *corev1.SecretKeySelector, baseConfigSha string) error {
 	image := gw.Spec.Image
 	if image == "" {
-		image = DefaultOpenClawImage
+		image = DefaultOpenClawImage()
 	}
 	tokenSecretName := gwTokenName(gw.Name)
 	if gw.Spec.SharedTokenSecretRef != "" {

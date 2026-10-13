@@ -90,8 +90,6 @@ spec:
           # for each agent and embed it in openclaw.json's
           # gateway.controlUi.allowedOrigins. Without this, gateway
           # rejects "Open agent gateway" cross-origin loads.
-          - name: CLUSTER_APPS_DOMAIN
-            value: "apps.salamander.aimlworkbench.com"
         ports:
           # v0.0.55: Backstage catalog endpoint. Serves a Backstage-
           # compatible YAML representation of every ModelRegistry CR

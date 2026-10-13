@@ -575,7 +575,7 @@ func (r *AutoResearchProjectReconciler) resolveTrainerImage(ctx context.Context,
 			return strings.TrimSpace(v)
 		}
 	}
-	return defaultTrainerImage
+	return defaultTrainerImage()
 }
 
 // verifyAdapterArtifact does an OCI manifest HEAD against the given

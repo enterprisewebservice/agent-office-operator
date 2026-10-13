@@ -57,6 +57,7 @@ type AgentWorkstationReconciler struct {
 	RestConfig *rest.Config
 }
 
+// +kubebuilder:rbac:groups=config.openshift.io,resources=ingresses,verbs=get
 // +kubebuilder:rbac:groups=agentoffice.ai,resources=agentworkstations,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=agentoffice.ai,resources=agentworkstations/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=agentoffice.ai,resources=agentworkstations/finalizers,verbs=update

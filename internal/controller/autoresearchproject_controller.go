@@ -77,8 +77,6 @@ const (
 	autoResearchProjectLabel    = "agentoffice.ai/autoresearch-project"
 	autoResearchRoundAnnotation = "agentoffice.ai/autoresearch-round"
 
-	defaultTrainerImage = "quay-quay-quay-test.apps.salamander.aimlworkbench.com/deanpeterson/autoresearch-trainer:v0.0.13"
-
 	maxRecentRunsRetained = 20
 )
 
@@ -878,7 +876,7 @@ func (r *AutoResearchProjectReconciler) submitTrainerJob(ctx context.Context, p 
 
 	image := p.Spec.Trainer.Image
 	if image == "" {
-		image = defaultTrainerImage
+		image = defaultTrainerImage()
 	}
 	powerCap := int(p.Spec.Trainer.PowerCapWatts)
 	if powerCap == 0 {
