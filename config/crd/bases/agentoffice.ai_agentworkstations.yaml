@@ -115,7 +115,7 @@ spec:
                 description: Emoji icon for the agent in the office view.
                 type: string
               image:
-                default: quay.io/aicatalyst/openclaw:latest
+                default: quay.io/dpeterso/openclaw:latest
                 description: Image is the container image for the agent runtime.
                 type: string
               knowledgeBaseRefs:

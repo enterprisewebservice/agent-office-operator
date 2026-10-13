@@ -14,7 +14,7 @@ metadata:
           "spec": {
             "description": "Shared OpenClaw gateway runtime for the Karpathy auto-research crew.\nMultiple AgentWorkstations with `runtime.shared.gatewayRef:\nresearch-gateway` slot in as logical openclaw agents inside this\npod, sharing the paired browser node-host VM via a per-agent\nChromium profile.\n",
             "displayName": "Research Gateway",
-            "image": "quay.io/aicatalyst/openclaw:latest",
+            "image": "quay.io/dpeterso/openclaw:latest",
             "nodeHostRef": {
               "name": "fedora-black-zebra-36",
               "namespace": "default"
@@ -80,8 +80,8 @@ metadata:
       ]
     capabilities: Basic Install
     categories: AI/Machine Learning, Developer Tools
-    containerImage: quay.io/aicatalyst/agent-office-operator:v0.0.1
-    createdAt: "2026-10-13T04:13:05Z"
+    containerImage: quay.io/dpeterso/agent-office-operator:v0.0.1
+    createdAt: "2026-10-13T04:24:50Z"
     description: OLM-managed operator for the Governed Agent Platform. Owns the AgentWorkstation
       and MemoryModule CRDs and reconciles the per-agent runtime artifacts (Deployment,
       Service, ConfigMap, PVC) on OpenShift.
@@ -418,7 +418,7 @@ spec:
                   valueFrom:
                     fieldRef:
                       fieldPath: metadata.annotations['olm.targetNamespaces']
-                image: quay.io/aicatalyst/agent-office-operator:v1.7.80
+                image: quay.io/dpeterso/agent-office-operator:v1.7.80
                 imagePullPolicy: Always
                 livenessProbe:
                   httpGet:

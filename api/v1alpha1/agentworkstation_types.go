@@ -380,7 +380,7 @@ type AgentWorkstationSpec struct {
 	Emoji string `json:"emoji,omitempty"`
 
 	// Image is the container image for the agent runtime.
-	// +kubebuilder:default="quay.io/aicatalyst/openclaw:latest"
+	// +kubebuilder:default="quay.io/dpeterso/openclaw:latest"
 	// +optional
 	Image string `json:"image,omitempty"`
 

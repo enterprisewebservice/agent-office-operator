@@ -11,7 +11,7 @@ spec:
     research-gateway` slot in as logical openclaw agents inside this
     pod, sharing the paired browser node-host VM via a per-agent
     Chromium profile.
-  image: quay.io/aicatalyst/openclaw:latest
+  image: quay.io/dpeterso/openclaw:latest
   nodeHostRef:
     name: fedora-black-zebra-36
     namespace: default

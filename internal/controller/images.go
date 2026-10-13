@@ -6,9 +6,9 @@ import "os"
 // through an environment variable, so a catalog built for one registry still
 // works when the images are mirrored elsewhere (RHDP orders pull from quay.io).
 const (
-	fallbackOpenClawImage = "quay.io/aicatalyst/openclaw:v2026.7.1"
-	fallbackSkillsImage   = "quay.io/aicatalyst/agent-office-skills:v0.0.1"
-	fallbackTrainerImage  = "quay.io/aicatalyst/autoresearch-trainer:v0.0.13"
+	fallbackOpenClawImage = "quay.io/dpeterso/openclaw:v2026.7.1"
+	fallbackSkillsImage   = "quay.io/dpeterso/agent-office-skills:v0.0.1"
+	fallbackTrainerImage  = "quay.io/dpeterso/autoresearch-trainer:v0.0.13"
 )
 
 func envOr(key, fallback string) string {
