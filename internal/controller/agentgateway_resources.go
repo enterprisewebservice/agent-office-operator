@@ -779,6 +779,9 @@ func (r *AgentGatewayReconciler) reconcileGatewayDeployment(ctx context.Context,
 		dep.Spec.Template = corev1.PodTemplateSpec{
 			ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: podAnnotations},
 			Spec: corev1.PodSpec{
+				// spec.runtimeClassName (v1.7.83): "kata" moves the agent and
+				// everything it executes into a lightweight VM.
+				RuntimeClassName: optionalRuntimeClass(gw.Spec.RuntimeClassName),
 				ImagePullSecrets: []corev1.LocalObjectReference{
 					{Name: "quay-pull-secret"},
 				},
@@ -1008,4 +1011,13 @@ func (r *AgentGatewayReconciler) reconcileGatewayRoute(ctx context.Context, gw *
 		return nil
 	}
 	return err
+}
+
+// optionalRuntimeClass turns the spec's runtimeClassName into the pod
+// field: nil (cluster default, runc) when unset.
+func optionalRuntimeClass(name string) *string {
+	if name == "" {
+		return nil
+	}
+	return &name
 }

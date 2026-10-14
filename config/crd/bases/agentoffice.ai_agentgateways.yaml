@@ -417,6 +417,14 @@ spec:
                       More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
                     type: object
                 type: object
+              runtimeClassName:
+                description: |-
+                  RuntimeClassName names the Kubernetes RuntimeClass the gateway
+                  pod runs with (for example "kata", OpenShift sandboxed containers):
+                  the agent and everything it executes then run inside a lightweight
+                  VM, a kernel boundary that a container escape does not cross. Empty
+                  keeps the cluster default (runc). Changing it replaces the pod.
+                type: string
               sharedTokenSecretRef:
                 description: |-
                   SharedTokenSecretRef is the name of a Secret in the same

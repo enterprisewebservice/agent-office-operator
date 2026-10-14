@@ -49,6 +49,14 @@ type AgentGatewaySpec struct {
 	// +optional
 	Image string `json:"image,omitempty"`
 
+	// RuntimeClassName names the Kubernetes RuntimeClass the gateway
+	// pod runs with (for example "kata", OpenShift sandboxed containers):
+	// the agent and everything it executes then run inside a lightweight
+	// VM, a kernel boundary that a container escape does not cross. Empty
+	// keeps the cluster default (runc). Changing it replaces the pod.
+	// +optional
+	RuntimeClassName string `json:"runtimeClassName,omitempty"`
+
 	// SkillsImage overrides the OCI skills-catalog image mounted into
 	// this gateway's pods — the image whose /skills/<name>/SKILL.md
 	// folders are seeded into every agent's workspace. Bump this to roll

@@ -6,4 +6,4 @@ kind: Kustomization
 images:
 - name: controller
   newName: quay.io/dpeterso/agent-office-operator
-  newTag: v1.7.82
+  newTag: v1.7.83
