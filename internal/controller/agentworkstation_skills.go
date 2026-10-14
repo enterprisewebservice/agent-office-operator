@@ -433,12 +433,63 @@ func skillDeclaresSource(s *agentofficev1alpha1.Skill) bool {
 // and the set the skills-catalog image is baked from.
 const platformCatalogNamespace = "agent-office"
 
+// Labels the hire template stamps on the Skill resources an agent's own
+// repository carries (v1.7.82). A resource is named <agent>-<skill> so two
+// agents in one namespace never share one, and the skill-name label says
+// which skill it is; the kustomization's commonLabels add the agent label.
+const (
+	skillNameLabel  = "agentoffice.ai/skill-name"
+	skillAgentLabel = "agentoffice.ai/agent"
+)
+
+// findRefSkill locates the Skill resource a skillRef means, in this order:
+//  1. resources in the agent's namespace labelled with the skill's name —
+//     the agent's own first (agent label), then one whose version matches
+//     the pin, then the first by name;
+//  2. a resource named exactly like the skill in the agent's namespace (a
+//     hand-applied Skill, the namespace-wide grant);
+//  3. the platform catalog namespace, by name.
+//
+// Before v1.7.82 every hire rendered a Skill named like the skill itself,
+// so two agents in one namespace pinning different versions fought over
+// one resource through their GitOps applications, and the loser's
+// workspace was re-seeded every few minutes (seen 13 October 2026).
+func (r *AgentWorkstationReconciler) findRefSkill(ctx context.Context, aw *agentofficev1alpha1.AgentWorkstation, ref agentofficev1alpha1.SkillRef) (*agentofficev1alpha1.Skill, bool) {
+	var labelled agentofficev1alpha1.SkillList
+	if err := r.List(ctx, &labelled, client.InNamespace(aw.Namespace),
+		client.MatchingLabels{skillNameLabel: ref.Name}); err == nil && len(labelled.Items) > 0 {
+		items := labelled.Items
+		sort.Slice(items, func(i, j int) bool { return items[i].Name < items[j].Name })
+		for i := range items {
+			if items[i].Labels[skillAgentLabel] == aw.Name {
+				return &items[i], true
+			}
+		}
+		if ref.Version != "" {
+			for i := range items {
+				if items[i].Spec.Version == ref.Version {
+					return &items[i], true
+				}
+			}
+		}
+		return &items[0], true
+	}
+	for _, ns := range []string{aw.Namespace, platformCatalogNamespace} {
+		var skill agentofficev1alpha1.Skill
+		if err := r.Get(ctx, types.NamespacedName{Namespace: ns, Name: ref.Name}, &skill); err == nil {
+			return &skill, true
+		}
+	}
+	return nil, false
+}
+
 // listRefSkills resolves spec.skillRefs (v1.7.68): each ref is looked up
-// as a Skill in the agent's namespace first, then in the platform catalog
-// namespace; a version pin must match spec.version. Returns the rendered
-// skills in stable order plus the refs that resolved nowhere (with a
-// reason), so the caller can seed exactly the resolved set and report the
-// rest in status instead of silently dropping them.
+// through findRefSkill; a version pin must match spec.version. Returns the
+// rendered skills in stable order plus the refs that resolved nowhere (with
+// a reason), so the caller can seed exactly the resolved set and report the
+// rest in status instead of silently dropping them. The resolved entry
+// carries the skill's logical name (the ref), whatever the resource is
+// called: that name is the workspace folder and what status reports.
 func (r *AgentWorkstationReconciler) listRefSkills(ctx context.Context, aw *agentofficev1alpha1.AgentWorkstation) ([]ResolvedSkill, []string) {
 	seen := map[string]bool{}
 	resolved := make([]ResolvedSkill, 0, len(aw.Spec.SkillRefs))
@@ -448,18 +499,12 @@ func (r *AgentWorkstationReconciler) listRefSkills(ctx context.Context, aw *agen
 			continue
 		}
 		seen[ref.Name] = true
-		var skill agentofficev1alpha1.Skill
-		found := false
-		for _, ns := range []string{aw.Namespace, platformCatalogNamespace} {
-			if err := r.Get(ctx, types.NamespacedName{Namespace: ns, Name: ref.Name}, &skill); err == nil {
-				found = true
-				break
-			}
-		}
-		if !found {
+		found, ok := r.findRefSkill(ctx, aw, ref)
+		if !ok {
 			unresolved = append(unresolved, ref.Name+" (no such Skill in "+aw.Namespace+" or "+platformCatalogNamespace+")")
 			continue
 		}
+		skill := *found
 		if ref.Version != "" && skill.Spec.Version != ref.Version {
 			unresolved = append(unresolved, fmt.Sprintf("%s (pinned %s, catalog has %s)", ref.Name, ref.Version, skill.Spec.Version))
 			continue
@@ -469,6 +514,7 @@ func (r *AgentWorkstationReconciler) listRefSkills(ctx context.Context, aw *agen
 			unresolved = append(unresolved, fmt.Sprintf("%s (content: %v)", ref.Name, err))
 			continue
 		}
+		skill.Name = ref.Name
 		resolved = append(resolved, ResolvedSkill{
 			Skill:    skill,
 			Version:  skill.Spec.Version,
