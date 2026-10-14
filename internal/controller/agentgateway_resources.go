@@ -474,6 +474,19 @@ func gatewayVolumes(gw *agentofficev1alpha1.AgentGateway, dshmSize resource.Quan
 	if skillsImg == "" {
 		skillsImg = defaultSkillsImage()
 	}
+	if gw.Spec.RuntimeClassName != "" {
+		// A sandboxed runtime (kata) runs the container inside a VM and
+		// shares nothing the node mounted on the container's behalf; an
+		// image volume there fails at container create (found 14 October
+		// 2026, ENOENT). The catalog is copied into an empty volume by the
+		// skillsCatalogCopyContainer init container instead: same pinned
+		// image, same content, one copy at pod start.
+		vols = append(vols, corev1.Volume{
+			Name:         skillsCatalogVolName,
+			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+		})
+		return vols
+	}
 	vols = append(vols, corev1.Volume{
 		Name: skillsCatalogVolName,
 		VolumeSource: corev1.VolumeSource{
@@ -484,6 +497,22 @@ func gatewayVolumes(gw *agentofficev1alpha1.AgentGateway, dshmSize resource.Quan
 		},
 	})
 	return vols
+}
+
+// skillsCatalogCopyContainer is the init container that fills the
+// catalog volume when the gateway runs on a RuntimeClass: it runs the
+// skills image itself (ubi-minimal based, so it has a shell) and copies
+// /skills into the volume the gateway reads at skillsCatalogMountPath.
+func skillsCatalogCopyContainer(skillsImg string) corev1.Container {
+	return corev1.Container{
+		Name:    "copy-skills-catalog",
+		Image:   skillsImg,
+		Command: []string{"/bin/sh", "-ec", "cp -a /skills " + skillsCatalogMountPath + "/ && ls " + skillsCatalogSkillsDir + " | wc -l"},
+		VolumeMounts: []corev1.VolumeMount{{
+			Name:      skillsCatalogVolName,
+			MountPath: skillsCatalogMountPath,
+		}},
+	}
 }
 
 // gatewayLabels stamps a uniform set on every owned resource.
@@ -821,6 +850,15 @@ func (r *AgentGatewayReconciler) reconcileGatewayDeployment(ctx context.Context,
 		}
 		if gw.Spec.Resources != nil {
 			dep.Spec.Template.Spec.Containers[0].Resources = *gw.Spec.Resources
+		}
+		if gw.Spec.RuntimeClassName != "" {
+			skillsImg := gw.Spec.SkillsImage
+			if skillsImg == "" {
+				skillsImg = defaultSkillsImage()
+			}
+			dep.Spec.Template.Spec.InitContainers = append(
+				[]corev1.Container{skillsCatalogCopyContainer(skillsImg)},
+				dep.Spec.Template.Spec.InitContainers...)
 		}
 		return controllerutil.SetControllerReference(gw, dep, r.Scheme)
 	})
