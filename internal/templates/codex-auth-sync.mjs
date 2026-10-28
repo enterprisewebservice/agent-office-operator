@@ -4,7 +4,7 @@
 // which is what guarantees `node:sqlite` matches the runtime that owns
 // the stores).
 //
-// Three jobs, every tick:
+// Four jobs, every tick:
 //
 //  1. Mirror /var/lib/codex-auth/auth.json (the Secret projection the
 //     kubelet keeps fresh as ESO / the Dev Hub re-auth flow updates it)
@@ -41,6 +41,17 @@
 //     an agent store lacks a usable openai OAuth profile, or auth.json
 //     carries a strictly newer token, upsert store + state from
 //     auth.json.
+//
+//  4. Sibling pass (v1.7.85): agents of one gateway share its pod, and
+//     the first of them to refresh rotates the single-use Codex refresh
+//     token, which strands every sibling still holding the old one
+//     (research-gateway, 2026-10-28: five agents seeded from one sign-in;
+//     the seed pass cannot help, a refresh inside the pod never updates
+//     the Secret). So whenever one agent holds a strictly NEWER token
+//     than a sibling for the same account (profile id), copy it into the
+//     sibling — a store with no usable openai profile gets the freshest
+//     one. Pod-local: no Kubernetes call, no new permission; keeping the
+//     gateway's Secret current is the Dev Hub backend's job.
 //
 // Invariants:
 //  - A store is created only for an agent named in agents.list (the
@@ -488,6 +499,70 @@ function seedAgent(dbPath, pid, profile) {
   }
 }
 
+// fingerprint names a token without exposing it (sha256[:12]) — the
+// same lineage id the Dev Hub card's census shows.
+const fingerprint = (token) => crypto.createHash("sha256").update(String(token)).digest("hex").slice(0, 12);
+
+// readOpenAIProfiles returns {pid: profile} for one store's usable openai
+// OAuth profiles (access + refresh present), read-only.
+function readOpenAIProfiles(dbPath) {
+  const db = new DatabaseSync(dbPath, { readOnly: true });
+  try {
+    db.exec("PRAGMA busy_timeout = 5000");
+    const row = db.prepare("SELECT store_json FROM auth_profile_store WHERE store_key='primary'").get();
+    const out = {};
+    for (const [pid, p] of Object.entries(row ? JSON.parse(row.store_json).profiles ?? {} : {})) {
+      if (p && p.provider === "openai" && p.type === "oauth" && p.access && p.refresh) out[pid] = p;
+    }
+    return out;
+  } finally {
+    db.close();
+  }
+}
+
+function siblingPass() {
+  let ids = [];
+  try {
+    ids = fs.readdirSync(AGENTS_DIR);
+  } catch {
+    return; // workspace not initialized yet
+  }
+  const held = {}; // agent id -> {pid: profile}
+  const freshest = {}; // pid -> {id, profile}
+  let overall = null; // {id, pid, profile}
+  for (const id of ids) {
+    const dbPath = agentStorePath(id);
+    if (!fs.existsSync(dbPath)) continue;
+    try {
+      held[id] = readOpenAIProfiles(dbPath);
+    } catch (err) {
+      log(`sibling read ${id} failed: ${err?.message ?? err}`);
+      continue;
+    }
+    for (const [pid, p] of Object.entries(held[id])) {
+      const exp = Number(p.expires) || 0;
+      if (!freshest[pid] || exp > (Number(freshest[pid].profile.expires) || 0)) freshest[pid] = { id, profile: p };
+      if (!overall || exp > (Number(overall.profile.expires) || 0)) overall = { id, pid, profile: p };
+    }
+  }
+  for (const [id, profiles] of Object.entries(held)) {
+    const pids = Object.keys(profiles);
+    const targets = pids.length ? pids.map((pid) => ({ pid, from: freshest[pid] })) : overall ? [{ pid: overall.pid, from: overall }] : [];
+    for (const { pid, from } of targets) {
+      if (!from || from.id === id) continue;
+      const mine = Number(profiles[pid]?.expires) || 0;
+      if ((Number(from.profile.expires) || 0) <= mine) continue;
+      try {
+        if (seedAgent(agentStorePath(id), pid, from.profile)) {
+          log(`sibling ${id} <- ${from.id}'s newer token for ${pid} (lineage ${fingerprint(from.profile.refresh)}, expires ${new Date(Number(from.profile.expires)).toISOString()})`);
+        }
+      } catch (err) {
+        log(`sibling seed ${id} failed: ${err?.message ?? err}`);
+      }
+    }
+  }
+}
+
 function seedPass() {
   const parsed = profileFromAuthJSON();
   if (!parsed) return;
@@ -531,6 +606,11 @@ async function tick() {
       seedPass();
     } catch (err) {
       log(`seed pass failed: ${err?.message ?? err}`);
+    }
+    try {
+      siblingPass();
+    } catch (err) {
+      log(`sibling pass failed: ${err?.message ?? err}`);
     }
   } finally {
     ticking = false;

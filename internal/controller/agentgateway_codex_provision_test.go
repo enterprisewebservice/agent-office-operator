@@ -317,9 +317,15 @@ func TestCodexAuthSyncProvisionsListedAgentsViaRuntimeInitializer(t *testing.T) 
 		if len(d.Meta) != 1 || d.Meta[0]["agent_id"] != id || d.Meta[0]["app_version"] != "stub-sdk:"+id+":"+f.storePath(id) {
 			t.Errorf("%s: schema_meta not written by the runtime initializer with the agent's id and path: %v", id, d.Meta)
 		}
+		// Seeded from auth.json in this tick, then (v1.7.85 sibling pass)
+		// moved on to kept-fresh's newer token for the same account: a new
+		// hire joins the pod's freshest lineage, not the Secret's older one.
 		p := f.seededProfile(t, d, id)
-		if p["refresh"] != "rt-from-secret" || p["provider"] != "openai" || p["type"] != "oauth" || p["expires"] != float64(f.expiresMs) || p["chatgptPlanType"] != "pro" || p["accountId"] != "acct-1" {
+		if p["refresh"] != "rt-runtime-refreshed" || p["provider"] != "openai" || p["type"] != "oauth" || p["expires"] != float64(f.expiresMs+3600_000) {
 			t.Errorf("%s: seeded profile = %v", id, p)
+		}
+		if !strings.Contains(out, "sibling "+id+" <- kept-fresh's newer token for "+f.pid) {
+			t.Errorf("%s did not follow kept-fresh's newer token:\n%s", id, out)
 		}
 		order, _ := d.State["order"].(map[string]interface{})
 		lastGood, _ := d.State["lastGood"].(map[string]interface{})
@@ -328,8 +334,10 @@ func TestCodexAuthSyncProvisionsListedAgentsViaRuntimeInitializer(t *testing.T) 
 		}
 	}
 
-	if strings.Contains(out, "kept-fresh") {
-		t.Errorf("kept-fresh must be neither provisioned nor re-seeded:\n%s", out)
+	for _, touched := range []string{"provisioned agent store for kept-fresh", "seeded kept-fresh", "sibling kept-fresh <-"} {
+		if strings.Contains(out, touched) {
+			t.Errorf("kept-fresh must be neither provisioned nor re-seeded (%q):\n%s", touched, out)
+		}
 	}
 	d := f.dump(t, "kept-fresh")
 	if d.Meta[0]["app_version"] != nil {
@@ -448,5 +456,64 @@ func TestCodexAuthSyncLeavesUnreadableStoreAlone(t *testing.T) {
 	got, _ := os.ReadFile(f.storePath("garbled"))
 	if !strings.HasPrefix(string(got), "this is not a sqlite file") {
 		t.Errorf("unreadable store was rewritten: %q", got)
+	}
+}
+
+// The sibling pass (v1.7.85): one agent's own refresh must reach every
+// sibling in the pod, or the first refresh strands the rest — a Codex
+// refresh token is single-use (research-gateway, 2026-10-28: five agents
+// seeded from one sign-in, all dead but the one that refreshed). It never
+// crosses accounts and never logs token material.
+func TestCodexAuthSyncSiblingsFollowTheFreshestRefresh(t *testing.T) {
+	f := newCodexSyncFixture(t, []string{"agent-a", "agent-b", "agent-c", "other-account"})
+	profile := func(email, refresh string, expiresMs int64) map[string]interface{} {
+		return map[string]interface{}{"type": "oauth", "provider": "openai", "email": email,
+			"access": "at-" + refresh, "refresh": refresh, "accountId": "acct-1", "expires": expiresMs}
+	}
+	state := func(pid string) map[string]interface{} {
+		return map[string]interface{}{"version": 1, "order": map[string]interface{}{"openai": []string{pid}}}
+	}
+	refreshed := f.expiresMs + int64(72*time.Hour/time.Millisecond)
+	otherPid := "openai:other@example.test"
+	// agent-a refreshed on its own: newer than the Secret's token.
+	f.seedExistingStore(t, "agent-a", map[string]interface{}{"version": 1, "profiles": map[string]interface{}{
+		f.pid: profile("hire@example.test", "rt-a-refreshed", refreshed)}}, state(f.pid))
+	// agent-b still holds the token agent-a's refresh just rotated away.
+	f.seedExistingStore(t, "agent-b", map[string]interface{}{"version": 1, "profiles": map[string]interface{}{
+		f.pid: profile("hire@example.test", "rt-from-secret", f.expiresMs)}}, state(f.pid))
+	// agent-c has no usable openai profile at all.
+	f.seedExistingStore(t, "agent-c", map[string]interface{}{"version": 1, "profiles": map[string]interface{}{}},
+		map[string]interface{}{"version": 1})
+	// another ChatGPT account in the same pod must keep its own token.
+	f.seedExistingStore(t, "other-account", map[string]interface{}{"version": 1, "profiles": map[string]interface{}{
+		otherPid: profile("other@example.test", "rt-other", f.expiresMs+int64(time.Hour/time.Millisecond))}}, state(otherPid))
+
+	out := f.runOnce(t, nil)
+
+	for _, id := range []string{"agent-a", "agent-b", "agent-c"} {
+		p := f.seededProfile(t, f.dump(t, id), id)
+		if p["refresh"] != "rt-a-refreshed" || int64(p["expires"].(float64)) != refreshed {
+			t.Errorf("%s: want agent-a's refreshed token (expires %d), got refresh=%v expires=%v", id, refreshed, p["refresh"], p["expires"])
+		}
+	}
+	other, _ := f.dump(t, "other-account").Store["profiles"].(map[string]interface{})
+	if _, crossed := other[f.pid]; crossed {
+		t.Errorf("other-account received hire@'s token: %v", other)
+	}
+	if p, _ := other[otherPid].(map[string]interface{}); p == nil || p["refresh"] != "rt-other" {
+		t.Errorf("other-account lost its own token: %v", other)
+	}
+	for _, secret := range []string{"rt-a-refreshed", "rt-from-secret", "rt-other", "at-rt-"} {
+		if strings.Contains(out, secret) {
+			t.Errorf("token material %q in the sidecar log:\n%s", secret, out)
+		}
+	}
+	if !strings.Contains(out, "sibling agent-b <- agent-a's newer token") || !strings.Contains(out, "sibling agent-c <- agent-a's newer token") {
+		t.Errorf("sidecar log does not report the sibling copies:\n%s", out)
+	}
+
+	// A second tick finds nothing left to copy.
+	if again := f.runOnce(t, nil); strings.Contains(again, "sibling ") {
+		t.Errorf("second tick copied again:\n%s", again)
 	}
 }
