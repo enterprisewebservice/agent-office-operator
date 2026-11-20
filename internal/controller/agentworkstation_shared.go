@@ -157,10 +157,6 @@ func (r *AgentWorkstationReconciler) reconcileSharedFull(ctx context.Context, aw
 			"emoji": aw.Spec.Emoji,
 		}
 	}
-	agentEntryJSON, err := json.Marshal(agentEntry)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("marshal agent entry: %w", err)
-	}
 
 	// 4. Seed per-agent workspace files. Always overwrite on every
 	//    reconcile so AW spec edits (system-prompt tweaks, emoji
@@ -448,133 +444,32 @@ console.log("SEEDED dir=" + dir +
 	if aw.Spec.Tools != nil {
 		declaredTools = append(declaredTools, aw.Spec.Tools.Allow...)
 	}
-	declaredToolsJSON, err := json.Marshal(declaredTools)
+	// spec.tools.restrictTo (v1.7.86) IS the restriction: an enforced
+	// list rendered onto this agent's own roster entry. The object is
+	// removed again only when the operator rendered it earlier, which the
+	// ToolsRestricted condition remembers; a tools block set by hand on
+	// the gateway is left alone when the field was never set.
+	var restrictTo []string
+	if aw.Spec.Tools != nil {
+		restrictTo = aw.Spec.Tools.RestrictTo
+	}
+	renderedBefore := meta.IsStatusConditionTrue(aw.Status.Conditions, toolsRestrictedCondition)
+
+	mergeParams, err := json.Marshal(agentMergeParams{
+		AgentEntry:          agentEntry,
+		Profile:             profile,
+		ChannelID:           parseDiscordChannelID(awDiscordURL(aw)),
+		AgentID:             agentID,
+		DeclaredTools:       declaredTools,
+		SearchProvider:      searchProviderFor(aw),
+		RestrictTo:          restrictTo,
+		RemoveRenderedTools: len(restrictTo) == 0 && renderedBefore,
+	})
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("marshal declared tools: %w", err)
+		return ctrl.Result{}, fmt.Errorf("marshal agent merge params: %w", err)
 	}
 
-	mergeScript := fmt.Sprintf(`
-const fs = require("fs");
-const path = "/home/node/.openclaw/openclaw.json";
-const agentEntry = %[1]s;
-const profile = %[2]q;
-const channelId = %[3]q;
-const agentId = %[4]q;
-const declaredTools = %[5]s;
-const searchProvider = %[6]q;
-
-const raw = fs.readFileSync(path, "utf8");
-const cfg = JSON.parse(raw);
-const before = JSON.stringify(cfg);
-
-// agents.list — merge by id
-cfg.agents = cfg.agents || {};
-const list = Array.isArray(cfg.agents.list) ? cfg.agents.list : [];
-const existing = list.findIndex(a => a && a.id === agentEntry.id);
-if (existing >= 0) list[existing] = { ...list[existing], ...agentEntry };
-else list.push(agentEntry);
-cfg.agents.list = list;
-
-// nodeHost.browserProxy — enable + add profile (de-dup)
-cfg.nodeHost = cfg.nodeHost || {};
-cfg.nodeHost.browserProxy = cfg.nodeHost.browserProxy || {};
-cfg.nodeHost.browserProxy.enabled = true;
-const allow = Array.isArray(cfg.nodeHost.browserProxy.allowProfiles) ? cfg.nodeHost.browserProxy.allowProfiles : [];
-if (!allow.includes(profile)) allow.push(profile);
-cfg.nodeHost.browserProxy.allowProfiles = allow;
-
-// web_search needs a PROVIDER, and declaring the tool never supplied
-// one. spec.tools.allow was read in exactly one place — to write a
-// line of documentation into WIKI.md — so an agent could list
-// web_search, look correctly configured, and get "web_search is
-// disabled or no provider is available" on every single call. The
-// nl2sql newsroom ran that way for 38 hours: four cron schedules
-// firing on time, every sweep reporting the provider missing, zero
-// articles published.
-//
-// duckduckgo is bundled and needs no API key — it is what the working
-// research gateway uses. An existing provider is never overwritten, so
-// a deliberate Brave or Perplexity choice survives, and the plugin
-// entry is created only when absent. Idempotent either way.
-// Tools an agent declares that are NOT in the runtime's default
-// profile have to be added additively. The default profile is
-// "coding", which excludes group:ui — so browser and canvas are
-// absent unless asked for, which is why the newsroom agents could be
-// paired to a browser-capable node host and still answer
-// BROWSER_TOOL_MISSING. alsoAllow adds without restricting: a plain
-// allow list would strip the newsroom__* MCP tools these agents need.
-// The runtime rejects allow and alsoAllow in the same scope.
-const additive = declaredTools.filter(t => ["browser", "canvas", "screen", "terminal"].includes(t));
-if (additive.length) {
-  cfg.tools = cfg.tools || {};
-  delete cfg.tools.allow;
-  const also = Array.isArray(cfg.tools.alsoAllow) ? cfg.tools.alsoAllow : [];
-  for (const t of additive) if (!also.includes(t)) also.push(t);
-  cfg.tools.alsoAllow = also;
-}
-
-if (declaredTools.includes("web_search")) {
-  cfg.tools = cfg.tools || {};
-  cfg.tools.web = cfg.tools.web || {};
-  cfg.tools.web.fetch = cfg.tools.web.fetch || {};
-  cfg.tools.web.search = cfg.tools.web.search || {};
-  if (!cfg.tools.web.search.provider) cfg.tools.web.search.provider = searchProvider;
-  const prov = cfg.tools.web.search.provider;
-  cfg.plugins = cfg.plugins || {};
-  cfg.plugins.entries = cfg.plugins.entries || {};
-  if (prov && !cfg.plugins.entries[prov]) cfg.plugins.entries[prov] = { enabled: true };
-}
-
-// bindings — strip stale-for-this-agent (any rule keyed on this
-// agent gets replaced by the one fresh write below), strip wide
-// catch-alls (transport-only with no peer/guild/team — they
-// shadow specific routes), then re-add a single peer-specific
-// entry if we have a real channel id from the AW spec.
-function isWideCatchAll(b) {
-  if (!b || !b.match) return true;
-  const m = b.match;
-  const hasPeer = m.peer && m.peer.id;
-  const hasGuild = m.guildId;
-  const hasTeam = m.teamId;
-  const accountWild = !m.accountId || m.accountId === "*";
-  return !hasPeer && !hasGuild && !hasTeam && accountWild;
-}
-let bindings = Array.isArray(cfg.bindings) ? cfg.bindings : [];
-bindings = bindings.filter(b => {
-  if (!b || !b.match) return false;
-  if (b.agentId === agentId) return false;     // this agent's old rule(s) — re-added fresh below
-  if (isWideCatchAll(b)) return false;         // wide catch-alls shadow specifics
-  return true;
-});
-if (channelId) {
-  bindings.push({
-    agentId,
-    match: {
-      channel: "discord",
-      accountId: "default",
-      peer: { kind: "channel", id: channelId },
-    },
-  });
-}
-// Stable sort by (agentId, peer.id) for deterministic file content.
-bindings.sort((a,b) => {
-  const aKey = (a.agentId || "") + "\t" + ((a.match && a.match.peer && a.match.peer.id) || "");
-  const bKey = (b.agentId || "") + "\t" + ((b.match && b.match.peer && b.match.peer.id) || "");
-  return aKey.localeCompare(bKey);
-});
-cfg.bindings = bindings;
-
-const after = JSON.stringify(cfg);
-if (after === before) {
-  console.log("NO_CHANGE agent=" + agentId + " profile=" + profile + " channel=" + (channelId || "(none)"));
-} else {
-  fs.writeFileSync(path, JSON.stringify(cfg, null, 2));
-  console.log("MERGED agent=" + agentId + " profile=" + profile + " channel=" + (channelId || "(none)") + " bindings=" + bindings.length);
-}
-`, string(agentEntryJSON), profile, parseDiscordChannelID(awDiscordURL(aw)), agentID,
-		string(declaredToolsJSON), searchProviderFor(aw))
-
-	mergeOut, err := r.execInPod(ctx, gwPod, []string{"node", "-e", mergeScript})
+	mergeOut, err := r.execInPod(ctx, gwPod, []string{"node", "-e", rosterHelpersJS + agentMergeScript, string(mergeParams)})
 	if err != nil {
 		log.Info("merge openclaw.json failed; will retry next reconcile", "err", err, "stdout", mergeOut)
 		aw.Status.Phase = agentofficev1alpha1.AgentWorkstationPhaseCreating
@@ -583,6 +478,19 @@ if (after === before) {
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 	log.Info("merged agent into gateway config", "out", strings.TrimSpace(mergeOut))
+
+	// Remember whether the operator rendered an enforced tool list, so a
+	// later removal of spec.tools.restrictTo deletes exactly what the
+	// operator wrote and nothing a person set by hand. Persisted with the
+	// status update at the end of this reconcile.
+	if len(restrictTo) > 0 {
+		meta.SetStatusCondition(&aw.Status.Conditions, metav1.Condition{
+			Type: toolsRestrictedCondition, Status: metav1.ConditionTrue, Reason: "Rendered",
+			Message: fmt.Sprintf("agent is limited to %d tool(s) from spec.tools.restrictTo", len(restrictTo)),
+		})
+	} else if renderedBefore {
+		meta.RemoveStatusCondition(&aw.Status.Conditions, toolsRestrictedCondition)
+	}
 
 	// 5b. Best-effort post-merge validate (advisory). The merge above
 	// only writes schema-valid JSON we constructed in Go, and the
@@ -700,29 +608,8 @@ func (r *AgentWorkstationReconciler) deregisterSharedAgent(ctx context.Context, 
 	// Read → mutate-in-memory → write-only-if-changed (same loop-safety
 	// contract as the merge: the gateway watches this file). Then remove
 	// the agent's workspace dir.
-	script := fmt.Sprintf(`
-const fs = require("fs");
-const p = "/home/node/.openclaw/openclaw.json";
-const agentId = %[1]q;
-const profile = %[2]q;
-const cfg = JSON.parse(fs.readFileSync(p, "utf8"));
-const before = JSON.stringify(cfg);
-if (cfg.agents && Array.isArray(cfg.agents.list))
-  cfg.agents.list = cfg.agents.list.filter(a => !a || a.id !== agentId);
-if (cfg.nodeHost && cfg.nodeHost.browserProxy && Array.isArray(cfg.nodeHost.browserProxy.allowProfiles))
-  cfg.nodeHost.browserProxy.allowProfiles = cfg.nodeHost.browserProxy.allowProfiles.filter(x => x !== profile);
-if (Array.isArray(cfg.bindings))
-  cfg.bindings = cfg.bindings.filter(b => !b || b.agentId !== agentId);
-if (JSON.stringify(cfg) !== before) {
-  fs.writeFileSync(p, JSON.stringify(cfg, null, 2));
-  console.log("de-registered " + agentId);
-} else {
-  console.log("noop (already absent)");
-}
-try { fs.rmSync("/home/node/.openclaw/workspaces/" + agentId, { recursive: true, force: true }); } catch (e) {}
-`, agentID, profile)
 
-	if _, err := r.execInPod(ctx, gwPod, []string{"node", "-e", script}); err != nil {
+	if _, err := r.execInPod(ctx, gwPod, []string{"node", "-e", rosterHelpersJS + agentDeregisterScript, agentID, profile}); err != nil {
 		return fmt.Errorf("de-register exec on gateway pod %s: %w", gwPod.Name, err)
 	}
 	return nil

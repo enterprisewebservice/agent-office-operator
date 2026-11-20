@@ -640,6 +640,20 @@ func (r *AgentGatewayReconciler) reconcileGatewayConfigMap(ctx context.Context, 
 	return openclawJSON, err
 }
 
+// preferWorkerNodes is a scheduling preference for nodes that are not
+// control-plane nodes. See its one use for why.
+func preferWorkerNodes() *corev1.Affinity {
+	return &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{
+		PreferredDuringSchedulingIgnoredDuringExecution: []corev1.PreferredSchedulingTerm{{
+			Weight: 100,
+			Preference: corev1.NodeSelectorTerm{MatchExpressions: []corev1.NodeSelectorRequirement{
+				{Key: "node-role.kubernetes.io/control-plane", Operator: corev1.NodeSelectorOpDoesNotExist},
+				{Key: "node-role.kubernetes.io/master", Operator: corev1.NodeSelectorOpDoesNotExist},
+			}},
+		}},
+	}}
+}
+
 // reconcileGatewayPVC sizes the workspace bigger than the
 // AgentWorkstation default — many openclaw agents share this PVC.
 func (r *AgentGatewayReconciler) reconcileGatewayPVC(ctx context.Context, gw *agentofficev1alpha1.AgentGateway) error {
@@ -663,6 +677,13 @@ func (r *AgentGatewayReconciler) reconcileGatewayPVC(ctx context.Context, gw *ag
 	}
 	if !apierrors.IsNotFound(err) {
 		return err
+	}
+	if gw.Spec.Suspend {
+		// A suspended gateway whose volume is gone is mid-restore: the
+		// claim was deleted to be created again from a snapshot under the
+		// same name. Creating an empty one here would win that race and
+		// the gateway would come back with no state.
+		return nil
 	}
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
@@ -704,6 +725,12 @@ func (r *AgentGatewayReconciler) reconcileGatewayDeployment(ctx context.Context,
 	}
 
 	replicas := int32(1)
+	if gw.Spec.Suspend {
+		// spec.suspend (v1.7.86): keep everything, run nothing. Recreate
+		// strategy plus zero replicas means the OpenClaw process is really
+		// stopped, which a volume snapshot and a restore both need.
+		replicas = 0
+	}
 	dshmSize := resource.MustParse("1Gi")
 	labels := gatewayLabels(gw.Name)
 
@@ -811,6 +838,13 @@ func (r *AgentGatewayReconciler) reconcileGatewayDeployment(ctx context.Context,
 				// spec.runtimeClassName (v1.7.83): "kata" moves the agent and
 				// everything it executes into a lightweight VM.
 				RuntimeClassName: optionalRuntimeClass(gw.Spec.RuntimeClassName),
+				// Prefer worker nodes (v1.7.86). On a cluster whose
+				// control-plane nodes are schedulable, a gateway that lands
+				// on one pulls its image (about 0.7 GB compressed from
+				// OpenClaw 2026.10) onto the disk etcd writes to. A
+				// preference, not a requirement: a compact or single-node
+				// cluster has nothing but control-plane nodes.
+				Affinity: preferWorkerNodes(),
 				ImagePullSecrets: []corev1.LocalObjectReference{
 					{Name: "quay-pull-secret"},
 				},

@@ -114,6 +114,32 @@ type ToolsSpec struct {
 	// +optional
 	Allow []string `json:"allow,omitempty"`
 
+	// RestrictTo is an ENFORCED tool list: the agent is offered, and may
+	// call, exactly these tools and nothing else. Values are OpenClaw tool
+	// names passed through verbatim: built-ins (`read`), MCP tools as
+	// `<server>__<tool>` (`governed__runtab_release`), `*` wildcards
+	// allowed.
+	//
+	// It differs from Allow on purpose. Allow is a declaration of what the
+	// agent needs the gateway to have configured (browser, web_search) and
+	// is rendered additively, because a restrictive list built from it
+	// would strip every MCP tool it does not name. RestrictTo is the
+	// restriction: the operator renders it as the agent's own
+	// `tools: {allow: [...], fs: {workspaceOnly: true}}` in the gateway's
+	// roster and owns that whole object while the field is set. Without it
+	// an agent is offered every built-in tool of the runtime's default
+	// profile, shell and file tools included, plus every tool of every MCP
+	// server the gateway is wired to.
+	//
+	// Removing the field removes the rendered object again, but only one
+	// the operator rendered (status condition ToolsRestricted): a `tools`
+	// block set by hand on the gateway is never touched.
+	//
+	// Added in v1.7.86.
+	// +optional
+	// +kubebuilder:validation:MinItems=1
+	RestrictTo []string `json:"restrictTo,omitempty"`
+
 	// MCPServers declares Model Context Protocol servers this agent
 	// can call. Each entry becomes an `openclaw mcp set` invocation
 	// against the agent's gateway pod. Credentials referenced by an

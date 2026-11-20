@@ -276,11 +276,16 @@ if (added > 0) {
 // OAuth credential — gpt-5.6-sol in particular does NOT exist on the
 // metered API endpoint, so declaring it under an api-key provider
 // yields a silent lane rather than an error.
+//
+// v1.7.86: gpt-6.2-sol first (what OpenAI lists as current for everyday
+// work on ChatGPT sign-in, proven on OpenClaw 2026.7.1 on 20 Nov 2026) and
+// gpt-5.6-sol as the way back. gpt-5.6, gpt-5.5 and gpt-5.4 are gone:
+// OpenAI retired the last two from ChatGPT sign-in, and a model id OpenAI
+// does not know puts the whole provider in cooldown for every agent on the
+// gateway, so a retired id in this list is a trap, not a spare.
 var defaultSubscriptionModels = []agentofficev1alpha1.ModelCatalogEntry{
+	{ID: "gpt-6.2-sol", Name: "GPT-6.2 Sol"},
 	{ID: "gpt-5.6-sol", Name: "GPT-5.6 Sol"},
-	{ID: "gpt-5.6", Name: "GPT-5.6"},
-	{ID: "gpt-5.5", Name: "GPT-5.5"},
-	{ID: "gpt-5.4", Name: "GPT-5.4"},
 }
 
 // defaultAPIKeyModels is the catalog advertised on the metered API
@@ -436,6 +441,16 @@ type desiredOpenAIConfig struct {
 	// openclaw.json the seed-only init will never rewrite.
 	GatewayHTTP map[string]interface{} `json:"gatewayHTTP"`
 
+	// BrowserNode pins browser routing to the gateway's node host
+	// (gateway.nodes.browser.node = spec.nodeHostRef.name, which is the
+	// display name the node host connects with). From OpenClaw 2026.9.5 a
+	// browser action that names no target runs in the browser of the
+	// machine the gateway is on, here a headless one inside the pod that
+	// most sites block, unless a node is pinned. Agents that pass
+	// `target: "node"` reach the node either way; the pin covers the ones
+	// that do not. Empty leaves the key alone. Valid on 2026.7.x as well.
+	BrowserNode string `json:"browserNode,omitempty"`
+
 	// ProfileMode is the auth mode ("oauth" or "api_key") the current
 	// spec routes through. The script uses it to extend stickiness to
 	// pins whose profile entry the operator itself wrote earlier: a
@@ -509,6 +524,15 @@ func (r *AgentGatewayReconciler) reconcileModelProvidersAndAuth(ctx context.Cont
 		return false, err
 	}
 
+	// Which OpenClaw is this pod? Read from the image itself; the answer
+	// decides how sign-in is handled below and is shown in status.
+	ocVersion := resolveOpenClawVersion(pod, func(cmd []string) (string, error) {
+		return r.execInGatewayPod(ctx, pod, cmd)
+	})
+	if !ocVersion.IsZero() {
+		gw.Status.OpenClawVersion = ocVersion.Raw
+	}
+
 	mode := resolveModelAuthMode(gw)
 
 	// A gateway that declares NO openai credential at all — no
@@ -551,6 +575,16 @@ func (r *AgentGatewayReconciler) reconcileModelProvidersAndAuth(ctx context.Cont
 	default: // subscription
 		provider["baseUrl"] = "https://chatgpt.com/backend-api"
 		provider["api"] = "openai-chatgpt-responses"
+		// Pin OpenClaw's own agent runtime (v1.7.86). On this exact route
+		// (the official ChatGPT endpoint with openai-chatgpt-responses)
+		// newer OpenClaw releases may hand the turn to the bundled Codex
+		// harness instead. That harness replaces OpenClaw's read, write,
+		// edit, apply_patch, exec and process tools with its own, takes
+		// over the MCP servers, and is outside an agent's tools.allow, so
+		// a gateway would change behaviour, and lose its tool limits, by
+		// changing image. The key is valid on 2026.7.x too, where it only
+		// states the default.
+		provider["agentRuntime"] = map[string]interface{}{"id": "openclaw"}
 		for _, m := range catalog {
 			models = append(models, map[string]interface{}{
 				"id": m.ID, "name": defaultIfEmpty(m.Name, m.ID), "api": "openai-chatgpt-responses",
@@ -586,6 +620,9 @@ func (r *AgentGatewayReconciler) reconcileModelProvidersAndAuth(ctx context.Cont
 			},
 		}
 	}
+	if gw.Spec.NodeHostRef != nil {
+		desired.BrowserNode = gw.Spec.NodeHostRef.Name
+	}
 
 	// Pin the credential. Explicit spec.modelAuth.order wins outright
 	// (and is deliberately NOT sticky — the author asked for exactly
@@ -600,7 +637,14 @@ func (r *AgentGatewayReconciler) reconcileModelProvidersAndAuth(ctx context.Cont
 		if gw.Spec.ModelAuth != nil {
 			profileID = gw.Spec.ModelAuth.ProfileID
 		}
-		if profileID == "" && !keyless {
+		// From OpenClaw 2026.9.5 `models auth list` is an offline command:
+		// the gateway process owns its sign-in store and refuses the CLI
+		// while it runs. So there is nothing to discover against. The pin
+		// an earlier pass (or the 2026.7.x operator) wrote into auth.order
+		// stays as it is, and a gateway that has none runs unpinned: in
+		// subscription mode the provider block carries no API key, so the
+		// OAuth sign-in is the only credential there is to pick.
+		if profileID == "" && !keyless && !ocVersion.gatewayOwnsAuthStore() {
 			profileID, acceptable, err = r.discoverOpenAIAuthProfile(ctx, pod, mode)
 			if err != nil {
 				// In apiKey mode a stored profile is optional — the
@@ -779,6 +823,18 @@ if (desired.gatewayHTTP) {
 } else if (cfg.gateway.http !== undefined) {
   delete cfg.gateway.http;
   changed = true;
+}
+
+// gateway.nodes.browser.node: route untargeted browser actions to the
+// paired node host. Only the node name is owned here; a mode someone set
+// stays.
+if (desired.browserNode) {
+  cfg.gateway.nodes = cfg.gateway.nodes || {};
+  cfg.gateway.nodes.browser = cfg.gateway.nodes.browser || {};
+  if (cfg.gateway.nodes.browser.node !== desired.browserNode) {
+    cfg.gateway.nodes.browser.node = desired.browserNode;
+    changed = true;
+  }
 }
 
 if (changed) {
@@ -1018,6 +1074,13 @@ func (r *AgentGatewayReconciler) reconcileGatewayStatus(ctx context.Context, gw 
 	phase := agentofficev1alpha1.AgentGatewayPhasePending
 	message := "no Deployment yet"
 	switch {
+	case gw.Spec.Suspend && (depErr == nil || apierrors.IsNotFound(depErr)):
+		// Deliberately stopped. Pending, not a failure: nothing is being
+		// provisioned and nothing is wrong.
+		message = "suspended by spec.suspend: scaled to zero, volume and config kept"
+		if depErr == nil && dep.Status.Replicas > 0 {
+			message = fmt.Sprintf("suspending: waiting for %d pod(s) to stop", dep.Status.Replicas)
+		}
 	case depErr == nil && dep.Status.ReadyReplicas >= 1:
 		phase = agentofficev1alpha1.AgentGatewayPhaseReady
 		message = fmt.Sprintf("Deployment ready (%d/%d)", dep.Status.ReadyReplicas, dep.Status.Replicas)

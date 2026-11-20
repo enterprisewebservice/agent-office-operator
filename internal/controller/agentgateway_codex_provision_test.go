@@ -374,7 +374,7 @@ func TestCodexAuthSyncProvisionsWithEmbeddedSchemaWhenRuntimeSDKMissing(t *testi
 		"runtime sdk unavailable",
 		"provisioned agent store for new-hire via the embedded openclaw-2026.7.1 schema",
 		"seeded new-hire -> " + f.pid,
-		`agents.list id "Not.Normalized" is not a normalized agent id`,
+		`roster id "Not.Normalized" is not a normalized agent id`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("log lacks %q:\n%s", want, out)

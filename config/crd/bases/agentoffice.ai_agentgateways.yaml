@@ -445,6 +445,23 @@ spec:
                   new tag and re-seeds the agents. Empty ⇒ the operator's built-in
                   default.
                 type: string
+              suspend:
+                description: |-
+                  Suspend stops the gateway without deleting anything: the Deployment
+                  is scaled to zero and kept there, the volume, Service, Route, token
+                  and config stay, and a missing volume is NOT re-created while
+                  suspended. Agents on the gateway stay registered and report that
+                  they are waiting for the gateway pod.
+
+                  It exists for the two operations that need the OpenClaw process
+                  stopped: a consistent volume snapshot before an OpenClaw upgrade,
+                  and putting a volume back from a snapshot (delete the volume claim,
+                  create it again from the snapshot under the same name, then resume).
+                  Since OpenClaw 2026.9.5 the gateway process is the only writer its
+                  databases allow, so offline maintenance is the supported path.
+
+                  Added in v1.7.86.
+                type: boolean
             type: object
           status:
             description: AgentGatewayStatus reflects observed state.
@@ -525,6 +542,13 @@ spec:
                   NodeHostPaired reports whether the configured node-host has
                   successfully paired with the gateway.
                 type: boolean
+              openclawVersion:
+                description: |-
+                  OpenClawVersion is the OpenClaw version the running gateway pod
+                  reports from its own image (`/app/package.json`), for example
+                  "2026.10.33". The operator picks the config format and the sign-in
+                  handling from it. Empty until a pod has been Ready once.
+                type: string
               phase:
                 description: AgentGatewayPhase is the high-level lifecycle state.
                 enum:

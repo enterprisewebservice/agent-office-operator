@@ -2085,6 +2085,11 @@ func (in *ToolsSpec) DeepCopyInto(out *ToolsSpec) {
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
+	if in.RestrictTo != nil {
+		in, out := &in.RestrictTo, &out.RestrictTo
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	if in.MCPServers != nil {
 		in, out := &in.MCPServers, &out.MCPServers
 		*out = make([]MCPServerSpec, len(*in))

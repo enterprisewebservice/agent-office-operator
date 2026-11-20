@@ -88,8 +88,50 @@ const AGENTS_DIR = process.env.CODEX_AGENTS_DIR ?? "/home/node/.openclaw/agents"
 const CONFIG_PATH = process.env.CODEX_CONFIG_PATH ?? "/home/node/.openclaw/openclaw.json";
 const SDK_DIR = process.env.CODEX_OPENCLAW_SDK_DIR ?? "/app/dist/plugin-sdk";
 const TICK_MS = Number(process.env.CODEX_SYNC_TICK_MS ?? 30000);
+const PACKAGE_JSON = process.env.CODEX_OPENCLAW_PACKAGE_JSON ?? "/app/package.json";
 
 const log = (msg) => console.log(`codex-auth-sync: ${msg}`);
+
+// ---- which OpenClaw is this? ---------------------------------------------
+//
+// This sidecar runs on the gateway's own image, so /app/package.json is the
+// version of the runtime it shares a volume with.
+//
+// Up to 2026.9.4 every pass below is needed: the runtime imports nothing by
+// itself into an agent store that was created after sign-in.
+//
+// From 2026.9.5 the gateway process is the ONLY writer its databases allow
+// ("direct writes from another process while it is running are
+// unsupported"; its caches do not notice a foreign commit). It keeps one
+// shared sign-in, refreshes it itself, and leaves an inert marker
+// (`expires: 1`) in agent-local copies. The seed pass would read that marker
+// as "older than auth.json" and overwrite a live, rotated sign-in with the
+// Secret's stale copy; the sibling pass would copy tokens the runtime
+// deliberately fenced off; the provision pass would create stores with a
+// schema that version has moved past. On those versions this sidecar only
+// keeps ~/.codex/auth.json current and never opens SQLite. A NEW sign-in
+// from the Secret is imported while the gateway is stopped, by the
+// operator's start-up step.
+function runtimeVersion() {
+  if (process.env.CODEX_OPENCLAW_VERSION) return process.env.CODEX_OPENCLAW_VERSION; // tests
+  try {
+    return String(JSON.parse(fs.readFileSync(PACKAGE_JSON, "utf8")).version ?? "");
+  } catch {
+    return "";
+  }
+}
+function versionAtLeast(version, y, m, p) {
+  const mm = /^v?(\d+)\.(\d+)\.(\d+)/.exec(version);
+  if (!mm) return false; // unknown: behave as on 2026.7.x
+  const have = [Number(mm[1]), Number(mm[2]), Number(mm[3])];
+  const want = [y, m, p];
+  for (let i = 0; i < 3; i++) {
+    if (have[i] !== want[i]) return have[i] > want[i];
+  }
+  return true;
+}
+const RUNTIME_VERSION = runtimeVersion();
+const GATEWAY_OWNS_AUTH_STORE = versionAtLeast(RUNTIME_VERSION, 2026, 9, 5);
 
 const claims = (jwt) => {
   try {
@@ -324,13 +366,21 @@ function listedAgentIds() {
   } catch {
     return [];
   }
-  const list = Array.isArray(cfg?.agents?.list) ? cfg.agents.list : [];
+  // The roster is the array agents.list up to 2026.7.x and the keyed map
+  // agents.entries from 2026.8.1; read whichever the file has.
+  const entries = cfg?.agents?.entries;
+  const raw =
+    entries && typeof entries === "object" && !Array.isArray(entries)
+      ? Object.keys(entries)
+      : (Array.isArray(cfg?.agents?.list) ? cfg.agents.list : []).map((entry) =>
+          typeof entry?.id === "string" ? entry.id : "",
+        );
   const ids = [];
-  for (const entry of list) {
-    const id = typeof entry?.id === "string" ? entry.id.trim() : "";
+  for (const rawId of raw) {
+    const id = String(rawId).trim();
     if (!id || ids.includes(id)) continue;
     if (!AGENT_ID_RE.test(id)) {
-      log(`agents.list id ${JSON.stringify(id)} is not a normalized agent id; not provisioning it`);
+      log(`roster id ${JSON.stringify(id)} is not a normalized agent id; not provisioning it`);
       continue;
     }
     ids.push(id);
@@ -597,6 +647,8 @@ async function tick() {
     } catch (err) {
       log(`auth.json sync failed: ${err?.message ?? err}`);
     }
+    // The gateway owns its sign-in store from 2026.9.5: nothing below may run.
+    if (GATEWAY_OWNS_AUTH_STORE) return;
     try {
       await provisionPass();
     } catch (err) {
@@ -617,7 +669,12 @@ async function tick() {
   }
 }
 
-log(`up (tick=${TICK_MS / 1000}s, src=${SRC}, agents=${AGENTS_DIR}, config=${CONFIG_PATH})`);
+log(`up (tick=${TICK_MS / 1000}s, src=${SRC}, agents=${AGENTS_DIR}, config=${CONFIG_PATH}, openclaw=${RUNTIME_VERSION || "unknown"})`);
+if (GATEWAY_OWNS_AUTH_STORE) {
+  log(
+    `OpenClaw ${RUNTIME_VERSION} owns its sign-in store: mirroring auth.json only, no agent store is read or written`,
+  );
+}
 await tick();
 if (process.env.CODEX_SYNC_ONCE !== "1") {
   setInterval(tick, TICK_MS);

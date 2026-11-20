@@ -49,6 +49,23 @@ type AgentGatewaySpec struct {
 	// +optional
 	Image string `json:"image,omitempty"`
 
+	// Suspend stops the gateway without deleting anything: the Deployment
+	// is scaled to zero and kept there, the volume, Service, Route, token
+	// and config stay, and a missing volume is NOT re-created while
+	// suspended. Agents on the gateway stay registered and report that
+	// they are waiting for the gateway pod.
+	//
+	// It exists for the two operations that need the OpenClaw process
+	// stopped: a consistent volume snapshot before an OpenClaw upgrade,
+	// and putting a volume back from a snapshot (delete the volume claim,
+	// create it again from the snapshot under the same name, then resume).
+	// Since OpenClaw 2026.9.5 the gateway process is the only writer its
+	// databases allow, so offline maintenance is the supported path.
+	//
+	// Added in v1.7.86.
+	// +optional
+	Suspend bool `json:"suspend,omitempty"`
+
 	// RuntimeClassName names the Kubernetes RuntimeClass the gateway
 	// pod runs with (for example "kata", OpenShift sandboxed containers):
 	// the agent and everything it executes then run inside a lightweight
@@ -388,6 +405,13 @@ type AgentGatewayStatus struct {
 	// referencing this gateway via spec.runtime.shared.gatewayRef.
 	// +optional
 	AgentCount int32 `json:"agentCount,omitempty"`
+
+	// OpenClawVersion is the OpenClaw version the running gateway pod
+	// reports from its own image (`/app/package.json`), for example
+	// "2026.10.33". The operator picks the config format and the sign-in
+	// handling from it. Empty until a pod has been Ready once.
+	// +optional
+	OpenClawVersion string `json:"openclawVersion,omitempty"`
 
 	// Message is a human-readable detail for the current Phase.
 	// +optional
