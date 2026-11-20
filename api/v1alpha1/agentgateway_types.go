@@ -374,6 +374,16 @@ type HooksSpec struct {
 // Absent when spec.hooks is unset.
 const AgentGatewayConditionHooksReady = "HooksReady"
 
+// AgentGatewayConditionIngressProxiesTrusted reports what the operator
+// did about gateway.trustedProxies in the gateway's config. True
+// (Converged): the list names the cluster's ingress routers and loopback,
+// so in-cluster callers are treated as clients, which OpenClaw releases
+// that enforce proxy attribution require. False: RoutersNotDetermined
+// (the list was left as it is; the message says what was missing) or
+// RefusedByRuntime (the gateway's own config check refused the change,
+// nothing was written). Absent until a running gateway has been looked at.
+const AgentGatewayConditionIngressProxiesTrusted = "IngressProxiesTrusted"
+
 // AgentGatewayPhase is the high-level lifecycle state.
 //
 // +kubebuilder:validation:Enum=Pending;Provisioning;Ready;Error

@@ -508,14 +508,22 @@ console.log("SEEDED dir=" + dir +
 	//    This is what wires a PM Agent (or any AW) to the Kuadrant
 	//    MCP Gateway endpoint so it can call federated tools like
 	//    `github_list_issues` without ever seeing a credential.
+	//
+	//    A failure here is not fatal (the rest of the agent is up), but it
+	//    must not wait for the ordinary five-minute pass either: the usual
+	//    cause is that the gateway pod is restarting under us — a changed
+	//    envFromSecret rolls the Deployment — and the pod that comes back
+	//    reads the OLD server entry from the volume. Until v1.7.86 the
+	//    retry was the next ordinary pass, so for up to five minutes the
+	//    agent called its tool servers with the previous credential, and
+	//    had no governed tools at all once that credential was gone
+	//    (runtab-help, 2026-11-20 05:34 UTC: 3.5 minutes on the old key).
+	mcpPending := ""
 	if aw.Spec.Tools != nil && len(aw.Spec.Tools.MCPServers) > 0 {
 		if err := r.reconcileMCPServers(ctx, aw, &gw, gwPod); err != nil {
-			log.Info("mcp servers reconcile partial; will retry next loop",
-				"err", err)
-			// Non-fatal — the rest of the agent is still up. Surface
-			// in status so it's visible but stay Running.
-			aw.Status.Message = fmt.Sprintf("%s — MCP setup pending: %s",
-				aw.Status.Message, truncate(err.Error(), 120))
+			mcpPending = truncate(err.Error(), 120)
+			log.Info("mcp servers reconcile partial; retrying shortly",
+				"err", err, "retryAfter", mcpRetryInterval.String())
 		}
 	}
 
@@ -563,12 +571,42 @@ console.log("SEEDED dir=" + dir +
 		channelHint = fmt.Sprintf("Discord channel %s", channelID)
 	}
 	aw.Status.Phase = agentofficev1alpha1.AgentWorkstationPhaseRunning
-	aw.Status.Message = fmt.Sprintf("logical agent inside %s (profile=%s, %s)", gwRef, profile, channelHint)
+	aw.Status.Message = agentRunningMessage(gwRef, profile, channelHint, mcpPending)
 	aw.Status.GatewayEndpoint = gw.Status.GatewayEndpoint
 	if err := r.Status().Update(ctx, aw); err != nil {
 		return ctrl.Result{}, err
 	}
-	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+	return ctrl.Result{RequeueAfter: agentRequeueInterval(mcpPending != "")}, nil
+}
+
+const (
+	// agentReconcileInterval is the ordinary pass over a registered agent.
+	agentReconcileInterval = 5 * time.Minute
+	// mcpRetryInterval is how soon a pass that could not write the agent's
+	// tool servers runs again. Longer than a gateway container needs to
+	// die, shorter than anyone waits for a help desk to get its tools
+	// back; a pod that is still starting is requeued by the readiness
+	// check at the top of the reconcile.
+	mcpRetryInterval = 20 * time.Second
+)
+
+// agentRequeueInterval picks the delay before the next pass over an agent.
+func agentRequeueInterval(mcpPending bool) time.Duration {
+	if mcpPending {
+		return mcpRetryInterval
+	}
+	return agentReconcileInterval
+}
+
+// agentRunningMessage is status.message for a registered agent. A pending
+// tool-server write is appended so it is visible on the workstation (the
+// earlier code set it and then overwrote it a few lines later).
+func agentRunningMessage(gwRef, profile, channelHint, mcpPending string) string {
+	msg := fmt.Sprintf("logical agent inside %s (profile=%s, %s)", gwRef, profile, channelHint)
+	if mcpPending != "" {
+		msg += " — MCP setup pending: " + mcpPending
+	}
+	return msg
 }
 
 // deregisterSharedAgent removes a shared-runtime agent's entire

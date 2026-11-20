@@ -157,6 +157,13 @@ func (r *AgentGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
+	// 3a'. Settings the gateway applies by itself when its file changes,
+	//      so nothing is restarted here: which addresses count as reverse
+	//      proxies (the cluster's ingress routers, discovered), and the two
+	//      scheduled jobs a newer runtime would otherwise create on its own
+	//      (v1.7.87; agentgateway_ingress.go). Never fails the reconcile.
+	r.reconcileRuntimeDefaults(ctx, &gw)
+
 	// 3b. Record per-agent activity so the console shows an operations
 	//     view (who is working) rather than an inventory (who exists).
 	//     Best effort: a gateway mid-restart yields nothing this pass.

@@ -24,6 +24,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // These tests run the SHIPPED in-pod scripts with plain node against
@@ -535,5 +536,33 @@ func TestResolveOpenClawVersion_ReadsTheLastLine(t *testing.T) {
 	})
 	if v.String() != "2026.10.33" || !v.keyedRoster() {
 		t.Fatalf("got %v", v)
+	}
+}
+
+// --- retry after a failed tool-server write -------------------------------
+
+func TestAgentRequeueIntervalIsShortWhileToolServersArePending(t *testing.T) {
+	if got := agentRequeueInterval(false); got != agentReconcileInterval {
+		t.Fatalf("ordinary pass: got %s, want %s", got, agentReconcileInterval)
+	}
+	got := agentRequeueInterval(true)
+	if got != mcpRetryInterval {
+		t.Fatalf("pending tool servers: got %s, want %s", got, mcpRetryInterval)
+	}
+	// The point of the retry: a gateway that restarted under the write
+	// must not serve the previous credential until the next ordinary pass.
+	if got >= time.Minute || got >= agentReconcileInterval {
+		t.Fatalf("retry after a failed tool-server write is %s; it must be well under a minute", got)
+	}
+}
+
+func TestAgentRunningMessageKeepsThePendingToolServerNote(t *testing.T) {
+	plain := agentRunningMessage("runtab-help", "runtab-help", "no Discord binding", "")
+	if strings.Contains(plain, "pending") {
+		t.Fatalf("nothing is pending, yet the message says so: %q", plain)
+	}
+	pending := agentRunningMessage("runtab-help", "runtab-help", "no Discord binding", "compare mcp servers: container not found")
+	if !strings.HasPrefix(pending, plain) || !strings.Contains(pending, "MCP setup pending: compare mcp servers") {
+		t.Fatalf("the pending note was lost: %q", pending)
 	}
 }
